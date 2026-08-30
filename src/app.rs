@@ -1,12 +1,16 @@
 use crate::serial::scan_ports;
 use eframe::egui;
-use egui::Ui;
+use egui::WidgetType::ScrollBar;
+use egui::epaint::text::layout;
+use egui::{Label, Layout, Ui};
 use rfd::FileDialog;
 use serialport::SerialPort;
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
 use std::time::Duration;
+use std::{default, thread};
+
+const SCROLL_AREA_ID: &str = "receive_scroll";
 
 fn utf8_complete_prefix_len(bytes: &[u8]) -> usize {
     let len = bytes.len();
@@ -39,6 +43,77 @@ fn utf8_complete_prefix_len(bytes: &[u8]) -> usize {
     } else {
         i // 保留不完整的多字节序列尾部
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AnsiStyle {
+    pub fg: Option<egui::Color32>,
+    pub bold: bool,
+}
+
+impl Default for AnsiStyle {
+    fn default() -> Self {
+        Self {
+            fg: None,
+            bold: false,
+        }
+    }
+}
+
+pub struct ColoredSpan {
+    pub text: String,
+    pub style: AnsiStyle,
+}
+
+fn basic_color(n: u8) -> egui::Color32 {
+    match n {
+        30 => egui::Color32::from_rgb(0, 0, 0),
+        31 => egui::Color32::from_rgb(205, 49, 49),
+        32 => egui::Color32::from_rgb(13, 188, 121),
+        33 => egui::Color32::from_rgb(229, 229, 16),
+        34 => egui::Color32::from_rgb(36, 114, 200),
+        35 => egui::Color32::from_rgb(188, 63, 188),
+        36 => egui::Color32::from_rgb(17, 168, 205),
+        37 => egui::Color32::from_rgb(229, 229, 229),
+        _ => egui::Color32::WHITE,
+    }
+}
+
+fn bright_color(n: u8) -> egui::Color32 {
+    match n {
+        90 => egui::Color32::from_rgb(128, 128, 128),
+        91 => egui::Color32::from_rgb(255, 0, 0),
+        92 => egui::Color32::from_rgb(0, 255, 0),
+        93 => egui::Color32::from_rgb(255, 255, 0),
+        94 => egui::Color32::from_rgb(92, 92, 255),
+        95 => egui::Color32::from_rgb(255, 0, 255),
+        96 => egui::Color32::from_rgb(0, 255, 255),
+        97 => egui::Color32::from_rgb(255, 255, 255),
+        _ => egui::Color32::WHITE,
+    }
+}
+
+fn color256(n: u8) -> egui::Color32 {
+    if n < 16 {
+        if n < 8 {
+            basic_color(30 + n)
+        } else {
+            bright_color(90 + (n - 8))
+        }
+    } else if n < 232 {
+        let i = n as u32 - 16;
+        let conv = |x: u32| -> u8 { if x == 0 { 0 } else { (55 + x * 40) as u8 } };
+        egui::Color32::from_rgb(conv(i / 36), conv((i % 36) / 6), conv(i % 6))
+    } else {
+        let g = (8 + (n as u32 - 232) * 10) as u8;
+        egui::Color32::from_rgb(g, g, g)
+    }
+}
+
+pub struct AnsiDecoder {
+    pending_ansi: Vec<u8>,
+    pending_utf8: Vec<u8>,
+    pub style: AnsiStyle,
 }
 
 pub struct ComTool {
@@ -75,7 +150,120 @@ pub struct ComTool {
     pub rx_handle: Option<thread::JoinHandle<()>>,
     pub tx_handle: Option<thread::JoinHandle<()>>,
     pub hex_view: bool,
-    pub buffer: Vec<u8>,
+    pub display_spans: Vec<ColoredSpan>,
+    pub decoder: AnsiDecoder,
+    pub color_view: bool,
+}
+
+impl Default for AnsiDecoder {
+    fn default() -> Self {
+        Self {
+            pending_ansi: Vec::new(),
+            pending_utf8: Vec::new(),
+            style: AnsiStyle::default(),
+        }
+    }
+}
+
+impl AnsiDecoder {
+    pub fn reset(&mut self) {
+        self.pending_ansi.clear();
+        self.pending_utf8.clear();
+        self.style = AnsiStyle::default();
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<ColoredSpan> {
+        let mut spans = Vec::new();
+        for &b in bytes {
+            if self.pending_ansi.is_empty() {
+                if b == 0x1B {
+                    // 遇到 ESC：先输出已积累的普通文本，再开始收集转义序列
+                    self.flush_utf8(&mut spans);
+                    self.pending_ansi.push(b);
+                } else {
+                    self.pending_utf8.push(b);
+                }
+            } else {
+                // 正在收集 ESC 序列
+                self.pending_ansi.push(b);
+                if self.pending_ansi.len() == 2 {
+                    // ESC 后的第一个字节：必须是 '[' 才构成 CSI 序列，否则忽略整段
+                    if b != b'[' {
+                        self.pending_ansi.clear();
+                    }
+                } else if (0x40..=0x7E).contains(&b) {
+                    // CSI 参数之后的终结字节（'m' 为 SGR，其余忽略）
+                    let seq = std::mem::take(&mut self.pending_ansi);
+                    self.parse_ansi(&seq);
+                }
+            }
+        }
+        self.flush_utf8(&mut spans);
+        spans
+    }
+
+    fn flush_utf8(&mut self, spans: &mut Vec<ColoredSpan>) {
+        if self.pending_utf8.is_empty() {
+            return;
+        }
+        let valid_len = utf8_complete_prefix_len(&self.pending_utf8);
+        let (complete, tail) = self.pending_utf8.split_at(valid_len);
+        if !complete.is_empty() {
+            let text = String::from_utf8_lossy(complete).into_owned();
+            spans.push(ColoredSpan {
+                text,
+                style: self.style,
+            });
+        }
+        self.pending_utf8 = tail.to_vec();
+    }
+
+    fn parse_ansi(&mut self, seq: &[u8]) {
+        if seq.len() < 3 || seq[0] != 0x1B || seq[1] != b'[' {
+            return;
+        }
+        let final_byte = *seq.last().unwrap();
+        if final_byte != b'm' {
+            return; // 非 SGR（光标移动、清屏等），忽略
+        }
+        let params_str = String::from_utf8_lossy(&seq[2..seq.len() - 1]);
+        let params: Vec<u32> = params_str
+            .split(';')
+            .map(|p| p.trim().parse().unwrap_or(0))
+            .collect();
+        self.apply_sgr(&params);
+    }
+
+    fn apply_sgr(&mut self, params: &[u32]) {
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
+                0 => self.style = AnsiStyle::default(),
+                1 => self.style.bold = true,
+                2 | 22 => self.style.bold = false,
+                39 => self.style.fg = None,
+                30..=37 => self.style.fg = Some(basic_color(params[i] as u8)),
+                90..=97 => self.style.fg = Some(bright_color(params[i] as u8)),
+                38 => {
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.style.fg = Some(color256(params[i + 2] as u8));
+                        i += 3;
+                        continue;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.style.fg = Some(egui::Color32::from_rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        ));
+                        i += 5;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
 }
 
 impl ComTool {
@@ -204,8 +392,16 @@ impl ComTool {
         self.tx_handle = Some(tx_handle);
         self.connected = true;
 
-        self.receive_text
-            .push_str(&format!("已打开 {}\n", self.selected_port));
+        let open_msg = format!("已打开 {}\n", self.selected_port);
+        self.receive_text.push_str(&open_msg);
+        // 一次性追加一条彩色提示到彩色日志（不随渲染每帧重复）
+        self.display_spans.push(ColoredSpan {
+            text: open_msg,
+            style: AnsiStyle {
+                fg: Some(egui::Color32::from_rgb(13, 188, 121)), // 绿
+                bold: false,
+            },
+        });
     }
 
     pub fn close_port(&mut self) {
@@ -229,6 +425,14 @@ impl ComTool {
         self.connected = false;
 
         self.receive_text.push_str("串口已关闭\n");
+        // 一次性追加一条彩色提示到彩色日志（不随渲染每帧重复）
+        self.display_spans.push(ColoredSpan {
+            text: "串口已关闭\n".to_string(),
+            style: AnsiStyle {
+                fg: Some(egui::Color32::from_rgb(205, 49, 49)), // 红
+                bold: false,
+            },
+        });
     }
 
     pub fn send_data(&mut self) {
@@ -245,28 +449,6 @@ impl ComTool {
         self.send_text.clear();
     }
 
-    pub fn strip_ansi_escape_sequences(input: &str) -> String {
-        let mut output = String::new();
-        let mut chars = input.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\u{1b}' {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    while let Some(&next) = chars.peek() {
-                        if next.is_ascii_alphabetic() {
-                            chars.next();
-                            break;
-                        }
-                        chars.next();
-                    }
-                }
-            } else {
-                output.push(c);
-            }
-        }
-        output
-    }
-
     pub fn receive_data(&mut self) {
         let mut received = Vec::new();
 
@@ -278,30 +460,60 @@ impl ComTool {
 
         if !received.is_empty() {
             if self.hex_view {
-                // HEX 模式：直接按字节显示，不做 UTF-8 处理
+                // HEX 模式：直接按字节显示，不做 ANSI/UTF-8 处理
                 let mut line = String::new();
                 for b in &received {
                     line.push_str(&format!("{:02X} ", b));
                 }
+                line.push('\n');
                 self.receive_text.push_str(&line);
-                self.receive_text.push('\n');
-                self.buffer.clear();
+                self.display_spans.push(ColoredSpan {
+                    text: line,
+                    style: AnsiStyle::default(),
+                });
             } else {
-                // 文本模式：跨包拼接 UTF-8，非法字节替换为 �，绝不卡死
-                self.buffer.extend_from_slice(&received);
-
-                let valid_len = utf8_complete_prefix_len(&self.buffer);
-                let (complete, tail) = self.buffer.split_at(valid_len);
-
-                if !complete.is_empty() {
-                    let lossy = String::from_utf8_lossy(complete);
-                    let filtered_text = Self::strip_ansi_escape_sequences(&lossy);
-                    self.receive_text.push_str(&filtered_text);
+                // 文本模式：解析 ANSI 颜色并跨包拼接 UTF-8
+                let spans = self.decoder.feed(&received);
+                for span in spans {
+                    self.receive_text.push_str(&span.text);
+                    self.display_spans.push(span);
                 }
-
-                self.buffer = tail.to_vec();
             }
         }
+    }
+
+    pub fn build_layout(&self, default_color: egui::Color32) -> egui::text::LayoutJob {
+        let mut job = egui::text::LayoutJob::default();
+        for span in &self.display_spans {
+            job.append(
+                span.text.as_str(),
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::monospace(14.0),
+                    color: span.style.fg.unwrap_or(default_color),
+                    ..Default::default()
+                },
+            );
+        }
+        job
+    }
+
+    pub fn render_color_receive(&mut self, ui: &mut Ui) {
+        // ① 先刷新接收数据（没有新数据时不会追加，重复调用安全）
+        self.receive_data();
+
+        // ② 把 display_spans（含一次性开关状态提示）构造成带颜色的 LayoutJob
+        let job = self.build_layout(egui::Color32::WHITE);
+
+        // ③ 在函数内部绘制滚动区，替换掉主界面里默认的滚动区
+        egui::ScrollArea::vertical()
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .max_height(400.0)
+            .id_salt(SCROLL_AREA_ID)
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(job).wrap());
+            });
     }
 }
 
@@ -325,7 +537,9 @@ impl Default for ComTool {
             rx_handle: None,
             tx_handle: None,
             hex_view: false,
-            buffer: Vec::new(),
+            display_spans: Vec::new(),
+            decoder: AnsiDecoder::default(),
+            color_view: false,
         }
     }
 }
@@ -386,26 +600,44 @@ impl eframe::App for ComTool {
 
             // 接收区
             ui.horizontal(|ui| {
-                ui.label("接收:");
+                ui.label("接收设置:");
                 ui.selectable_value(&mut self.hex_view, true, "HEX");
                 ui.selectable_value(&mut self.hex_view, false, "文本");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.color_view, "颜色");
+                });
             });
 
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .max_height(400.0)
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.receive_text)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(20)
-                            .interactive(false),
-                    );
-                });
+            // 接收区
+            if self.color_view {
+                // 彩色模式：滚动区在函数内部自行绘制
+                self.render_color_receive(ui);
+            } else {
+                // 普通文本模式：保持默认滚动区 + TextEdit
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .max_height(400.0)
+                    .id_salt(SCROLL_AREA_ID)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.receive_text)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(20)
+                                .interactive(false),
+                        );
+                    });
+            }
 
             ui.horizontal(|ui| {
                 if ui.button("清空").clicked() {
                     self.receive_text.clear();
+                    self.display_spans.clear();
+                    self.decoder.reset();
+
+                    // 重置滚动区位置（load 是读取，重置需要用 default 再 store）
+                    let id = ui.make_persistent_id(SCROLL_AREA_ID);
+                    egui::scroll_area::State::default().store(ui.ctx(), id);
                 }
                 if ui.button("导出").clicked() {
                     self.export_receive_text();
