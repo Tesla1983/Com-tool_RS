@@ -687,5 +687,5 @@ to do list
 开发笔记：
 快速将函数左移对齐（即减少缩进）的快捷键是 **Shift + Tab** 。
 使用Markdown文件预览功能,先打开Markdown文件，然后点击右上角的文本编辑器，展开下拉菜单，选择相应的功能即可。
-
+使用CodeGeeX先暂存 → 才能生成 Commit Message → 提交
 */
