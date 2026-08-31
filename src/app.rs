@@ -1,7 +1,6 @@
 use crate::serial::scan_ports;
 use eframe::egui;
 use egui::WidgetType::ScrollBar;
-use egui::epaint::text::layout;
 use egui::{Label, Layout, Ui};
 use rfd::FileDialog;
 use serialport::SerialPort;
@@ -482,6 +481,7 @@ impl ComTool {
         }
     }
 
+    
     pub fn build_layout(&self, default_color: egui::Color32) -> egui::text::LayoutJob {
         let mut job = egui::text::LayoutJob::default();
         for span in &self.display_spans {
@@ -604,7 +604,7 @@ impl eframe::App for ComTool {
                 ui.selectable_value(&mut self.hex_view, true, "HEX");
                 ui.selectable_value(&mut self.hex_view, false, "文本");
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.color_view, "颜色");
+                ui.checkbox(&mut self.color_view, "颜色");
                 });
             });
 
@@ -669,3 +669,21 @@ impl eframe::App for ComTool {
         });
     }
 }
+
+/*
+to do list
+
+1. 完善串口刷新功能,单片机重启的时候能够持续输出日志
+
+2. 完善串口发送功能,能够发送字符串和十六进制数据
+
+3. 完善串口接收功能,能够接收字符串和十六进制数据
+
+4. 完善串口设置功能,能够设置串口波特率,数据位,停止位,校验位
+
+*/
+
+/*
+开发笔记：快速将函数左移对齐（即减少缩进）的快捷键是 **Shift + Tab** 。
+
+*/
