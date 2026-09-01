@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use crate::app::ComTool;
-use crate::serial::scan_ports;
+
 use eframe::egui;
 use egui::epaint::text;
 use egui::{Ui, output};
@@ -15,8 +15,9 @@ use std::thread;
 use std::time::Duration;
 
 mod app;
+mod communicationtrait;
 mod config;
-mod serial;
+mod serial_impl;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -33,3 +34,22 @@ fn main() -> eframe::Result {
         }),
     )
 }
+
+/*
+to do list
+
+1. 完善串口刷新功能,单片机重启的时候能够持续输出日志（已完成）
+
+2. 完善串口发送功能,能够发送字符串和十六进制数据
+
+3. 完善串口设置功能,能够设置串口波特率,数据位,停止位,校验位
+
+*/
+
+/*
+开发笔记：
+快速将函数左移对齐（即减少缩进）的快捷键是 **Shift + Tab** 。
+使用Markdown文件预览功能,先打开Markdown文件，然后点击右上角的文本编辑器，展开下拉菜单，选择相应的功能即可。
+使用CodeGeeXCommit Message功能，先暂存 → 才能生成 Commit Message → 提交
+使用  Ctrl + G  可以快速跳转到指定行数
+*/

@@ -1,15 +1,14 @@
-use crate::serial::scan_ports;
+use crate::communicationtrait::{CommunicationEvent, CommunicationManager};
+use crate::serial_impl::portsettings::{BAUD_RATES, BaudRate, PortSettings};
+use crate::serial_impl::serial::{SerialCommunication, scan_ports};
 use eframe::egui;
-use egui::WidgetType::ScrollBar;
-use egui::{Label, Layout, Ui};
+use egui::Ui;
 use rfd::FileDialog;
-use serialport::SerialPort;
-use std::io::{Read, Write};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
-use std::{default, thread};
 
 const SCROLL_AREA_ID: &str = "receive_scroll";
+const RIGHT_PANEL_ID: &str = "right_panel";
 
 fn utf8_complete_prefix_len(bytes: &[u8]) -> usize {
     let len = bytes.len();
@@ -123,7 +122,7 @@ pub struct ComTool {
     pub selected_port: String,
 
     // 当前波特率
-    pub baud_rate: u32,
+    pub baud_rate: BaudRate,
 
     // 是否已经打开串口
     pub connected: bool,
@@ -134,24 +133,23 @@ pub struct ComTool {
     // 发送区
     pub send_text: String,
 
-    // 接收线程 -> GUI
-    pub rx: Option<Receiver<Vec<u8>>>,
+    // 串口通信管理器（基于 CommunicationManager trait）
+    pub serial: Option<Box<dyn CommunicationManager>>,
 
-    // GUI -> 串口发送线程
-    pub tx: Option<Sender<Vec<u8>>>,
+    // 串口事件通道（DataReceived / Error / ConnectionClosed）
+    pub event_rx: Option<Receiver<CommunicationEvent>>,
 
-    // 接收线程停止信号
-    pub stop_tx: Option<Sender<()>>,
+    // 上次自动重连尝试时间（用于节流，避免高频重试）
+    pub last_reconnect_attempt: Option<std::time::Instant>,
 
-    // 发送线程停止信号
-    pub tx_stop: Option<Sender<()>>,
+    // 上次成功打开的串口（自动重连时优先用它，避免跳到 COM1）
+    pub last_opened_port: Option<String>,
 
-    pub rx_handle: Option<thread::JoinHandle<()>>,
-    pub tx_handle: Option<thread::JoinHandle<()>>,
     pub hex_view: bool,
     pub display_spans: Vec<ColoredSpan>,
     pub decoder: AnsiDecoder,
     pub color_view: bool,
+    pub sidebar_open: bool,
 }
 
 impl Default for AnsiDecoder {
@@ -223,7 +221,7 @@ impl AnsiDecoder {
         }
         let final_byte = *seq.last().unwrap();
         if final_byte != b'm' {
-            return; // 非 SGR（光标移动、清屏等），忽略
+            return;
         }
         let params_str = String::from_utf8_lossy(&seq[2..seq.len() - 1]);
         let params: Vec<u32> = params_str
@@ -274,6 +272,37 @@ impl ComTool {
         }
     }
 
+    pub fn auto_reconnect(&mut self) {
+        // 只有串口曾经打开过、现在断开时才尝试自动重连
+        if self.connected || self.serial.is_none() {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let need_retry = self
+            .last_reconnect_attempt
+            .map_or(true, |t| now.duration_since(t).as_millis() >= 500);
+        if !need_retry {
+            return;
+        }
+        self.last_reconnect_attempt = Some(now);
+
+        let target = self
+            .last_opened_port
+            .clone()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| self.selected_port.clone());
+        if target.is_empty() {
+            return;
+        }
+        self.selected_port = target;
+
+        // 只刷新端口列表供 UI 显示，不改变所选端口
+        self.ports = scan_ports();
+
+        self.open_port();
+    }
+
     pub fn export_receive_text(&mut self) {
         if self.receive_text.is_empty() {
             self.receive_text.push_str("没有可导出的数据\n");
@@ -304,96 +333,38 @@ impl ComTool {
             return;
         }
 
-        let port = match serialport::new(&self.selected_port, self.baud_rate)
-            .timeout(Duration::from_millis(100))
-            .open()
-        {
-            Ok(port) => port,
+        // 首次打开时创建串口通信管理器
+        if self.serial.is_none() {
+            self.serial = Some(Box::new(SerialCommunication::new()));
+        }
+        let serial = self.serial.as_mut().unwrap();
 
-            Err(e) => {
-                self.receive_text
-                    .push_str(&format!("打开串口失败: {}\n", e));
-                return;
-            }
+        // 把当前 UI 选择的参数应用到串口
+        let settings = PortSettings {
+            port_name: self.selected_port.clone(),
+            baudrate: self.baud_rate.numeric_repr,
+            ..Default::default()
         };
+        if let Err(e) = serial.update_settings(&settings) {
+            self.receive_text
+                .push_str(&format!("设置串口参数失败: {}\n", e));
+            return;
+        }
 
-        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>();
-        let (send_tx, send_rx) = mpsc::channel::<Vec<u8>>();
-        let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let (tx_stop_tx, tx_stop_rx) = mpsc::channel::<()>();
-
-        let mut read_port = match port.try_clone() {
-            Ok(port) => port,
-            Err(e) => {
-                self.receive_text
-                    .push_str(&format!("复制串口失败: {}\n", e));
-                return;
-            }
-        };
-
-        // 接收线程
-        let rx_handle = thread::spawn(move || {
-            let mut buffer = [0u8; 1024];
-
-            loop {
-                if stop_rx.try_recv().is_ok() {
-                    break;
-                }
-
-                match read_port.read(&mut buffer) {
-                    Ok(size) if size > 0 => {
-                        let data = buffer[..size].to_vec();
-
-                        if data_tx.send(data).is_err() {
-                            break;
-                        }
-                    }
-
-                    Ok(_) => {}
-
-                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-
-                    Err(_) => {
-                        break;
-                    }
-                }
-            }
-        });
-
-        let tx_handle = thread::spawn(move || {
-            let mut write_port = port;
-
-            loop {
-                if tx_stop_rx.try_recv().is_ok() {
-                    break;
-                }
-
-                match send_rx.try_recv() {
-                    Ok(data) => {
-                        if let Err(e) = write_port.write_all(&data) {
-                            eprintln!("串口发送失败: {}", e);
-                            break;
-                        }
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(mpsc::TryRecvError::Disconnected) => break,
-                }
-            }
-        });
-
-        self.rx = Some(data_rx);
-        self.tx = Some(send_tx);
-        self.stop_tx = Some(stop_tx);
-        self.tx_stop = Some(tx_stop_tx);
-        self.rx_handle = Some(rx_handle);
-        self.tx_handle = Some(tx_handle);
+        let (event_tx, event_rx) = mpsc::channel::<CommunicationEvent>();
+        if let Err(e) = serial.start(event_tx) {
+            self.receive_text
+                .push_str(&format!("打开串口失败: {}\n", e));
+            return;
+        }
+        self.event_rx = Some(event_rx);
         self.connected = true;
+
+        self.last_opened_port = Some(self.selected_port.clone());
 
         let open_msg = format!("已打开 {}\n", self.selected_port);
         self.receive_text.push_str(&open_msg);
-        // 一次性追加一条彩色提示到彩色日志（不随渲染每帧重复）
+
         self.display_spans.push(ColoredSpan {
             text: open_msg,
             style: AnsiStyle {
@@ -404,23 +375,14 @@ impl ComTool {
     }
 
     pub fn close_port(&mut self) {
-        if let Some(stop_tx) = self.stop_tx.take() {
-            let _ = stop_tx.send(());
-        }
-        if let Some(tx_stop) = self.tx_stop.take() {
-            let _ = tx_stop.send(());
+        if let Some(serial) = &mut self.serial {
+            let _ = serial.stop();
         }
 
-        // 等待发送/接收线程退出，确保读写句柄真正释放
-        if let Some(handle) = self.tx_handle.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.rx_handle.take() {
-            let _ = handle.join();
-        }
-
-        self.rx = None;
-        self.tx = None;
+        self.serial = None;
+        self.event_rx = None;
+        self.last_opened_port = None;
+        self.last_reconnect_attempt = None;
         self.connected = false;
 
         self.receive_text.push_str("串口已关闭\n");
@@ -441,8 +403,10 @@ impl ComTool {
 
         let data = self.send_text.as_bytes().to_vec();
 
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(data);
+        if let Some(serial) = &mut self.serial {
+            if let Err(e) = serial.send_data(data) {
+                self.receive_text.push_str(&format!("发送失败: {}\n", e));
+            }
         }
 
         self.send_text.clear();
@@ -451,9 +415,21 @@ impl ComTool {
     pub fn receive_data(&mut self) {
         let mut received = Vec::new();
 
-        if let Some(rx) = &self.rx {
-            while let Ok(data) = rx.try_recv() {
-                received.extend_from_slice(&data);
+        if let Some(rx) = &self.event_rx {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    CommunicationEvent::DataReceived(data) => {
+                        received.extend_from_slice(&data);
+                    }
+                    CommunicationEvent::Error(msg) => {
+                        self.receive_text.push_str(&format!("串口错误: {}\n", msg));
+                        self.connected = false;
+                    }
+                    CommunicationEvent::ConnectionClosed => {
+                        self.receive_text.push_str("串口连接已关闭\n");
+                        self.connected = false;
+                    }
+                }
             }
         }
 
@@ -481,7 +457,6 @@ impl ComTool {
         }
     }
 
-    
     pub fn build_layout(&self, default_color: egui::Color32) -> egui::text::LayoutJob {
         let mut job = egui::text::LayoutJob::default();
         for span in &self.display_spans {
@@ -503,17 +478,29 @@ impl ComTool {
         self.receive_data();
 
         // ② 把 display_spans（含一次性开关状态提示）构造成带颜色的 LayoutJob
-        let job = self.build_layout(egui::Color32::WHITE);
+        let job = self.build_layout(egui::Color32::BLACK);
 
         // ③ 在函数内部绘制滚动区，替换掉主界面里默认的滚动区
+        // 左键可选择文本（Ctrl+C 复制选中）；右键弹出菜单复制全部日志
+        let mut copy_all = false;
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
             .max_height(400.0)
             .id_salt(SCROLL_AREA_ID)
             .show(ui, |ui| {
-                ui.add(egui::Label::new(job).wrap());
+                let response = ui.add(egui::Label::new(job).wrap().selectable(true));
+                response.context_menu(|ui| {
+                    if ui.button("复制全部日志").clicked() {
+                        copy_all = true;
+                        ui.close();
+                    }
+                });
             });
+
+        if copy_all {
+            ui.ctx().copy_text(self.receive_text.clone());
+        }
     }
 }
 
@@ -526,20 +513,19 @@ impl Default for ComTool {
         Self {
             ports,
             selected_port,
-            baud_rate: 115200,
+            baud_rate: BAUD_RATES[11],
             connected: false,
             receive_text: String::new(),
             send_text: String::new(),
-            rx: None,
-            tx: None,
-            stop_tx: None,
-            tx_stop: None,
-            rx_handle: None,
-            tx_handle: None,
+            serial: None,
+            event_rx: None,
+            last_reconnect_attempt: None,
+            last_opened_port: None,
             hex_view: false,
             display_spans: Vec::new(),
             decoder: AnsiDecoder::default(),
             color_view: false,
+            sidebar_open: true,
         }
     }
 }
@@ -549,16 +535,116 @@ impl eframe::App for ComTool {
         // 检查串口接收数据
         self.receive_data();
 
+        // 串口意外断开时自动重连（节流 500ms）
+        self.auto_reconnect();
+
         // 不断刷新 GUI
         ui.ctx().request_repaint_after(Duration::from_millis(30));
+
+        let port_name = self.selected_port.clone();
+        let is_connected = self.connected;
+        let current_baud = self.baud_rate;
+        let hex_mode = self.hex_view;
+        let color_mode = self.color_view;
+        let rx_bytes = self.receive_text.len();
+        let port_list = self.ports.clone();
+
+        let mut sidebar_open = self.sidebar_open;
+        let mut clear_clicked = false;
+        let mut export_clicked = false;
+        let mut close_clicked = false;
+
+        egui::Panel::right("right_sidebar")
+            .resizable(true)
+            .default_size(280.0)
+            .min_size(200.0)
+            .max_size(600.0)
+            .show_collapsible(ui, &mut sidebar_open, |ui| {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.heading("侧边栏");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn = egui::Button::new(egui::RichText::new(">>").size(20.0))
+                            .min_size(egui::vec2(32.0, 32.0));
+                        if ui.add(btn).on_hover_text("收起").clicked() {
+                            close_clicked = true;
+                        }
+                    });
+                });
+                ui.separator();
+
+                egui::CollapsingHeader::new("串口信息")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label(format!(
+                            "端口: {}",
+                            if port_name.is_empty() {
+                                "未选择"
+                            } else {
+                                &port_name
+                            }
+                        ));
+                        ui.label(format!("波特率: {}", current_baud.string_repr));
+                        ui.label(if is_connected {
+                            "状态: 已连接"
+                        } else {
+                            "状态: 未连接"
+                        });
+                    });
+
+                egui::CollapsingHeader::new("接收统计")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label(format!("接收字节数: {}", rx_bytes));
+                        ui.label(format!(
+                            "显示模式: {}{}",
+                            if hex_mode { "HEX" } else { "文本" },
+                            if color_mode { " + 颜色" } else { "" }
+                        ));
+                    });
+
+                egui::CollapsingHeader::new("可用串口").show(ui, |ui| {
+                    if port_list.is_empty() {
+                        ui.weak("（无）");
+                    } else {
+                        for p in &port_list {
+                            ui.label(p);
+                        }
+                    }
+                });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("清空日志").clicked() {
+                        clear_clicked = true;
+                    }
+                    if ui.button("导出日志").clicked() {
+                        export_clicked = true;
+                    }
+                });
+            });
+
+        // 回写状态 + 执行延迟动作
+        self.sidebar_open = if close_clicked { false } else { sidebar_open };
+        if clear_clicked {
+            self.receive_text.clear();
+            self.display_spans.clear();
+            self.decoder.reset();
+            let id = ui.make_persistent_id(SCROLL_AREA_ID);
+            egui::scroll_area::State::default().store(ui.ctx(), id);
+        }
+        if export_clicked {
+            self.export_receive_text();
+        }
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("");
 
             ui.separator();
 
-            // 串口设置
+            // 串口UI设置
             ui.horizontal(|ui| {
+                ui.toggle_value(&mut self.sidebar_open, "☰ 侧边栏");
                 ui.label("串口:");
 
                 egui::ComboBox::from_id_salt("port")
@@ -580,10 +666,10 @@ impl eframe::App for ComTool {
                 ui.label("波特率:");
 
                 egui::ComboBox::from_id_salt("baud")
-                    .selected_text(self.baud_rate.to_string())
+                    .selected_text(self.baud_rate.string_repr)
                     .show_ui(ui, |ui| {
-                        for baud in [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600] {
-                            ui.selectable_value(&mut self.baud_rate, baud, baud.to_string());
+                        for baud in &BAUD_RATES {
+                            ui.selectable_value(&mut self.baud_rate, *baud, baud.string_repr);
                         }
                     });
 
@@ -604,7 +690,7 @@ impl eframe::App for ComTool {
                 ui.selectable_value(&mut self.hex_view, true, "HEX");
                 ui.selectable_value(&mut self.hex_view, false, "文本");
                 ui.horizontal(|ui| {
-                ui.checkbox(&mut self.color_view, "颜色");
+                    ui.checkbox(&mut self.color_view, "颜色");
                 });
             });
 
@@ -613,20 +699,32 @@ impl eframe::App for ComTool {
                 // 彩色模式：滚动区在函数内部自行绘制
                 self.render_color_receive(ui);
             } else {
-                // 普通文本模式：保持默认滚动区 + TextEdit
-                egui::ScrollArea::vertical()
+                // 普通文本模式：只读但可选择文本的 TextEdit + 右键复制选中
+                let mut text_view: &str = &self.receive_text;
+                let output = egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .max_height(400.0)
                     .id_salt(SCROLL_AREA_ID)
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.receive_text)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(20)
-                                .interactive(false),
-                        );
-                    });
+                        egui::TextEdit::multiline(&mut text_view)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(20)
+                            .font(egui::TextStyle::Monospace)
+                            .show(ui)
+                    })
+                    .inner;
+
+                // 右键 → 复制当前选中的文本（Ctrl+C 同样有效）
+                if output.response.secondary_clicked() {
+                    if let Some(cursor_range) = output.cursor_range {
+                        use egui::TextBuffer as _;
+                        let selected = text_view.char_range(cursor_range.as_sorted_char_range());
+                        if !selected.is_empty() {
+                            ui.ctx().copy_text(selected.to_string());
+                        }
+                    }
+                }
             }
 
             ui.horizontal(|ui| {
@@ -635,7 +733,6 @@ impl eframe::App for ComTool {
                     self.display_spans.clear();
                     self.decoder.reset();
 
-                    // 重置滚动区位置（load 是读取，重置需要用 default 再 store）
                     let id = ui.make_persistent_id(SCROLL_AREA_ID);
                     egui::scroll_area::State::default().store(ui.ctx(), id);
                 }
@@ -669,23 +766,3 @@ impl eframe::App for ComTool {
         });
     }
 }
-
-/*
-to do list
-
-1. 完善串口刷新功能,单片机重启的时候能够持续输出日志
-
-2. 完善串口发送功能,能够发送字符串和十六进制数据
-
-3. 完善串口接收功能,能够接收字符串和十六进制数据
-
-4. 完善串口设置功能,能够设置串口波特率,数据位,停止位,校验位
-
-*/
-
-/*
-开发笔记：
-快速将函数左移对齐（即减少缩进）的快捷键是 **Shift + Tab** 。
-使用Markdown文件预览功能,先打开Markdown文件，然后点击右上角的文本编辑器，展开下拉菜单，选择相应的功能即可。
-使用CodeGeeX先暂存 → 才能生成 Commit Message → 提交
-*/
