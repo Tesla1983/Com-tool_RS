@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 const SCROLL_AREA_ID: &str = "receive_scroll";
-const RIGHT_PANEL_ID: &str = "right_panel";
+//const RIGHT_PANEL_ID: &str = "right_panel";
 
 fn utf8_complete_prefix_len(bytes: &[u8]) -> usize {
     let len = bytes.len();
@@ -61,6 +61,13 @@ impl Default for AnsiStyle {
 pub struct ColoredSpan {
     pub text: String,
     pub style: AnsiStyle,
+}
+
+/// 界面语言（方案 A：目前仅作为设置项占位，尚未接入文案切换）
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Language {
+    Zh,
+    En,
 }
 
 fn basic_color(n: u8) -> egui::Color32 {
@@ -150,6 +157,8 @@ pub struct ComTool {
     pub decoder: AnsiDecoder,
     pub color_view: bool,
     pub sidebar_open: bool,
+    pub language: Language,
+    pub show_settings: bool,
 }
 
 impl Default for AnsiDecoder {
@@ -526,6 +535,8 @@ impl Default for ComTool {
             decoder: AnsiDecoder::default(),
             color_view: false,
             sidebar_open: true,
+            language: Language::Zh,
+            show_settings: false,
         }
     }
 }
@@ -613,18 +624,67 @@ impl eframe::App for ComTool {
                     }
                 });
 
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("清空日志").clicked() {
-                        clear_clicked = true;
-                    }
-                    if ui.button("导出日志").clicked() {
-                        export_clicked = true;
-                    }
+                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("串口:");
+                        egui::ComboBox::from_id_salt("port")
+                            .selected_text(if self.selected_port.is_empty() {
+                                "请选择串口"
+                            } else {
+                                &self.selected_port
+                            })
+                            .show_ui(ui, |ui| {
+                                for port in &self.ports {
+                                    ui.selectable_value(
+                                        &mut self.selected_port,
+                                        port.clone(),
+                                        port,
+                                    );
+                                }
+                            });
+                        if ui.button("刷新").clicked() {
+                            self.refresh_ports();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("波特率:");
+                        egui::ComboBox::from_id_salt("baud")
+                            .selected_text(self.baud_rate.string_repr)
+                            .show_ui(ui, |ui| {
+                                for baud in &BAUD_RATES {
+                                    ui.selectable_value(
+                                        &mut self.baud_rate,
+                                        *baud,
+                                        baud.string_repr,
+                                    );
+                                }
+                            });
+                        if !self.connected {
+                            if ui.button("打开串口").clicked() {
+                                self.open_port();
+                            }
+                        } else if ui.button("关闭串口").clicked() {
+                            self.close_port();
+                        }
+                    });
+
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+
+                    // —— 再往上：清空日志 / 导出日志 ——
+                    ui.horizontal(|ui| {
+                        if ui.button("清空日志").clicked() {
+                            clear_clicked = true;
+                        }
+                        if ui.button("导出日志").clicked() {
+                            export_clicked = true;
+                        }
+                    });
                 });
             });
 
-        // 回写状态 + 执行延迟动作
+        // 回写状态 + 执行延迟动作（放在闭包外，避免与 &mut sidebar_open 借用冲突）
         self.sidebar_open = if close_clicked { false } else { sidebar_open };
         if clear_clicked {
             self.receive_text.clear();
@@ -638,48 +698,44 @@ impl eframe::App for ComTool {
         }
 
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("");
+            //ui.heading("");
+            if self.show_settings {
+                egui::Window::new("设置")
+                    .collapsible(false)
+                    .resizable(false)
+                    .open(&mut self.show_settings)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(20.0, 20.0))
+                    .show(ui.ctx(), |ui| {
+                        ui.label("language:");
+                        egui::ComboBox::from_id_salt("language")
+                            .selected_text(match self.language {
+                                Language::Zh => "中文",
+                                Language::En => "English",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.language, Language::Zh, "中文");
+                                ui.selectable_value(&mut self.language, Language::En, "English");
+                            });
+                        // ui.horizontal(|ui| {
+                        //     ui.selectable_value(&mut self.language, Language::Zh, "中文");
+                        //     ui.selectable_value(&mut self.language, Language::En, "English");
+                        // });
+                        ui.separator();
+                        // ui.weak("（语言选项暂未接入界面文案，仅作占位）");
+                    });
+            }
 
             ui.separator();
 
-            // 串口UI设置
             ui.horizontal(|ui| {
                 ui.toggle_value(&mut self.sidebar_open, "☰ 侧边栏");
-                ui.label("串口:");
 
-                egui::ComboBox::from_id_salt("port")
-                    .selected_text(if self.selected_port.is_empty() {
-                        "请选择串口"
-                    } else {
-                        &self.selected_port
-                    })
-                    .show_ui(ui, |ui| {
-                        for port in &self.ports {
-                            ui.selectable_value(&mut self.selected_port, port.clone(), port);
-                        }
-                    });
-
-                if ui.button("刷新").clicked() {
-                    self.refresh_ports();
-                }
-
-                ui.label("波特率:");
-
-                egui::ComboBox::from_id_salt("baud")
-                    .selected_text(self.baud_rate.string_repr)
-                    .show_ui(ui, |ui| {
-                        for baud in &BAUD_RATES {
-                            ui.selectable_value(&mut self.baud_rate, *baud, baud.string_repr);
-                        }
-                    });
-
-                if !self.connected {
-                    if ui.button("打开串口").clicked() {
-                        self.open_port();
+                // 左侧「设置」按钮，点击打开设置窗口
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⚙ 设置").clicked() {
+                        self.show_settings = true;
                     }
-                } else if ui.button("关闭串口").clicked() {
-                    self.close_port();
-                }
+                });
             });
 
             ui.separator();
@@ -707,10 +763,21 @@ impl eframe::App for ComTool {
                     .max_height(400.0)
                     .id_salt(SCROLL_AREA_ID)
                     .show(ui, |ui| {
+                        let mut layouter =
+                            |ui: &Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                                let job = egui::text::LayoutJob::simple(
+                                    egui::TextBuffer::as_str(buf).to_owned(),
+                                    egui::FontId::monospace(14.0),
+                                    egui::Color32::BLACK,
+                                    wrap_width,
+                                );
+                                ui.fonts_mut(|f| f.layout_job(job))
+                            };
                         egui::TextEdit::multiline(&mut text_view)
                             .desired_width(f32::INFINITY)
                             .desired_rows(20)
-                            .font(egui::TextStyle::Monospace)
+                            .frame(egui::Frame::NONE)
+                            .layouter(&mut layouter)
                             .show(ui)
                     })
                     .inner;
@@ -726,20 +793,6 @@ impl eframe::App for ComTool {
                     }
                 }
             }
-
-            ui.horizontal(|ui| {
-                if ui.button("清空").clicked() {
-                    self.receive_text.clear();
-                    self.display_spans.clear();
-                    self.decoder.reset();
-
-                    let id = ui.make_persistent_id(SCROLL_AREA_ID);
-                    egui::scroll_area::State::default().store(ui.ctx(), id);
-                }
-                if ui.button("导出").clicked() {
-                    self.export_receive_text();
-                }
-            });
 
             ui.separator();
 
