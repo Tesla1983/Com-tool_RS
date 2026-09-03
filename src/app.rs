@@ -16,15 +16,21 @@ fn utf8_complete_prefix_len(bytes: &[u8]) -> usize {
         return 0;
     }
 
-    let mut i = len;
-    while i > 0 && (bytes[i - 1] & 0xC0) == 0x80 {
-        i -= 1;
+    // 找到尾部连续 continuation 字节（0b10xxxxxx）的起点 start：
+    // 循环退出时 bytes[start-1] 是 lead 字节（若 start > 0）
+    let mut start = len;
+    while start > 0 && (bytes[start - 1] & 0xC0) == 0x80 {
+        start -= 1;
     }
-    if i == len {
+    if start == len {
         // 尾部不是未完成的序列
         return len;
     }
-    let lead = bytes[i];
+    if start == 0 {
+        // 整段都是 continuation 字节（异常流）：无法回溯 lead，交给上层按非法字节标记
+        return len;
+    }
+    let lead = bytes[start - 1];
     let width = if lead < 0x80 {
         1
     } else if lead >= 0xC0 && lead <= 0xDF {
@@ -34,12 +40,13 @@ fn utf8_complete_prefix_len(bytes: &[u8]) -> usize {
     } else if lead >= 0xF0 && lead <= 0xF7 {
         4
     } else {
-        1 // 非法起始字节，当作单字节处理（会被替换为 �）
+        1 // 非法起始字节，当作单字节处理（会被标记为 [XX]）
     };
-    if i + width <= len {
+    let seq_start = start - 1; // 未完成序列的 lead 字节位置
+    if seq_start + width <= len {
         len
     } else {
-        i // 保留不完整的多字节序列尾部
+        seq_start // 从 lead 字节起整个保留，等下一个数据块补齐
     }
 }
 
@@ -69,6 +76,10 @@ pub enum Language {
     Zh,
     En,
 }
+/// ASCII 视图：\r \n \t 等常见控制字符的转义显示颜色（蓝）
+const ASCII_CTRL_COLOR: egui::Color32 = egui::Color32::from_rgb(36, 114, 200);
+/// ASCII 视图：其余不可见字节（其它控制字符 / 高位字节）的显示颜色（灰）
+const ASCII_NONPRINT_COLOR: egui::Color32 = egui::Color32::from_rgb(128, 128, 128);
 
 fn basic_color(n: u8) -> egui::Color32 {
     match n {
@@ -121,6 +132,151 @@ pub struct AnsiDecoder {
     pub style: AnsiStyle,
 }
 
+/// 把一段原始字节逐字节解析为 ASCII 可视化 spans：
+/// - 0x20..=0x7E：可打印字符，原样显示（默认色）
+/// - \r \n \t：显示为 "\\r" "\\n" "\\t"（蓝色；其中 \n 额外追加真实换行以保持行结构）
+/// - 其它控制字符（0x00..=0x1F、0x7F）：显示为 "[0D]" 形式（灰色）
+/// - 高位字节（0x80..=0xFF）：显示为 "\xFF" 形式（灰色）
+fn ascii_spans_from_bytes(bytes: &[u8]) -> Vec<ColoredSpan> {
+    fn flush(spans: &mut Vec<ColoredSpan>, normal: &mut String) {
+        if !normal.is_empty() {
+            spans.push(ColoredSpan {
+                text: std::mem::take(normal),
+                style: AnsiStyle::default(),
+            });
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut normal = String::new();
+    for &b in bytes {
+        match b {
+            0x20..=0x7E => normal.push(b as char),
+            b'\n' => {
+                flush(&mut spans, &mut normal);
+                spans.push(ColoredSpan {
+                    text: "\\n\n".to_string(),
+                    style: AnsiStyle {
+                        fg: Some(ASCII_CTRL_COLOR),
+                        bold: false,
+                    },
+                });
+            }
+            b'\r' => {
+                flush(&mut spans, &mut normal);
+                spans.push(ColoredSpan {
+                    text: "\\r".to_string(),
+                    style: AnsiStyle {
+                        fg: Some(ASCII_CTRL_COLOR),
+                        bold: false,
+                    },
+                });
+            }
+            b'\t' => {
+                flush(&mut spans, &mut normal);
+                spans.push(ColoredSpan {
+                    text: "\\t".to_string(),
+                    style: AnsiStyle {
+                        fg: Some(ASCII_CTRL_COLOR),
+                        bold: false,
+                    },
+                });
+            }
+            0x00..=0x1F | 0x7F => {
+                flush(&mut spans, &mut normal);
+                spans.push(ColoredSpan {
+                    text: format!("[{b:02X}]"),
+                    style: AnsiStyle {
+                        fg: Some(ASCII_NONPRINT_COLOR),
+                        bold: false,
+                    },
+                });
+            }
+            _ => {
+                flush(&mut spans, &mut normal);
+                spans.push(ColoredSpan {
+                    text: format!("\\x{b:02X}"),
+                    style: AnsiStyle {
+                        fg: Some(ASCII_NONPRINT_COLOR),
+                        bold: false,
+                    },
+                });
+            }
+        }
+    }
+    flush(&mut spans, &mut normal);
+    spans
+}
+
+/// 由一组 ColoredSpan 构造等宽 14px 的 LayoutJob（彩色/ASCII 两种接收视图共用）
+fn layout_job_from(
+    spans: &[ColoredSpan],
+    default_color: egui::Color32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    for span in spans {
+        job.append(
+            span.text.as_str(),
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::monospace(14.0),
+                color: span.style.fg.unwrap_or(default_color),
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
+/// 绘制接收区滚动视图（可选中、右键复制全部日志），返回是否点击了「复制全部日志」
+fn show_receive_scroll(ui: &mut Ui, job: egui::text::LayoutJob) -> bool {
+    let mut copy_all = false;
+    egui::ScrollArea::vertical()
+        .stick_to_bottom(true)
+        .auto_shrink([false, false])
+        .max_height(400.0)
+        .id_salt(SCROLL_AREA_ID)
+        .show(ui, |ui| {
+            let response = ui.add(egui::Label::new(job).wrap().selectable(true));
+            response.context_menu(|ui| {
+                if ui.button("复制全部日志").clicked() {
+                    copy_all = true;
+                    ui.close();
+                }
+            });
+        });
+    copy_all
+}
+
+/// 普通文本模式接收区：不折行（Extend）+ 纵/横双向滚动，
+/// 等宽 galley 绘制保证盲文 ASCII 图案整行对齐；可选中、右键复制全部日志
+fn show_plain_receive(ui: &mut Ui, text: &str) {
+    let job = egui::text::LayoutJob::simple(
+        text.to_owned(),
+        egui::FontId::monospace(14.0),
+        egui::Color32::BLACK,
+        f32::INFINITY, // 折行宽度 = ∞ → 永不折行
+    );
+    egui::ScrollArea::both()
+        .stick_to_bottom(true)
+        .auto_shrink([false, false])
+        .max_height(400.0)
+        .id_salt(SCROLL_AREA_ID)
+        .show(ui, |ui| {
+            let response = ui.add(
+                egui::Label::new(job)
+                    .wrap_mode(egui::TextWrapMode::Extend)
+                    .selectable(true),
+            );
+            response.context_menu(|ui| {
+                if ui.button("复制全部日志").clicked() {
+                    ui.ctx().copy_text(text.to_owned());
+                    ui.close();
+                }
+            });
+        });
+}
+
 pub struct ComTool {
     // 串口列表
     pub ports: Vec<String>,
@@ -159,6 +315,11 @@ pub struct ComTool {
     pub sidebar_open: bool,
     pub language: Language,
     pub show_settings: bool,
+    pub ascii_view: bool,
+
+    // ASCII 视图的可见化文本 / spans（与 receive_text、display_spans 平行维护）
+    pub ascii_text: String,
+    pub ascii_spans: Vec<ColoredSpan>,
 }
 
 impl Default for AnsiDecoder {
@@ -215,11 +376,52 @@ impl AnsiDecoder {
         let valid_len = utf8_complete_prefix_len(&self.pending_utf8);
         let (complete, tail) = self.pending_utf8.split_at(valid_len);
         if !complete.is_empty() {
-            let text = String::from_utf8_lossy(complete).into_owned();
-            spans.push(ColoredSpan {
-                text,
-                style: self.style,
-            });
+            // 严格解码：合法片段原样输出；非法字节以灰色 [XX] 十六进制标记显示，
+            // 不再静默生成 U+FFFD（字体缺字形时会渲染成不可读的 □）
+            let bad_style = AnsiStyle {
+                fg: Some(ASCII_NONPRINT_COLOR),
+                bold: false,
+            };
+            let mut rest = complete;
+            let mut normal = String::new();
+            while !rest.is_empty() {
+                match std::str::from_utf8(rest) {
+                    Ok(s) => {
+                        normal.push_str(s);
+                        rest = &[];
+                    }
+                    Err(e) => {
+                        let valid = e.valid_up_to();
+                        if valid > 0 {
+                            normal
+                                .push_str(std::str::from_utf8(&rest[..valid]).unwrap_or_default());
+                        }
+                        // error_len()=None 表示末尾被截断的不完整序列，按剩余全部处理
+                        let bad = e.error_len().unwrap_or(rest.len() - valid).max(1);
+                        if !normal.is_empty() {
+                            spans.push(ColoredSpan {
+                                text: std::mem::take(&mut normal),
+                                style: self.style,
+                            });
+                        }
+                        let hex: String = rest[valid..valid + bad]
+                            .iter()
+                            .map(|b| format!("[{b:02X}]"))
+                            .collect();
+                        spans.push(ColoredSpan {
+                            text: hex,
+                            style: bad_style,
+                        });
+                        rest = &rest[valid + bad..];
+                    }
+                }
+            }
+            if !normal.is_empty() {
+                spans.push(ColoredSpan {
+                    text: normal,
+                    style: self.style,
+                });
+            }
         }
         self.pending_utf8 = tail.to_vec();
     }
@@ -455,6 +657,14 @@ impl ComTool {
                     text: line,
                     style: AnsiStyle::default(),
                 });
+            } else if self.ascii_view {
+                // ASCII 模式：逐字节解码，控制字符/高位字节转义为可见形式
+                let spans = ascii_spans_from_bytes(&received);
+                for span in spans {
+                    self.ascii_text.push_str(&span.text);
+                    self.receive_text.push_str(&span.text);
+                    self.ascii_spans.push(span);
+                }
             } else {
                 // 文本模式：解析 ANSI 颜色并跨包拼接 UTF-8
                 let spans = self.decoder.feed(&received);
@@ -467,19 +677,12 @@ impl ComTool {
     }
 
     pub fn build_layout(&self, default_color: egui::Color32) -> egui::text::LayoutJob {
-        let mut job = egui::text::LayoutJob::default();
-        for span in &self.display_spans {
-            job.append(
-                span.text.as_str(),
-                0.0,
-                egui::TextFormat {
-                    font_id: egui::FontId::monospace(14.0),
-                    color: span.style.fg.unwrap_or(default_color),
-                    ..Default::default()
-                },
-            );
-        }
-        job
+        layout_job_from(&self.display_spans, default_color)
+    }
+
+    /// ASCII 视图的 LayoutJob（与彩色视图同款等宽 14px 样式）
+    pub fn build_ascii_layout(&self, default_color: egui::Color32) -> egui::text::LayoutJob {
+        layout_job_from(&self.ascii_spans, default_color)
     }
 
     pub fn render_color_receive(&mut self, ui: &mut Ui) {
@@ -490,24 +693,21 @@ impl ComTool {
         let job = self.build_layout(egui::Color32::BLACK);
 
         // ③ 在函数内部绘制滚动区，替换掉主界面里默认的滚动区
-        // 左键可选择文本（Ctrl+C 复制选中）；右键弹出菜单复制全部日志
-        let mut copy_all = false;
-        egui::ScrollArea::vertical()
-            .stick_to_bottom(true)
-            .auto_shrink([false, false])
-            .max_height(400.0)
-            .id_salt(SCROLL_AREA_ID)
-            .show(ui, |ui| {
-                let response = ui.add(egui::Label::new(job).wrap().selectable(true));
-                response.context_menu(|ui| {
-                    if ui.button("复制全部日志").clicked() {
-                        copy_all = true;
-                        ui.close();
-                    }
-                });
-            });
+        if show_receive_scroll(ui, job) {
+            ui.ctx().copy_text(self.receive_text.clone());
+        }
+    }
 
-        if copy_all {
+    /// ASCII 视图：逐字节解码显示，控制字符/高位字节转义可见化
+    pub fn render_ascii_receive(&mut self, ui: &mut Ui) {
+        // ① 先刷新接收数据（没有新数据时不会追加，重复调用安全）
+        self.receive_data();
+
+        // ② 由 ascii_spans 构造 LayoutJob
+        let job = self.build_ascii_layout(egui::Color32::BLACK);
+
+        // ③ 绘制滚动区（样式与彩色模式一致）
+        if show_receive_scroll(ui, job) {
             ui.ctx().copy_text(self.receive_text.clone());
         }
     }
@@ -537,6 +737,9 @@ impl Default for ComTool {
             sidebar_open: true,
             language: Language::Zh,
             show_settings: false,
+            ascii_view: false,
+            ascii_text: String::new(),
+            ascii_spans: Vec::new(),
         }
     }
 }
@@ -608,9 +811,10 @@ impl eframe::App for ComTool {
                     .show(ui, |ui| {
                         ui.label(format!("接收字节数: {}", rx_bytes));
                         ui.label(format!(
-                            "显示模式: {}{}",
+                            "显示模式: {}{}{}",
                             if hex_mode { "HEX" } else { "文本" },
-                            if color_mode { " + 颜色" } else { "" }
+                            if color_mode { " + 颜色" } else { "" },
+                            if self.ascii_view { " + 字节查看" } else { "" }
                         ));
                     });
 
@@ -689,6 +893,8 @@ impl eframe::App for ComTool {
         if clear_clicked {
             self.receive_text.clear();
             self.display_spans.clear();
+            self.ascii_text.clear();
+            self.ascii_spans.clear();
             self.decoder.reset();
             let id = ui.make_persistent_id(SCROLL_AREA_ID);
             egui::scroll_area::State::default().store(ui.ctx(), id);
@@ -740,82 +946,142 @@ impl eframe::App for ComTool {
 
             ui.separator();
 
-            // 接收区
+            // 接收设置：文本/HEX 用 checkbox 表达（底层互斥，因为收到数据只能按一种格式解析）
+            let mut show_hex = self.hex_view;
+            let mut show_text = !self.hex_view;
             ui.horizontal(|ui| {
                 ui.label("接收设置:");
-                ui.selectable_value(&mut self.hex_view, true, "HEX");
-                ui.selectable_value(&mut self.hex_view, false, "文本");
+                if ui.checkbox(&mut show_hex, "HEX").changed() && show_hex {
+                    show_text = false; // 勾 HEX → 取消文本
+                }
+                if ui.checkbox(&mut show_text, "文本").changed() && show_text {
+                    show_hex = false; // 勾文本 → 取消 HEX
+                }
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.color_view, "颜色");
+                    ui.checkbox(&mut self.ascii_view, "字节查看");
                 });
             });
+            self.hex_view = show_hex; // 文本 = !hex_view；两个都取消时退回文本
 
             // 接收区
             if self.color_view {
-                // 彩色模式：滚动区在函数内部自行绘制
+                
                 self.render_color_receive(ui);
+            } else if self.ascii_view {
+                // ASCII 模式：逐字节解码，控制字符/高位字节转义为可见形式
+                self.render_ascii_receive(ui);
             } else {
-                // 普通文本模式：只读但可选择文本的 TextEdit + 右键复制选中
-                let mut text_view: &str = &self.receive_text;
-                let output = egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .auto_shrink([false, false])
-                    .max_height(400.0)
-                    .id_salt(SCROLL_AREA_ID)
-                    .show(ui, |ui| {
-                        let mut layouter =
-                            |ui: &Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
-                                let job = egui::text::LayoutJob::simple(
-                                    egui::TextBuffer::as_str(buf).to_owned(),
-                                    egui::FontId::monospace(14.0),
-                                    egui::Color32::BLACK,
-                                    wrap_width,
-                                );
-                                ui.fonts_mut(|f| f.layout_job(job))
-                            };
-                        egui::TextEdit::multiline(&mut text_view)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(20)
-                            .frame(egui::Frame::NONE)
-                            .layouter(&mut layouter)
-                            .show(ui)
-                    })
-                    .inner;
-
-                // 右键 → 复制当前选中的文本（Ctrl+C 同样有效）
-                if output.response.secondary_clicked() {
-                    if let Some(cursor_range) = output.cursor_range {
-                        use egui::TextBuffer as _;
-                        let selected = text_view.char_range(cursor_range.as_sorted_char_range());
-                        if !selected.is_empty() {
-                            ui.ctx().copy_text(selected.to_string());
-                        }
-                    }
-                }
+                // 普通文本模式：不折行 + 纵/横双向滚动 + 可选中 + 右键复制全部
+                show_plain_receive(ui, &self.receive_text);
             }
 
             ui.separator();
 
             // 发送区
-            ui.label("发送:");
+            ui.label("发送区:");
 
-            ui.add(
+            // 把“换行键”从裸 Enter 改成 Shift+Enter：
+            // 普通 Enter 不再被 TextEdit 消费成换行，交给 app 做回车发送
+            let send_edit_response = ui.add(
                 egui::TextEdit::multiline(&mut self.send_text)
                     .desired_width(f32::INFINITY)
-                    .desired_rows(4),
+                    .desired_rows(4)
+                    // 与接收区同款等宽字体：ASCII 图案在输入时即可按空格对齐预览
+                    .font(egui::FontId::monospace(14.0))
+                    .return_key(egui::KeyboardShortcut::new(
+                        egui::Modifiers::SHIFT,
+                        egui::Key::Enter,
+                    )),
             );
 
+            let enter_to_send = send_edit_response.has_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+
+            let mut do_send = false;
+            let mut do_clear = false;
             ui.horizontal(|ui| {
-                let send_clicked = ui.button("发送").clicked();
-
-                if send_clicked {
-                    self.send_data();
+                if ui.button("发送").clicked() {
+                    do_send = true;
                 }
-
                 if ui.button("清空发送").clicked() {
-                    self.send_text.clear();
+                    do_clear = true;
                 }
             });
+            if enter_to_send {
+                do_send = true;
+            }
+            if do_send {
+                self.send_data();
+            }
+            if do_clear {
+                self.send_text.clear();
+            }
         });
+    }
+
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 把解析结果拼成纯文本，便于断言
+    fn joined(bytes: &[u8]) -> String {
+        ascii_spans_from_bytes(bytes)
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
+    }
+
+    #[test]
+    fn printable_passes_through() {
+        assert_eq!(joined(b"Hello"), "Hello");
+    }
+
+    #[test]
+    fn cr_lf_tab_escaped_and_newline_breaks_line() {
+        // \r \n \t 显示为转义；\n 额外带一个真实换行
+        assert_eq!(joined(b"A\r\nB\tC"), "A\\r\\n\nB\\tC");
+    }
+
+    #[test]
+    fn control_and_high_bytes_are_visible() {
+        assert_eq!(joined(&[0x00, 0x7F, 0xFF]), "[00][7F]\\xFF");
+    }
+
+    #[test]
+    fn utf8_multibyte_is_shown_per_byte() {
+        // “中” = E4 B8 AD → 按字节显示为三个 \xHH
+        assert_eq!(joined("中".as_bytes()), "\\xE4\\xB8\\xAD");
+    }
+
+    /// 文本模式解码：把 AnsiDecoder 输出拼成纯文本
+    fn decoded(bytes: &[u8]) -> String {
+        AnsiDecoder::default().feed(bytes).into_iter().map(|s| s.text).collect()
+    }
+
+    #[test]
+    fn decoder_invalid_bytes_become_visible_hex_markers() {
+        // 非法字节 0xFF 不再生成 U+FFFD，而是显示为灰色 [FF] 标记
+        assert_eq!(decoded(b"AB\xFFCD"), "AB[FF]CD");
+        // 非法序列 E0 80（第二字节越界）逐字节标记后继续正常解码
+        assert_eq!(decoded(&[0xE0, 0x80, b'A']), "[E0][80]A");
+        // 末尾不完整的序列先保留，等下一块数据补齐，不提前输出标记
+        assert_eq!(decoded(&[0xE4, 0xB8]), "");
+    }
+
+    #[test]
+    fn decoder_keeps_split_multibyte_across_feeds() {
+        // “中” 被拆到两次 feed：第一次不完整 → 无输出；第二次补齐 → 完整字符
+        let mut d = AnsiDecoder::default();
+        assert!(d.feed(&[0xE4, 0xB8]).is_empty());
+        assert_eq!(d.feed(&[0xAD, b'!']).into_iter().map(|s| s.text).collect::<String>(), "中!");
+    }
+
+    #[test]
+    fn decoder_valid_utf8_passes_through() {
+        assert_eq!(decoded("ok中⣿".as_bytes()), "ok中⣿");
     }
 }
