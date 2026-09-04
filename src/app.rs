@@ -2,7 +2,7 @@ use crate::communicationtrait::{CommunicationEvent, CommunicationManager};
 use crate::serial_impl::portsettings::{BAUD_RATES, BaudRate, PortSettings};
 use crate::serial_impl::serial::{SerialCommunication, scan_ports};
 use eframe::egui;
-use egui::Ui;
+use egui::{Button, Ui};
 use rfd::FileDialog;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 use std::sync::mpsc::{self, Receiver};
@@ -878,12 +878,19 @@ impl eframe::App for ComTool {
                                     );
                                 }
                             });
-                        if !self.connected {
-                            if ui.button("打开串口").clicked() {
+
+                        let label = if self.connected {
+                            "打开串口"
+                        } else {
+                            "关闭串口"
+                        };
+                        let button = egui::Button::new(label).selected(self.connected);
+                        if ui.add(button).clicked() {
+                            if self.connected {
+                                self.close_port();
+                            } else {
                                 self.open_port();
                             }
-                        } else if ui.button("关闭串口").clicked() {
-                            self.close_port();
                         }
                     });
                     ui.horizontal(|ui| {
@@ -931,7 +938,7 @@ impl eframe::App for ComTool {
                                     );
                                 }
                             });
-                        //ui.label("流    控:");
+
                         ui.add_sized([70.0, 20.0], egui::Label::new("流控"));
                         egui::ComboBox::from_id_salt("flow_control")
                             .selected_text(format!("{:?}", self.flow_control))
@@ -1000,12 +1007,9 @@ impl eframe::App for ComTool {
                                 ui.selectable_value(&mut self.language, Language::Zh, "中文");
                                 ui.selectable_value(&mut self.language, Language::En, "English");
                             });
-                        // ui.horizontal(|ui| {
-                        //     ui.selectable_value(&mut self.language, Language::Zh, "中文");
-                        //     ui.selectable_value(&mut self.language, Language::En, "English");
-                        // });
+
                         ui.separator();
-                        // ui.weak("（语言选项暂未接入界面文案，仅作占位）");
+                        ui.weak("（语言选项暂未接入界面文案，仅作占位）");
                     });
             }
 
@@ -1014,7 +1018,6 @@ impl eframe::App for ComTool {
             ui.horizontal(|ui| {
                 ui.toggle_value(&mut self.sidebar_open, "☰ 侧边栏");
 
-                // 左侧「设置」按钮，点击打开设置窗口
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("⚙ 设置").clicked() {
                         self.show_settings = true;
@@ -1058,8 +1061,6 @@ impl eframe::App for ComTool {
             // 发送区
             ui.label("发送区:");
 
-            // 把“换行键”从裸 Enter 改成 Shift+Enter：
-            // 普通 Enter 不再被 TextEdit 消费成换行，交给 app 做回车发送
             let send_edit_response = ui.add(
                 egui::TextEdit::multiline(&mut self.send_text)
                     .desired_width(f32::INFINITY)
