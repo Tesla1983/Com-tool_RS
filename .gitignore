@@ -2,3 +2,10 @@ SerialGUI-rs/
 opencode.json
 target/
 echo_raw.txt
+AGENTS.md
+.opencode/agents/executor.md
+.opencode/agents/expert.md
+.opencode/agents/planner.md
+.opencode/prompts/executor.md
+.opencode/prompts/expert.md
+.opencode/prompts/planner.md

@@ -52,6 +52,7 @@ impl CommunicationManager for SerialCommunication {
                     port_settings_clone.port_name.clone(),
                     port_settings_clone.baudrate,
                 )
+                .data_bits(port_settings_clone.data_bits)
                 .flow_control(port_settings_clone.flowcontrol)
                 .parity(port_settings_clone.parity)
                 .stop_bits(port_settings_clone.stop_bits)

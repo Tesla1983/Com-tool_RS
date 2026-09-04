@@ -4,6 +4,7 @@ use crate::serial_impl::serial::{SerialCommunication, scan_ports};
 use eframe::egui;
 use egui::Ui;
 use rfd::FileDialog;
+use serialport::{DataBits, FlowControl, Parity, StopBits};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -209,10 +210,7 @@ fn ascii_spans_from_bytes(bytes: &[u8]) -> Vec<ColoredSpan> {
 }
 
 /// 由一组 ColoredSpan 构造等宽 14px 的 LayoutJob（彩色/ASCII 两种接收视图共用）
-fn layout_job_from(
-    spans: &[ColoredSpan],
-    default_color: egui::Color32,
-) -> egui::text::LayoutJob {
+fn layout_job_from(spans: &[ColoredSpan], default_color: egui::Color32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     for span in spans {
         job.append(
@@ -286,6 +284,12 @@ pub struct ComTool {
 
     // 当前波特率
     pub baud_rate: BaudRate,
+
+    // 当前串口参数
+    pub data_bits: DataBits,
+    pub stop_bits: StopBits,
+    pub parity: Parity,
+    pub flow_control: FlowControl,
 
     // 是否已经打开串口
     pub connected: bool,
@@ -554,7 +558,10 @@ impl ComTool {
         let settings = PortSettings {
             port_name: self.selected_port.clone(),
             baudrate: self.baud_rate.numeric_repr,
-            ..Default::default()
+            data_bits: self.data_bits,
+            stop_bits: self.stop_bits,
+            parity: self.parity,
+            flowcontrol: self.flow_control,
         };
         if let Err(e) = serial.update_settings(&settings) {
             self.receive_text
@@ -723,6 +730,10 @@ impl Default for ComTool {
             ports,
             selected_port,
             baud_rate: BAUD_RATES[11],
+            data_bits: DataBits::Eight,
+            stop_bits: StopBits::One,
+            parity: Parity::None,
+            flow_control: FlowControl::None,
             connected: false,
             receive_text: String::new(),
             send_text: String::new(),
@@ -814,7 +825,11 @@ impl eframe::App for ComTool {
                             "显示模式: {}{}{}",
                             if hex_mode { "HEX" } else { "文本" },
                             if color_mode { " + 颜色" } else { "" },
-                            if self.ascii_view { " + 字节查看" } else { "" }
+                            if self.ascii_view {
+                                " + 字节查看"
+                            } else {
+                                ""
+                            }
                         ));
                     });
 
@@ -830,10 +845,10 @@ impl eframe::App for ComTool {
 
                 ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("串口:");
+                        ui.add_sized([70.0, 20.0], egui::Label::new("端口"));
                         egui::ComboBox::from_id_salt("port")
                             .selected_text(if self.selected_port.is_empty() {
-                                "请选择串口"
+                                "请选择端口"
                             } else {
                                 &self.selected_port
                             })
@@ -851,7 +866,7 @@ impl eframe::App for ComTool {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.label("波特率:");
+                        ui.add_sized([70.0, 20.0], egui::Label::new("波特率"));
                         egui::ComboBox::from_id_salt("baud")
                             .selected_text(self.baud_rate.string_repr)
                             .show_ui(ui, |ui| {
@@ -870,6 +885,69 @@ impl eframe::App for ComTool {
                         } else if ui.button("关闭串口").clicked() {
                             self.close_port();
                         }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_sized([70.0, 20.0], egui::Label::new("数据位"));
+                        egui::ComboBox::from_id_salt("data_bits")
+                            .selected_text(format!("{:?}", self.data_bits))
+                            .show_ui(ui, |ui| {
+                                for data_bits in [
+                                    DataBits::Five,
+                                    DataBits::Six,
+                                    DataBits::Seven,
+                                    DataBits::Eight,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.data_bits,
+                                        data_bits,
+                                        format!("{:?}", data_bits),
+                                    );
+                                }
+                            });
+
+                        ui.add_sized([70.0, 20.0], egui::Label::new("停止位"));
+                        egui::ComboBox::from_id_salt("stop_bits")
+                            .selected_text(format!("{:?}", self.stop_bits))
+                            .show_ui(ui, |ui| {
+                                for stop_bits in [StopBits::One, StopBits::Two] {
+                                    ui.selectable_value(
+                                        &mut self.stop_bits,
+                                        stop_bits,
+                                        format!("{:?}", stop_bits),
+                                    );
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_sized([70.0, 20.0], egui::Label::new("校验"));
+                        egui::ComboBox::from_id_salt("parity")
+                            .selected_text(format!("{:?}", self.parity))
+                            .show_ui(ui, |ui| {
+                                for parity in [Parity::None, Parity::Odd, Parity::Even] {
+                                    ui.selectable_value(
+                                        &mut self.parity,
+                                        parity,
+                                        format!("{:?}", parity),
+                                    );
+                                }
+                            });
+                        //ui.label("流    控:");
+                        ui.add_sized([70.0, 20.0], egui::Label::new("流控"));
+                        egui::ComboBox::from_id_salt("flow_control")
+                            .selected_text(format!("{:?}", self.flow_control))
+                            .show_ui(ui, |ui| {
+                                for flow_control in [
+                                    FlowControl::None,
+                                    FlowControl::Software,
+                                    FlowControl::Hardware,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.flow_control,
+                                        flow_control,
+                                        format!("{:?}", flow_control),
+                                    );
+                                }
+                            });
                     });
 
                     ui.add_space(6.0);
@@ -966,7 +1044,6 @@ impl eframe::App for ComTool {
 
             // 接收区
             if self.color_view {
-                
                 self.render_color_receive(ui);
             } else if self.ascii_view {
                 // ASCII 模式：逐字节解码，控制字符/高位字节转义为可见形式
@@ -1019,8 +1096,6 @@ impl eframe::App for ComTool {
             }
         });
     }
-
-
 }
 
 #[cfg(test)]
@@ -1059,7 +1134,11 @@ mod tests {
 
     /// 文本模式解码：把 AnsiDecoder 输出拼成纯文本
     fn decoded(bytes: &[u8]) -> String {
-        AnsiDecoder::default().feed(bytes).into_iter().map(|s| s.text).collect()
+        AnsiDecoder::default()
+            .feed(bytes)
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
     }
 
     #[test]
@@ -1077,7 +1156,13 @@ mod tests {
         // “中” 被拆到两次 feed：第一次不完整 → 无输出；第二次补齐 → 完整字符
         let mut d = AnsiDecoder::default();
         assert!(d.feed(&[0xE4, 0xB8]).is_empty());
-        assert_eq!(d.feed(&[0xAD, b'!']).into_iter().map(|s| s.text).collect::<String>(), "中!");
+        assert_eq!(
+            d.feed(&[0xAD, b'!'])
+                .into_iter()
+                .map(|s| s.text)
+                .collect::<String>(),
+            "中!"
+        );
     }
 
     #[test]

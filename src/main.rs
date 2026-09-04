@@ -34,11 +34,10 @@ fn setup_fonts(ctx: &egui::Context) {
         r"C:\Windows\Fonts\simsun.ttc",
         r"C:\Windows\Fonts\simhei.ttf",
     ];
-    if let Some(data) = chinese_paths
-        .iter()
-        .find_map(|p| std::fs::read(p).ok())
-    {
-        fonts.font_data.insert("chinese".into(), FontData::from_owned(data).into());
+    if let Some(data) = chinese_paths.iter().find_map(|p| std::fs::read(p).ok()) {
+        fonts
+            .font_data
+            .insert("chinese".into(), FontData::from_owned(data).into());
         fonts
             .families
             .entry(FontFamily::Proportional)
@@ -56,11 +55,10 @@ fn setup_fonts(ctx: &egui::Context) {
     let symbol_paths = [
         r"C:\Windows\Fonts\seguisym.ttf", // Segoe UI Symbol（完整覆盖 Braille Patterns）
     ];
-    if let Some(data) = symbol_paths
-        .iter()
-        .find_map(|p| std::fs::read(p).ok())
-    {
-        fonts.font_data.insert("symbol".into(), FontData::from_owned(data).into());
+    if let Some(data) = symbol_paths.iter().find_map(|p| std::fs::read(p).ok()) {
+        fonts
+            .font_data
+            .insert("symbol".into(), FontData::from_owned(data).into());
         fonts
             .families
             .entry(FontFamily::Proportional)
@@ -97,9 +95,9 @@ to do list
 
 1. 完善串口刷新功能,单片机重启的时候能够持续输出日志（已完成）
 
-2. 完善串口发送功能,能够发送字符串和十六进制数据
+2. 完善串口发送功能,能够发送字符串和十六进制数据 （已完成）
 
-3. 完善串口设置功能,能够设置,数据位,停止位,校验位
+3. 完善串口设置功能,能够设置,数据字节,停止位,奇偶校验，流控
 
 */
 

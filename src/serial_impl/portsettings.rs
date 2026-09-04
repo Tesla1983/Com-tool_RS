@@ -1,4 +1,4 @@
-use serialport::{FlowControl, Parity, StopBits};
+use serialport::{DataBits, FlowControl, Parity, StopBits};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BaudRate {
@@ -91,6 +91,7 @@ pub const BAUD_RATES: [BaudRate; 20] = [
 pub struct PortSettings {
     pub port_name: String,
     pub baudrate: u32,
+    pub data_bits: DataBits,
     pub flowcontrol: FlowControl,
     pub parity: Parity,
     pub stop_bits: StopBits,
@@ -101,6 +102,7 @@ impl Default for PortSettings {
         PortSettings {
             port_name: String::new(),
             baudrate: BAUD_RATES[11].numeric_repr, // 115200
+            data_bits: DataBits::Eight,
             flowcontrol: FlowControl::None,
             parity: Parity::None,
             stop_bits: StopBits::One,
@@ -113,6 +115,7 @@ impl Clone for PortSettings {
         PortSettings {
             port_name: self.port_name.clone(),
             baudrate: self.baudrate,
+            data_bits: self.data_bits,
             flowcontrol: self.flowcontrol,
             parity: self.parity,
             stop_bits: self.stop_bits,
