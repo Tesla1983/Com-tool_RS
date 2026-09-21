@@ -8,6 +8,7 @@ use egui::{FontData, FontDefinitions, FontFamily};
 mod app;
 mod communicationtrait;
 mod config;
+mod log_file;
 mod panels;
 mod receive;
 mod serial_impl;

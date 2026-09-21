@@ -10,6 +10,10 @@
 //! 看到不一致的内容。三者也都受 [`crate::app::ComTool::max_log_chars`] 约束：
 //! 每轮接收结束后一起裁剪，从最旧的内容开始淘汰（见 [`ComTool::trim_receive_logs`]）。
 //!
+//! 追加时同一段文本会一并投递给实时文件日志（[`crate::log_file`]），所以磁盘上的
+//! 日志文件与接收区看到的内容一致；但**裁剪与清空只作用于内存镜像**——「清空日志」
+//! 不会去截断一个正在写入的文件，那是用户没有要求的破坏性操作。
+//!
 //! 两种解码路径：
 //!
 //! - [`AnsiDecoder`]：解析 CSI/SGR 转义序列并跨数据块拼接 UTF-8，用于文本视图。
@@ -523,8 +527,14 @@ pub(crate) fn show_plain_receive(ui: &mut Ui, text: &str, stick_to_bottom: bool)
 
 impl ComTool {
     /// 从事件通道取走本轮到达的全部数据，按当前视图模式写入三份镜像。
+    ///
+    /// 写镜像的同时会把同一段文本投递给实时文件日志（见 [`ComTool::log_append`]），
+    /// 因此「日志文件里有的内容」与「接收区里看到的内容」始终一致。
     pub fn receive_data(&mut self) {
         let mut received = Vec::new();
+        // 一次性提示先攒着再落笔：`&self.event_rx` 的借用还活着时不能调用需要
+        // `&mut self` 的 `push_receive_note`。
+        let mut notes: Vec<String> = Vec::new();
 
         if let Some(rx) = &self.event_rx {
             while let Ok(event) = rx.try_recv() {
@@ -533,15 +543,20 @@ impl ComTool {
                         received.extend_from_slice(&data);
                     }
                     ChannelEvent::Failed(msg) => {
-                        self.receive_text.push_str(&format!("串口错误: {}\n", msg));
+                        notes.push(format!("串口错误: {msg}\n"));
                         self.connected = false;
                     }
                     ChannelEvent::Closed => {
-                        self.receive_text.push_str("串口连接已关闭\n");
+                        notes.push("串口连接已关闭\n".to_string());
                         self.connected = false;
                     }
                 }
             }
+        }
+
+        // 提示先落笔，保持与旧实现相同的顺序：本次的错误提示显示在本批数据之前。
+        for note in notes {
+            self.push_receive_note(note);
         }
 
         if !received.is_empty() {
@@ -553,6 +568,7 @@ impl ComTool {
                 }
                 line.push('\n');
                 self.receive_text.push_str(&line);
+                self.log_append(&line);
                 self.display_spans.push(ColoredSpan {
                     text: line,
                     style: AnsiStyle::default(),
@@ -560,23 +576,30 @@ impl ComTool {
             } else if self.ascii_view {
                 // ASCII 模式：逐字节解码，控制字符/高位字节转义为可见形式
                 let spans = ascii_spans_from_bytes(&received);
+                let mut plain = String::new();
                 for span in spans {
-                    self.ascii_text.push_str(&span.text);
-                    self.receive_text.push_str(&span.text);
+                    plain.push_str(&span.text);
                     self.ascii_spans.push(span);
                 }
+                self.ascii_text.push_str(&plain);
+                self.receive_text.push_str(&plain);
+                self.log_append(&plain);
             } else {
                 // 文本模式：解析 ANSI 颜色并跨包拼接 UTF-8
                 let spans = self.decoder.feed(&received);
+                let mut plain = String::new();
                 for span in spans {
-                    self.receive_text.push_str(&span.text);
+                    plain.push_str(&span.text);
                     self.display_spans.push(span);
                 }
+                self.receive_text.push_str(&plain);
+                self.log_append(&plain);
             }
         }
 
         // 无论本次有没有新数据都裁一遍：开销是 O(日志长度) 的字符计数，且不会
         // 增长内存。放在这里而不是各分支内部，是为了让"上限"只有一处实现。
+        // 注意裁剪只作用于内存镜像，实时文件日志不受这个上限约束。
         self.trim_receive_logs();
     }
 
@@ -598,6 +621,9 @@ impl ComTool {
     }
 
     /// 清空三份接收镜像、复位解码器残留，并把滚动位置一并归零。
+    ///
+    /// 只动内存：正在记录的日志文件保持原样（要停止记录请用「停止记录」），否则
+    /// 用户清一下屏幕就会连带丢失磁盘上已经记下的内容。
     pub fn clear_receive(&mut self, ui: &egui::Ui) {
         self.receive_text.clear();
         self.display_spans.clear();

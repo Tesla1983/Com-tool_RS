@@ -11,7 +11,9 @@
 //! - 接收日志 `receive_text` / `display_spans` / `ascii_text` / `ascii_spans`：虽然
 //!   现在有 `max_log_chars` 上限，但把日志写进存档会让退出时的保存变慢，且没有
 //!   明确需求（见开发计划 P3），因此仍不落盘；
-//! - 模态窗口开关 `show_settings` / `show_info`：不应该在启动瞬间自动弹窗。
+//! - 模态窗口开关 `show_settings` / `show_info`：不应该在启动瞬间自动弹窗；
+//! - 实时文件日志 `log`：它持有文件句柄与写盘线程，活不过进程边界；而且「启动
+//!   即自动开始写文件」不是用户要的行为——上一次会话的记录必须由用户显式停止。
 //!
 //! 除了"存什么"，本模块还负责**启动时的不变量修复**：手改过的存档可能包含越界的
 //! 重绘间隔、或者一个面板都不显示的界面配置，这些都在 [`restore_runtime_state`]
@@ -55,6 +57,10 @@ pub fn restore_runtime_state(app: &mut ComTool) {
     // 模态窗口不应在启动时自动出现。
     app.show_settings = false;
     app.show_info = false;
+
+    // 实时文件日志：持有文件句柄与写盘线程，必须重建（也就是「不记录」）。
+    // 直接赋值即可——`LogSink` 的 Drop 会投 `Halt` 并等待缓冲区落盘。
+    app.log = None;
 
     // 端口列表必须反映当前系统：插拔设备后重启，看到的不该是旧快照。
     app.ports = scan_ports();
@@ -138,6 +144,7 @@ mod tests {
             repaint_interval_ms: 40,
             clear_send_after_send: false,
             default_log_file_name: "MyLog_%Y.txt".to_string(),
+            log_dir: "E:/serial-logs".to_string(),
             check_update_on_start: true,
             show_receive_panel: true,
             show_send_panel: false,
@@ -186,6 +193,7 @@ mod tests {
             restored.default_log_file_name,
             original.default_log_file_name
         );
+        assert_eq!(restored.log_dir, original.log_dir);
         assert_eq!(
             restored.check_update_on_start,
             original.check_update_on_start
@@ -214,6 +222,7 @@ mod tests {
         assert!(restored.event_rx.is_none(), "事件通道必须重建");
         assert!(!restored.show_settings, "设置窗口不该自动弹出");
         assert!(!restored.show_info, "信息窗口不该自动弹出");
+        assert!(restored.log.is_none(), "实时文件日志必须重建");
         assert!(restored.receive_text.is_empty(), "接收日志不参与持久化");
         assert!(restored.display_spans.is_empty());
         assert!(restored.ascii_text.is_empty());
@@ -278,6 +287,35 @@ mod tests {
         assert!(!app.connected);
         assert!(app.visible_panel_count() > 0);
         assert_eq!(app.max_log_chars, crate::app::DEFAULT_MAX_LOG_CHARS);
+        assert!(!app.is_logging(), "默认不处于记录状态");
+        assert!(
+            app.log_dir.is_empty(),
+            "默认输出目录留空 = 用平台默认目录，而不是把本机路径烧进默认值"
+        );
+    }
+
+    /// 正在进行的实时文件日志不得跨进程延续。
+    ///
+    /// 「启动就开始写文件」不是用户要的行为：上一次会话停在哪、新会话该不该记，
+    /// 只能由用户显式决定。
+    #[test]
+    fn running_log_is_not_restored() {
+        let dir = std::env::temp_dir().join(format!("comtool-config-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("临时目录应可创建");
+        let log_path = dir.join("run.txt");
+        let file = std::fs::File::create(&log_path).expect("应可创建日志文件");
+
+        let mut saved = customized();
+        saved.log = Some(crate::log_file::LogSink::start(log_path, file));
+        assert!(saved.is_logging());
+
+        let restored = round_trip(&saved);
+
+        assert!(!restored.is_logging(), "启动后不得自动开始记录");
+        assert!(restored.log_path().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 存档被手改成"一个面板都不显示"时，启动兜底修好，而不是给用户一片空白。

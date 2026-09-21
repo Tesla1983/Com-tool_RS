@@ -64,4 +64,21 @@ mod tests {
             crate::receive::show_plain_receive(ui, &app.receive_text, app.auto_scroll);
         });
     }
+
+    /// 侧边栏（含文件日志区块）要能画出来，且不绘制时不得产生任何操作请求。
+    #[test]
+    fn sidebar_renders_without_panic() {
+        let mut app = ComTool::default();
+
+        let mut open = true;
+        egui::__run_test_ui(|ui| {
+            let action = app.show_sidebar(ui, &mut open);
+            assert!(!action.log_toggle_requested, "仅绘制不应触发开始记录");
+            assert!(!action.pick_log_dir_requested);
+            assert!(!action.clear_requested);
+            assert!(!action.export_requested);
+        });
+        assert!(open, "仅绘制不应改变侧边栏开关");
+        assert!(!app.is_logging(), "仅绘制不得开始写日志文件");
+    }
 }

@@ -3,11 +3,13 @@
 //! 旧版这里是「只有一个语言占位下拉」的空壳；现在每一项都绑到实际生效的字段。
 //! 生效范围分三类，界面上如实标注：
 //!
-//! - **立即生效**：主题、日志长度上限、自动滚动、重绘间隔、发送后清空；
-//! - **接线待做**：默认日志文件名（P4 实时文件日志使用）；
+//! - **立即生效**：主题、日志长度上限、自动滚动、重绘间隔、发送后清空、文件名模板；
+//! - **打开窗口时生效**：日志输出目录（记录过程中改动会在下次开始记录时生效）；
 //! - **接线待做**：启动时检查更新（P6 版本检查使用，默认关闭）。
 
 use crate::app::{ComTool, Language};
+use crate::log_file::render_log_file_name;
+use chrono::Local;
 use eframe::egui;
 use egui::Ui;
 
@@ -22,6 +24,11 @@ impl ComTool {
         if !self.show_settings {
             return;
         }
+
+        // 目录选择会弹出模态对话框，不能在绘制过程中直接调用：先记录意图，
+        // 等窗口画完、闭包结束之后再派发（与 sidebar 的 action 同一条约定）。
+        let mut pick_dir = false;
+        let mut reset_dir = false;
 
         // 用局部变量接收窗口开关再回写：与 sidebar.rs 同一套写法，避免在闭包里
         // 同时可变借用 self 与 self.show_settings。
@@ -83,13 +90,36 @@ impl ComTool {
                 ui.separator();
                 ui.heading("文件日志");
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("默认文件名"));
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("文件名模板"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.default_log_file_name)
                             .desired_width(240.0),
                     );
                 });
-                ui.weak("实时文件日志将在 P4 接线；名称支持 %Y-%m-%d_%H-%M-%S 时间格式");
+                // 把模板实时展开给用户看：占位符写错（例如 %Q）时会退回默认模板，
+                // 与其等开始记录时才发现，不如当场看见将要生成的名字。
+                ui.weak(format!(
+                    "下次开始记录时生成: {}",
+                    render_log_file_name(&self.default_log_file_name, Local::now())
+                ));
+
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("输出目录"));
+                    ui.label(self.effective_log_dir().display().to_string());
+                });
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
+                    if ui.button("选择目录").clicked() {
+                        pick_dir = true;
+                    }
+                    if ui.button("恢复默认").clicked() {
+                        reset_dir = true;
+                    }
+                    if self.is_logging() {
+                        ui.label(format!("记录中，已写 {} 字节", self.log_written_bytes()));
+                    }
+                });
+                ui.weak("接收区的内容会同步写入该文件；日志文件不受上面的长度上限约束");
 
                 ui.separator();
                 ui.heading("更新");
@@ -100,5 +130,12 @@ impl ComTool {
                 ui.weak("以上均为用户偏好，改动即时生效并在退出时自动保存");
             });
         self.show_settings = open;
+
+        if pick_dir {
+            self.pick_log_dir();
+        }
+        if reset_dir {
+            self.reset_log_dir();
+        }
     }
 }

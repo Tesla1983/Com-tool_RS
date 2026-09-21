@@ -16,7 +16,7 @@
   默认值、配置、测试或脚本；不得停止/杀掉/禁用任何可能占用 COM3 的进程、服务或驱动。
   对 COM3 只能"看"（不打开端口的只读枚举，且需先说明理由），不能"碰"。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。34 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。50 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
 - 一次批准只对当次生效，不构成对后续轮次的授权。
@@ -53,7 +53,7 @@
 |---|---|---|---|
 | **状态层** | `struct ComTool`（`src/app.rs`） | 定义功能所需的跨帧/跨调用状态字段 | `connected`、`display_spans`、`color_view` |
 | **初始化层** | `impl Default for ComTool`（`src/app.rs`） | 给所有状态字段设默认值（漏了会编译报错） | `color_view: false`、`baud_rate: DEFAULT_BAUD_RATE` |
-| **业务逻辑层** | `impl ComTool`（`src/app.rs` / `src/receive.rs`） | 串口生命周期、数据解析、布局构建 | `open_port()`、`receive_data()`、`build_layout()` |
+| **业务逻辑层** | `impl ComTool`（`src/app.rs` / `src/receive.rs` / `src/log_file.rs`） | 串口生命周期、数据解析、布局构建、日志写盘 | `open_port()`、`receive_data()`、`build_layout()`、`start_logging()` |
 | **UI 层** | `impl eframe::App for ComTool`（`src/app.rs`）+ `show_sidebar()`（`src/sidebar.rs`） | 绘制控件并把 UI 事件接到业务方法上 | `ui.button("发送").clicked()` |
 | **持久化层** | `src/config.rs` | 决定哪些字段落盘、哪些在启动时重建 | `load()`、`save()`、`restore_runtime_state()` |
 
@@ -63,7 +63,8 @@
 |---|---|
 | `src/main.rs` | 入口；`APP_TITLE` 常量；字体回退链配置；`eframe::run_native` |
 | `src/app.rs` | `ComTool` 状态、`Default`、`ThemeChoice`、串口生命周期、视图级辅助方法、`eframe::App` 顶层编排 |
-| `src/receive.rs` | 接收链路：三份镜像状态、`AnsiDecoder`、字节级可视化、三种视图渲染、`max_log_chars` FIFO 淘汰 |
+| `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`、字节级可视化、三种视图渲染、`max_log_chars` FIFO 淘汰 |
+| `src/log_file.rs` | 实时文件日志：后台写盘线程（`LogSink`）、文件名模板渲染、同名防截断、待写队列上限 |
 | `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态 |
 | `src/panels/mod.rs` | 面板模块声明 + 无头 UI 冒烟测试 |
 | `src/panels/menu_bar.rs` | 顶部菜单栏（文件 / 设置 / 视图）；返回 `MenuAction` |
@@ -87,6 +88,7 @@ receive_data()                     ← 业务层（src/receive.rs）：拉取原
    ├─ 字节查看    → ascii_spans_from_bytes → push 进 ascii_spans
    └─ 文本模式    → decoder.feed() 解析 ANSI 颜色 → push 进 display_spans
         │        （三条分支都同步 append 到 receive_text）
+        │        （每条分支的文本同时经 log_append() 投给实时文件日志，见 §2.1）
         ▼
 display_spans / ascii_spans         ← 状态层：片段缓存（内存）
         │
@@ -96,6 +98,21 @@ build_layout() / build_ascii_layout() ← 业务层：转成 egui 的 LayoutJob
         ▼
 egui::Label::new(job).wrap()        ← UI 层：渲染多色文本
 ```
+
+### 2.1 实时文件日志的旁路（P4）
+
+接收链路有第二条出海口，与渲染无关：
+
+```
+receive_data() ─┬─ 四个内存镜像（显示用，受 max_log_chars 截断）
+                └─ log_append(text) ──sync_channel──> 写盘线程 ──BufWriter──> 日志文件
+                                                      （队列一排空就 flush）
+```
+
+- 投递口只有两个：`ComTool::log_append()`（只写日志）与 `ComTool::push_receive_note()`
+  （同时写 `receive_text` 与日志）。**不要在 `receive_data` 里绕开它们直接 `push_str`**。
+- 日志文件**不受** `max_log_chars` 约束，也不会被「清空日志」截断——那两个只作用于内存镜像。
+- 写盘失败或队列满都由 `poll_log_events()` 在每帧开头检查，命中即自动停止记录并写一条提示。
 
 发送方向：
 
@@ -109,7 +126,7 @@ ui.button("发送") → send_data() → ByteChannel::write(bytes)
                                      串口
 ```
 
-> **同一份接收数据维护三份镜像**：`receive_text`（纯文本，供导出与普通视图）、`display_spans`（彩色片段）、`ascii_text` / `ascii_spans`（字节可视化）。三者必须同步清空、同步追加——`ComTool::clear_receive()` 是唯一的复位入口。
+> **同一份接收数据维护四份镜像**：`receive_text`（纯文本，供导出与普通视图）、`display_spans`（彩色片段）、`ascii_text` / `ascii_spans`（字节可视化）。四者必须同步清空、同步追加——`ComTool::clear_receive()` 是唯一的复位入口。裁剪只作用于这四份内存镜像；磁盘上的实时日志文件是另一条旁路（见 §2.1）。
 
 ---
 
@@ -148,6 +165,7 @@ ui.button("发送") → send_data() → ByteChannel::write(bytes)
 ┌────────────────────────────────────────────────────────────┐
 │ ④ 在 impl ComTool 里写业务逻辑方法                         │
 │      放对模块：接收相关 → receive.rs；串口生命周期 → app.rs  │
+│                文件日志相关 → log_file.rs                    │
 └────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -230,7 +248,7 @@ impl eframe::App for ComTool {
 | 接收数据显示 | `display_spans`、`receive_text`、`decoder` | `receive_data()`、`build_layout()`（`receive.rs`） | 接收区滚动区 + 「颜色」勾选框 |
 | 字节查看视图 | `ascii_text`、`ascii_spans` | `render_ascii_receive()`（`receive.rs`） | 「字节查看」勾选框 |
 | HEX 模式 | `hex_view` | `receive_data()` 的 HEX 分支 | 「HEX / 文本」勾选框 |
-| 清空接收 | 全部三份镜像 | `clear_receive()`（`receive.rs`） | 侧边栏「清空日志」按钮 |
+| 清空接收 | 全部四份镜像 | `clear_receive()`（`receive.rs`） | 侧边栏「清空日志」按钮 |
 | 导出接收数据 | `receive_text` | `export_receive_text()`（`app.rs`） | 侧边栏「导出日志」按钮 |
 | 发送数据 | `send_text` | `send_data()`（`app.rs`） | 「发送」按钮 / Enter 键 |
 | 端口枚举 | `ports`、`selected_port` | `refresh_ports()`（`app.rs`）、`scan_ports()`（`serial_impl`） | 侧边栏「刷新」按钮 |
@@ -245,6 +263,9 @@ impl eframe::App for ComTool {
 | 发送后清空 | `clear_send_after_send` | `send_data()`（`app.rs`） | 设置窗口 |
 | 面板显隐（至少留一个） | `sidebar_open` / `show_receive_panel` / `show_send_panel` | `visible_panel_count()`（`app.rs`） | 视图菜单「面板」 |
 | 信息窗口 | `show_info` / `APP_TITLE` | `show_info_window()`（`panels/info.rs`） | 文件菜单「信息」 |
+| 实时文件日志 | `log`（`Some` = 记录中）、`log_dir`、`default_log_file_name` | `start_logging()` / `stop_logging()` / `toggle_logging()` / `log_append()`（`log_file.rs`） | 侧边栏「文件日志」区 / 文件菜单「开始-停止记录日志」 |
+| 日志写盘故障上报 | — | `poll_log_events()`（`log_file.rs`，每帧在 `receive_data()` 之后调用） | 无（自动停止并在接收区提示） |
+| 日志输出目录选择 | `log_dir` | `pick_log_dir()` / `reset_log_dir()` / `effective_log_dir()`（`log_file.rs`） | 设置窗口「选择目录」/「恢复默认」，侧边栏「选择目录」 |
 
 ---
 
@@ -282,4 +303,12 @@ impl eframe::App for ComTool {
 
 15. **启动期的不变量修复放 `config::restore_runtime_state`**：存档是可以被手改的（也可能来自更早的版本），重绘间隔越界、面板全隐藏这类情况统一在那里兜底，并配单元测试——`restore_runtime_state` 不依赖 `eframe::CreationContext`，正是为了可测试才拆出来的。
 
-16. **UI 冒烟测试用 `egui::__run_test_ui`**：`src/panels/mod.rs` 底部已有先例（菜单栏、设置/信息窗口、三种接收视图）。它不需要窗口、不需要串口，能覆盖"面板嵌套顺序、控件 ID 冲突、布局调用"这类只有运行期才暴露的问题，但也**只能**证明"画得出来不 panic"，外观仍需人工确认。
+16. **UI 冒烟测试用 `egui::__run_test_ui`**：`src/panels/mod.rs` 底部已有先例（菜单栏、设置/信息窗口、三种接收视图、侧边栏）。它不需要窗口、不需要串口，能覆盖"面板嵌套顺序、控件 ID 冲突、布局调用"这类只有运行期才暴露的问题，但也**只能**证明"画得出来不 panic"，外观仍需人工确认。
+
+17. **实时文件日志的写盘只能在后台线程**（`log_file.rs::worker_main`）：UI 线程不许对日志文件做任何 `write`。停机靠投 `Halt`，且 `Drop` 里必须用 **`try_send`**——队列满时 `send` 会阻塞，一个卡住的磁盘就能让"停止记录"把 UI 线程永久挂住。文件由 UI 线程 `File::create` 打开后再交给线程：这是刻意不同于 `open_port()`「先乐观置位、失败再回滚」的写法（那个假阳性缺陷还没修），不要改回去。
+
+18. **接收镜像是"双写"的**：每次追加要么走 `push_receive_note()`（`receive_text` + 日志），要么 `push_str` 之后紧跟 `log_append()`（只进日志）。在 `receive_data` 里直接 `self.receive_text.push_str(...)` 会让日志文件悄悄少一段数据。另外 `&self.event_rx` 的借用活着时不能调用 `&mut self` 方法，所以提示类消息要先攒进 `Vec<String>` 再落笔。
+
+19. **"记录中"的唯一事实来源是 `log.is_some()`**：不要再加 `bool` 标志位（两个字段表达同一件事迟早不一致），查询统一用 `is_logging()` / `log_path()` / `log_written_bytes()`。日志文件**绝不允许被静默覆盖**——同名时 `create_log_file()` 会追加 `_1`、`_2` 后缀，改成 `File::create` 就等于让用户丢日志。
+
+20. **日志文件名模板来自用户输入，必须当不可信数据处理**：`chrono` 的 `DateTime::format` 遇到非法占位符会 **panic**，所以先用 `StrftimeItems` 逐项检查再格式化（`render_log_file_name()`）；路径分隔符等非法字符会被替换为 `_`，避免 `../` 之类把日志写出选定目录。

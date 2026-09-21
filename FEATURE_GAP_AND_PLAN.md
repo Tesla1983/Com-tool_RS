@@ -20,11 +20,11 @@
 | **全局功能面**（33 项上游能力） | **≈ 40%** | 完整 12 / 部分 2 / 缺失 19（部分按 0.5 计权） |
 | **工程配套**（持久化 · 设置体系 · 图表 · 更新 · 打包） | **≈ 0 ~ 12%** | 几乎空白，是最大缺口 |
 
-**最该先做的三件事**：
+**最该先做的三件事**（2026-09-21 修订）：
 
-1. 决定 GPLv3 合规怎么处理（见 §6）——这是唯一可能推翻整个项目定位的问题；
-2. 拆分 `src/app.rs`（现 1173 行，功能继续堆会失控）；
-3. 接上 serde 持久化——依赖已装、`eframe` 的 `persistence` feature 已启用却完全没用，投入产出比最高。
+1. ~~决定 GPLv3 合规怎么处理~~ → **已降为最低优先级**：项目所有者决定先按功能计划推进，合规决策推迟到功能收尾之后（详见 §6 顶部说明）；
+2. 拆分 `src/app.rs`（现 1173 行，功能继续堆会失控）—— **✅ 已完成（P0）**；
+3. 接上 serde 持久化——依赖已装、`eframe` 的 `persistence` feature 已启用却完全没用，投入产出比最高 —— **✅ 已完成（P1）**。
 
 ---
 
@@ -126,9 +126,20 @@ src/
 
 ---
 
-## 6. 合规风险（优先级最高，必须先拍板）
+## 6. 合规风险（**已按所有者决定降为最低优先级**）
+
+> **2026-09-21 决定**：项目所有者明确要求把 GPLv3 合规排到**最低优先级**，先按 §7
+> 的功能计划推进。因此本节从"必须先拍板"改为"待办清单里排最后"。
+>
+> 需要清楚的是：**这不是"风险已消除"，只是"决策被推迟"**。在做任何对外分发（发布、
+> 交付、上架）之前必须回到本节二选一。仓库目前仍是**无许可证状态**（无 `LICENSE`、
+> `Cargo.toml` 无 `license` 字段），私下自用不受影响。
 
 `SerialGUI-rs` 采用 **GPLv3**（见 `SerialGUI-rs/NOTICE.md`、`SerialGUI-rs/LICENSE-GPLv3`）。
+
+> 注：下面描述的是**改造前**的代码状态。P0 已完成通信层独立重写，`src/` 下已不存在
+> 与上游逐字相同的代码段（见 `REFACTOR_REPORT.md` §2.4）；但法律意义上的 clean-room
+> 要求重写者从未接触过原实现，这一点在单人会话里无法满足，所以本节结论仍然成立。
 
 而 comtool-rs 的：
 
@@ -151,11 +162,15 @@ src/
 
 > **注意**：comtool-rs 的 `serial.rs` 已经对上游做了实质改进（修了 `Opening` 态死锁、加了 `data_bits`、区分了 `TimedOut`/`WouldBlock`）。方案 ② 重写时**必须保留这些改进**，它们才是项目的真实价值。
 
-**这个决定必须在投入后续功能开发之前拍板**，否则越往后迁移成本越高。
+**这个决定已由所有者推迟到功能收尾之后**（2026-09-21），但必须在**对外分发之前**
+完成二选一，否则越往后迁移成本越高。
 
 ---
 
 ## 7. 开发计划
+
+> 执行状态见 `HANDOVER.md`（该文档跟踪实际进度、验证证据与偏差）。下表状态列同步于
+> 2026-09-21。
 
 ```mermaid
 graph LR
@@ -168,15 +183,15 @@ graph LR
   P5 --> P6
 ```
 
-| 阶段 | 内容 | 涉及文件 | 验收标准 | 工期 |
-|---|---|---|---|---|
-| **P0** 架构拆分 | `app.rs` 拆为 `app.rs` / `receive.rs` / `sidebar.rs` / `panels/`；清理 `config.rs` 空文件 | `src/**` | `cargo check` + 6 个测试全绿，行为零变化 | 1-2 天 |
-| **P1** 配置与持久化 | 引入 `pub struct AppSettings`（serde 现成）；`ComTool` derive `Serialize/Deserialize`，`serial` / `event_rx` / `decoder` / `Instant` 全部 `#[serde(skip)]`；实现 `fn save()` | 新增 `src/settings.rs`；改 `src/app.rs`、`src/main.rs` | 改设置 → 退出 → 重启，设置全保留 | 2-3 天 |
-| **P2** 菜单栏 + 设置面板 | 顶部 `TopBottomPanel`：File(Info/Quit) · Settings（真正接线的设置项）· 主题切换 · Byte mode · 面板显隐互斥（至少保留一个面板） | `src/panels/menu_bar.rs`、`src/panels/settings.rs` | 上游 F 组 4 项 + G 组 6 项全部可用 | 1-2 天 |
-| **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，注意 `ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | `src/receive.rs` | 挂机 1 小时内存稳定；上游 B 组 100% | 1 天 |
-| **P4** 实时文件日志 | Start/Stop Log 开关；默认文件名 `LogFile_%Y-%m-%d_%H-%M-%S.txt`（chrono 现成）；**写入走独立线程 + `BufWriter`，绝不在 UI 线程 `write_all`** | `src/panels/file_log.rs` | 开启后数据实时落盘，UI 无卡顿 | 1-2 天 |
-| **P5** 实时图表 | 建议引 `egui_plot` 而非移植上游手绘代码；支持逗号分隔多通道；`stream_buffer` 处理跨包分片；样本上限可配 | `src/panels/chart.rs` | ≥4 通道实时曲线 + 自动缩放 | 2-4 天 |
-| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或超时 3s 静默失败**，内网环境要能跳过）；应用图标；`[profile.release] opt-level = 2`；补文档 | `src/info.rs`、`src/update.rs`、`Cargo.toml`、`assets/` | 上游 33 项覆盖率 ≥ 85% | 1-2 天 |
+| 阶段 | 内容 | 涉及文件 | 验收标准 | 工期 | 状态 |
+|---|---|---|---|---|---|
+| **P0** 架构拆分 | `app.rs` 拆为 `app.rs` / `receive.rs` / `sidebar.rs` / `panels/`；清理 `config.rs` 空文件 | `src/**` | `cargo check` + 6 个测试全绿，行为零变化 | 1-2 天 | ✅ 完成（29/29 逐行等价） |
+| **P1** 配置与持久化 | 引入 `pub struct AppSettings`（serde 现成）；`ComTool` derive `Serialize/Deserialize`，`serial` / `event_rx` / `decoder` / `Instant` 全部 `#[serde(skip)]`；实现 `fn save()` | 新增 `src/settings.rs`；改 `src/app.rs`、`src/main.rs` | 改设置 → 退出 → 重启，设置全保留 | 2-3 天 | ✅ 完成（未做磁盘实测） |
+| **P2** 菜单栏 + 设置面板 | 顶部 `TopBottomPanel`：File(Info/Quit) · Settings（真正接线的设置项）· 主题切换 · Byte mode · 面板显隐互斥（至少保留一个面板） | `src/panels/menu_bar.rs`、`src/panels/settings.rs` | 上游 F 组 4 项 + G 组 6 项全部可用 | 1-2 天 | ✅ 完成（实际用 `egui::Panel::top`，egui 0.36 已无 `TopBottomPanel`；G 组 2 项待 P4/P6 消费，界面已标注） |
+| **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，注意 `ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | `src/receive.rs` | 挂机 1 小时内存稳定；上游 B 组 100% | 1 天 | 🟡 FIFO + `auto_scroll` ✅（提前随 P2 落地）；时间戳前缀未做 |
+| **P4** 实时文件日志 | Start/Stop Log 开关；默认文件名 `LogFile_%Y-%m-%d_%H-%M-%S.txt`（chrono 现成）；**写入走独立线程 + `BufWriter`，绝不在 UI 线程 `write_all`** | `src/panels/file_log.rs` | 开启后数据实时落盘，UI 无卡顿 | 1-2 天 | ✅ 完成（落在 `src/log_file.rs`，另含目录选择与同名防截断） |
+| **P5** 实时图表 | 建议引 `egui_plot` 而非移植上游手绘代码；支持逗号分隔多通道；`stream_buffer` 处理跨包分片；样本上限可配 | `src/panels/chart.rs` | ≥4 通道实时曲线 + 自动缩放 | 2-4 天 | ⬜ 下一步 |
+| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或超时 3s 静默失败**，内网环境要能跳过）；应用图标；`[profile.release] opt-level = 2`；补文档 | `src/info.rs`、`src/update.rs`、`Cargo.toml`、`assets/` | 上游 33 项覆盖率 ≥ 85% | 1-2 天 | 🟡 Info 弹窗 ✅；版本检查/图标/profile 未做 |
 
 **总工期估算：10 ~ 17 个工作日**（单人，含调试与回归）。
 
@@ -197,12 +212,13 @@ graph LR
 
 | 风险 | 等级 | 影响 | 对策 |
 |---|---|---|---|
-| **GPLv3 合规** | **高** | 决定项目能否闭源/商用 | 先拍板，见 §6 |
-| `app.rs` 已 1173 行，继续堆会失控 | 中高 | 后续每个功能改造成本递增 | P0 先拆分 |
-| 三镜像（`receive_text`/`display_spans`/`ascii_spans`）同步淘汰易出错 | 中 | 日志与显示不一致 | 淘汰逻辑收敛到单一函数，补单元测试（现仅 6 个） |
-| 实时文件日志阻塞 UI 线程 | 中 | 高波特率下界面卡死 | 独立线程 + channel + `BufWriter`，禁用同步写 |
-| 版本检查在离线/内网不可用 | 低 | 启动卡顿 | 默认关闭或 3s 超时静默失败 |
+| **GPLv3 合规** | **低**（原「高」，2026-09-21 推迟） | 决定项目能否闭源/商用；**对外分发前必须解决** | 已降为最低优先级，见 §6；分发前二选一 |
+| `app.rs` 已 1173 行，继续堆会失控 | 中高 → **已解除** | 后续每个功能改造成本递增 | P0 已拆分，现 434 行 + `panels/` |
+| 三镜像（`receive_text`/`display_spans`/`ascii_spans`）同步淘汰易出错 | 中 → **已缓解** | 日志与显示不一致 | 淘汰收敛到唯一入口 `trim_receive_logs()`，边界切分有单元测试 |
+| 实时文件日志阻塞 UI 线程 | 中 → **已缓解** | 高波特率下界面卡死 | 写盘在独立线程 + `BufWriter`；待写队列有上限，满了停下报告而不是吃内存（P4） |
+| 版本检查在离线/内网不可用 | 低 | 启动卡顿 | 默认关闭或 3s 超时静默失败（P6 未做） |
 | 持久化反序列化在版本升级后不兼容 | 低 | 启动 panic 或丢设置 | `#[serde(default)]`，字段只增不删 |
+| 上述单元测试覆盖不足 | 低 → **已缓解** | 回归发现不了 | 测试数 6 → 19 → 34 → **50**（含接受链路、裁剪边界、面板无头 UI、日志落盘） |
 
 ### 资源需求
 

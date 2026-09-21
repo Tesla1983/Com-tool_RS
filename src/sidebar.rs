@@ -21,6 +21,10 @@ pub(crate) struct SidebarAction {
     pub clear_requested: bool,
     /// 用户点了「导出日志」。
     pub export_requested: bool,
+    /// 用户点了「开始记录」/「停止记录」。
+    pub log_toggle_requested: bool,
+    /// 用户点了日志的「选择目录」。
+    pub pick_log_dir_requested: bool,
 }
 
 impl ComTool {
@@ -40,6 +44,13 @@ impl ComTool {
         let color_mode = self.color_view;
         let rx_bytes = self.receive_text.len();
         let port_list = self.ports.clone();
+        let is_logging = self.is_logging();
+        let log_path = self
+            .log_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let log_written = self.log_written_bytes();
+        let log_dir = self.effective_log_dir().display().to_string();
 
         egui::Panel::right("right_sidebar")
             .resizable(true)
@@ -232,6 +243,41 @@ impl ComTool {
                             action.export_requested = true;
                         }
                     });
+
+                    ui.add_space(6.0);
+
+                    egui::CollapsingHeader::new("文件日志")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let label = if is_logging {
+                                    "停止记录"
+                                } else {
+                                    "开始记录"
+                                };
+                                if ui.button(label).clicked() {
+                                    action.log_toggle_requested = true;
+                                }
+                                if ui.button("选择目录").clicked() {
+                                    action.pick_log_dir_requested = true;
+                                }
+                            });
+
+                            if is_logging {
+                                ui.label(format!("已记录 {} 字节", log_written));
+                                let name = std::path::Path::new(&log_path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| log_path.clone());
+                                // 只显示文件名：完整路径太长会把侧边栏撑开，
+                                // 悬停时再给出完整路径。
+                                ui.label(name).on_hover_text(&log_path);
+                            } else {
+                                ui.weak("未记录");
+                            }
+
+                            ui.weak(format!("输出目录: {log_dir}"));
+                        });
                 });
             });
 

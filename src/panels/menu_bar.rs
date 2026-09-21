@@ -18,6 +18,8 @@ pub(crate) struct MenuAction {
     pub info_requested: bool,
     /// 用户点了「设置 → 打开设置窗口」。
     pub settings_requested: bool,
+    /// 用户点了「文件 → 开始/停止记录日志」。
+    pub log_toggle_requested: bool,
     /// 用户点了「文件 → 退出」。
     pub quit_requested: bool,
 }

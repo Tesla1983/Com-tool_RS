@@ -8,9 +8,10 @@
 //!    派发到对应的方法上。
 //!
 //! 接收链路的解码与裁剪在 [`crate::receive`]，右侧边栏在 [`crate::sidebar`]，
-//! 菜单栏与各类窗口在 [`crate::panels`]。
+//! 菜单栏与各类窗口在 [`crate::panels`]，实时文件日志在 [`crate::log_file`]。
 
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
+use crate::log_file::LogSink;
 use crate::receive::{AnsiDecoder, AnsiStyle, ColoredSpan, show_plain_receive};
 use crate::serial_impl::{DEFAULT_BAUD_RATE, SerialChannel, SerialConfig, scan_ports};
 use eframe::egui;
@@ -138,14 +139,22 @@ pub struct ComTool {
     pub repaint_interval_ms: u64,
     /// 发送后是否清空输入框
     pub clear_send_after_send: bool,
-    /// 默认日志文件名模板（P4 使用）
+    /// 默认日志文件名模板（实时文件日志使用，`chrono` 负责展开时间占位）
     pub default_log_file_name: String,
+    /// 实时文件日志的输出目录（空 = 用 [`crate::log_file::default_log_dir`]）
+    pub log_dir: String,
     /// 启动时是否检查更新（P6 使用，默认关闭）
     pub check_update_on_start: bool,
     /// 接收区是否显示
     pub show_receive_panel: bool,
     /// 发送区是否显示
     pub show_send_panel: bool,
+
+    // —— 运行时状态（不落盘，见 crate::config）——
+    /// 正在运行的实时文件日志。`Some` 即表示「记录中」——不另设 bool 标志位，
+    /// 两个字段表达同一件事迟早会不一致。
+    #[serde(skip)]
+    pub log: Option<LogSink>,
 }
 
 impl ComTool {
@@ -200,7 +209,7 @@ impl ComTool {
 
     pub fn export_receive_text(&mut self) {
         if self.receive_text.is_empty() {
-            self.receive_text.push_str("没有可导出的数据\n");
+            self.push_receive_note("没有可导出的数据\n".to_string());
             return;
         }
 
@@ -213,12 +222,10 @@ impl ComTool {
         };
         match std::fs::write(&path, &self.receive_text.as_bytes()) {
             Ok(_) => {
-                self.receive_text
-                    .push_str(&format!("已导出到: {}\n", path.display()));
+                self.push_receive_note(format!("已导出到: {}\n", path.display()));
             }
             Err(e) => {
-                self.receive_text
-                    .push_str(&format!("导出接收数据失败: {}\n", e));
+                self.push_receive_note(format!("导出接收数据失败: {e}\n"));
             }
         }
     }
@@ -232,44 +239,51 @@ impl ComTool {
         if self.serial.is_none() {
             self.serial = Some(Box::new(SerialChannel::new()));
         }
-        let serial = self.serial.as_mut().unwrap();
 
-        // 把当前 UI 选择的参数应用到串口
-        let settings = SerialConfig {
-            port: self.selected_port.clone(),
-            baud_rate: self.baud_rate,
-            data_bits: self.data_bits,
-            stop_bits: self.stop_bits,
-            parity: self.parity,
-            flow_control: self.flow_control,
-        };
-        if let Err(e) = serial.configure(&settings) {
-            self.receive_text
-                .push_str(&format!("设置串口参数失败: {}\n", e));
+        // 失败原因先攒在局部变量里：下面 `serial` 持有 `self.serial` 的可变借用，
+        // 而落笔用的 `push_receive_note` 需要 `&mut self`，两个借用不能重叠。
+        let mut failure: Option<String> = None;
+
+        {
+            let serial = self.serial.as_mut().unwrap();
+
+            // 把当前 UI 选择的参数应用到串口
+            let settings = SerialConfig {
+                port: self.selected_port.clone(),
+                baud_rate: self.baud_rate,
+                data_bits: self.data_bits,
+                stop_bits: self.stop_bits,
+                parity: self.parity,
+                flow_control: self.flow_control,
+            };
+            if let Err(e) = serial.configure(&settings) {
+                failure = Some(format!("设置串口参数失败: {e}\n"));
+            } else {
+                let (event_tx, event_rx) = mpsc::channel::<ChannelEvent>();
+                match serial.open(event_tx) {
+                    Ok(()) => self.event_rx = Some(event_rx),
+                    Err(e) => failure = Some(format!("打开串口失败: {e}\n")),
+                }
+            }
+        }
+
+        if let Some(msg) = failure {
+            self.push_receive_note(msg);
             return;
         }
 
-        let (event_tx, event_rx) = mpsc::channel::<ChannelEvent>();
-        if let Err(e) = serial.open(event_tx) {
-            self.receive_text
-                .push_str(&format!("打开串口失败: {}\n", e));
-            return;
-        }
-        self.event_rx = Some(event_rx);
         self.connected = true;
-
         self.last_opened_port = Some(self.selected_port.clone());
 
         let open_msg = format!("已打开 {}\n", self.selected_port);
-        self.receive_text.push_str(&open_msg);
-
         self.display_spans.push(ColoredSpan {
-            text: open_msg,
+            text: open_msg.clone(),
             style: AnsiStyle {
                 fg: Some(egui::Color32::from_rgb(13, 188, 121)), // 绿
                 bold: false,
             },
         });
+        self.push_receive_note(open_msg);
     }
 
     pub fn close_port(&mut self) {
@@ -283,7 +297,6 @@ impl ComTool {
         self.last_reconnect_attempt = None;
         self.connected = false;
 
-        self.receive_text.push_str("串口已关闭\n");
         // 一次性追加一条彩色提示到彩色日志（不随渲染每帧重复）
         self.display_spans.push(ColoredSpan {
             text: "串口已关闭\n".to_string(),
@@ -292,6 +305,7 @@ impl ComTool {
                 bold: false,
             },
         });
+        self.push_receive_note("串口已关闭\n".to_string());
     }
 
     pub fn send_data(&mut self) {
@@ -301,10 +315,15 @@ impl ComTool {
 
         let data = self.send_text.as_bytes().to_vec();
 
-        if let Some(serial) = &mut self.serial {
-            if let Err(e) = serial.write(data) {
-                self.receive_text.push_str(&format!("发送失败: {}\n", e));
-            }
+        // 同 `open_port`：`serial` 的可变借用还活着时不能调 `push_receive_note`。
+        let mut failure: Option<String> = None;
+        if let Some(serial) = &mut self.serial
+            && let Err(e) = serial.write(data)
+        {
+            failure = Some(format!("发送失败: {e}\n"));
+        }
+        if let Some(msg) = failure {
+            self.push_receive_note(msg);
         }
 
         if self.clear_send_after_send {
@@ -372,9 +391,11 @@ impl Default for ComTool {
             repaint_interval_ms: DEFAULT_REPAINT_INTERVAL_MS,
             clear_send_after_send: true,
             default_log_file_name: DEFAULT_LOG_FILE_NAME.to_string(),
+            log_dir: String::new(),
             check_update_on_start: false,
             show_receive_panel: true,
             show_send_panel: true,
+            log: None,
         }
     }
 }
@@ -383,6 +404,9 @@ impl eframe::App for ComTool {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // 检查串口接收数据
         self.receive_data();
+
+        // 写日志线程可能已经报错退出：每帧检查一次，不能让界面继续显示「记录中」
+        self.poll_log_events();
 
         // 串口意外断开时自动重连（节流 500ms）
         self.auto_reconnect();
@@ -403,6 +427,9 @@ impl eframe::App for ComTool {
         if menu.settings_requested {
             self.show_settings = true;
         }
+        if menu.log_toggle_requested {
+            self.toggle_logging();
+        }
         if menu.quit_requested {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -422,6 +449,12 @@ impl eframe::App for ComTool {
         }
         if action.export_requested {
             self.export_receive_text();
+        }
+        if action.log_toggle_requested {
+            self.toggle_logging();
+        }
+        if action.pick_log_dir_requested {
+            self.pick_log_dir();
         }
 
         // ③ 中央区
