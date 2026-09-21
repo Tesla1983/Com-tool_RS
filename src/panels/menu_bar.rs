@@ -4,6 +4,7 @@
 //! 顶部栏放在最前才能横跨整个窗口。
 
 use crate::app::{ComTool, ThemeChoice};
+use crate::receive::TextEncoding;
 use crate::receive::TimestampPrefix;
 use crate::send::{MAX_SEND_HISTORY, SendFormat, SendLineEnding};
 use eframe::egui;
@@ -67,6 +68,15 @@ impl ComTool {
                     ui.separator();
                     ui.label("时间戳前缀");
                     timestamp_radios(ui, &mut self.timestamp_prefix);
+                });
+
+                ui.menu_button("文本", |ui| {
+                    ui.label("编码（接收与发送共用）");
+                    text_encoding_radios(ui, &mut self.text_encoding);
+                    ui.separator();
+                    // GBK 与 GB18030 的**解码器相同**、编码器不同。这句说明放在
+                    // 界面上而不是只写进文档：用户看到两档"好像一样"时会犯嘀咕。
+                    ui.weak("GBK / GB18030 接收结果相同，仅发送时的可表示字符范围不同");
                 });
 
                 ui.menu_button("发送", |ui| {
@@ -159,6 +169,16 @@ pub(crate) fn timestamp_radios(ui: &mut Ui, prefix: &mut TimestampPrefix) {
     ui.radio_value(prefix, TimestampPrefix::Off, "关闭");
     ui.radio_value(prefix, TimestampPrefix::PerLine, "每行");
     ui.radio_value(prefix, TimestampPrefix::PerBatch, "每批");
+}
+
+/// 文本编码单选（接收解码与发送编码共用同一个偏好）。
+///
+/// 选项集合由 [`TextEncoding::ALL`] 定义、这里只负责画：加一档编码时不会出现
+/// "设置窗口里有、菜单里没有"这种不一致。
+pub(crate) fn text_encoding_radios(ui: &mut Ui, encoding: &mut TextEncoding) {
+    for option in TextEncoding::ALL {
+        ui.radio_value(encoding, option, option.label());
+    }
 }
 
 /// 发送格式二选一（菜单 / 设置窗口 / 发送区三处共用一处定义）。

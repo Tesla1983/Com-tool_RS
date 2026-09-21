@@ -23,6 +23,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 serialport = { version = "4.7.2", features = ["serde"] }
 # chrono 只用于日志文件名的时间戳格式化（P4 起在用）。
 chrono = "0.4.45"
+# 接收 / 发送的字符编码（F2 起在用）：GBK / GB18030 这类遗留编码的**增量解码**。
+# 它的 `Decoder` 会把"被截断的多字节序列"留在内部等下一批，因此跨包拼接不会退化
+# 成 lossy；Mozilla 维护、纯 Rust、无 C 依赖。这是本项目唯一为 F2 新增的依赖，
+# 也因此 `FEATURE_GAP_AND_PLAN.md` §8 里"依赖集是最终形态"那句要同步加例外说明。
+encoding_rs = "0.8.35"
 # rfd 提供「选择输出目录」的原生对话框（P4 起在用）。
 rfd = "0.17.2"
 # 已移除的两个死依赖（P6 收尾）：

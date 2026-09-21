@@ -125,7 +125,7 @@ fn normalize_panel_visibility(app: &mut ComTool) {
 mod tests {
     use super::*;
     use crate::app::{Language, ThemeChoice};
-    use crate::receive::{AnsiStyle, ColoredSpan, TimestampPrefix};
+    use crate::receive::{AnsiStyle, ColoredSpan, TextEncoding, TimestampPrefix};
     use crate::send::{SendFormat, SendHistory, SendLineEnding};
     // 调用 `get_string`/`set_string` 需要 trait 本身在作用域内
     use eframe::Storage as _;
@@ -187,6 +187,7 @@ mod tests {
             timestamp_prefix: TimestampPrefix::PerLine,
             send_format: SendFormat::Hex,
             send_line_ending: SendLineEnding::Crlf,
+            text_encoding: TextEncoding::Gbk,
             send_history: {
                 let mut h = SendHistory::default();
                 h.record("AT+RST");
@@ -249,6 +250,7 @@ mod tests {
         // 发送侧的偏好同样要能往返（历史是用户偏好，间隔也是）
         assert_eq!(restored.send_format, original.send_format);
         assert_eq!(restored.send_line_ending, original.send_line_ending);
+        assert_eq!(restored.text_encoding, original.text_encoding);
         assert_eq!(restored.send_history, original.send_history);
         assert_eq!(restored.send_history.entries(), ["AT+RST", "01 02 03"]);
         assert_eq!(restored.repeat_interval_ms, original.repeat_interval_ms);
@@ -391,6 +393,11 @@ mod tests {
             app.send_line_ending,
             SendLineEnding::None,
             "默认不追加行尾：升级前的发送行为必须逐字节保持不变"
+        );
+        assert_eq!(
+            app.text_encoding,
+            TextEncoding::Utf8,
+            "默认 UTF-8：不改设置时收到的字节必须按原来的方式解释"
         );
         assert!(app.send_history.is_empty(), "默认没有发送历史");
         assert!(!app.repeat_send, "默认不定时发送");

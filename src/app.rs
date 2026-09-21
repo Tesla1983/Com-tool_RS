@@ -14,7 +14,9 @@ use crate::chart::ChartData;
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::log_file::LogSink;
 use crate::panels::{send_format_radios, send_line_ending_radios};
-use crate::receive::{AnsiDecoder, AnsiStyle, ColoredSpan, TimestampPrefix, show_plain_receive};
+use crate::receive::{
+    AnsiDecoder, AnsiStyle, ColoredSpan, TextEncoding, TimestampPrefix, show_plain_receive,
+};
 use crate::send::{
     DEFAULT_REPEAT_INTERVAL_MS, HistoryNav, SendFormat, SendHistory, SendLineEnding, build_payload,
     clamp_repeat_interval, on_first_line, on_last_line,
@@ -113,6 +115,11 @@ pub struct ComTool {
     pub send_format: SendFormat,
     /// 发送时追加的行尾（无 / LF / CRLF），在**字节层**追加。
     pub send_line_ending: SendLineEnding,
+    /// 文本编码（接收解码与发送编码共用）。
+    ///
+    /// 一个偏好管两个方向：用户不会希望"收到的中文按 GBK 解出来了，发出去的却是
+    /// UTF-8"，那等于手动做两次设置才自洽。
+    pub text_encoding: TextEncoding,
     /// 发送历史（最多 [`crate::send::MAX_SEND_HISTORY`] 条，落盘）
     pub send_history: SendHistory,
     /// 定时发送的间隔（毫秒，实际使用时夹到 10~600000）。
@@ -386,8 +393,13 @@ impl ComTool {
             return false;
         }
 
-        let data = match build_payload(&self.send_text, self.send_format, self.send_line_ending) {
-            Ok(bytes) => bytes,
+        let payload = match build_payload(
+            &self.send_text,
+            self.send_format,
+            self.send_line_ending,
+            self.text_encoding,
+        ) {
+            Ok(payload) => payload,
             Err(reason) => {
                 // 关键：**解析失败时不清空输入框**。这条提示的意思是"你输入的十六进制
                 // 文本有问题"，用户必须能接着改它；顺手清空等于把用户刚写的内容删掉。
@@ -396,10 +408,20 @@ impl ComTool {
                 return false;
             }
         };
+        let data = payload.bytes;
 
         // 输入为空且没有行尾时确实无字节可发：不算失败，也不该进历史。
         if data.is_empty() {
             return false;
+        }
+
+        // 有字符在当前编码里表示不了（编码器写了 HTML 字符引用之类的替代形式）：
+        // 照样发，但必须明说——静默换掉用户要发的字符比直接报错更难排查。
+        if payload.had_unmappable {
+            self.push_receive_note(format!(
+                "警告: 有字符在 {} 里无法表示，已被替换\n",
+                self.text_encoding.label()
+            ));
         }
 
         // 历史记的是"**你尝试发过什么**"，所以写失败也记——用户下一步多半是
@@ -516,6 +538,7 @@ impl Default for ComTool {
             send_text: String::new(),
             send_format: SendFormat::default(),
             send_line_ending: SendLineEnding::default(),
+            text_encoding: TextEncoding::default(),
             send_history: SendHistory::default(),
             repeat_interval_ms: DEFAULT_REPEAT_INTERVAL_MS,
             serial: None,
@@ -802,9 +825,20 @@ impl eframe::App for ComTool {
                             &self.send_text,
                             self.send_format,
                             self.send_line_ending,
+                            self.text_encoding,
                         ) {
-                            Ok(bytes) => {
-                                ui.weak(format!("将发送 {} 字节", bytes.len()));
+                            Ok(payload) => {
+                                ui.weak(format!("将发送 {} 字节", payload.bytes.len()));
+                                if payload.had_unmappable {
+                                    let color = ui.visuals().error_fg_color;
+                                    ui.colored_label(
+                                        color,
+                                        format!(
+                                            "有字符在 {} 里无法表示，将被替换",
+                                            self.text_encoding.label()
+                                        ),
+                                    );
+                                }
                             }
                             Err(reason) => {
                                 let error_color = ui.visuals().error_fg_color;
@@ -992,6 +1026,38 @@ mod tests {
             app.receive_text
         );
         assert_eq!(app.send_text, "AT", "写失败时不该把输入清掉");
+    }
+
+    // ---------- 文本编码（F2） ----------
+
+    /// 发送侧确实按所选编码编码：同一段中文在 GBK 档下发出的是 GBK 字节。
+    #[test]
+    fn send_uses_the_selected_encoding() {
+        let (mut app, handle) = connected_app();
+        app.text_encoding = TextEncoding::Gbk;
+        app.send_text = "你好".to_string();
+
+        assert!(app.send_data());
+
+        assert_eq!(handle.written_bytes(), vec![0xC4, 0xE3, 0xBA, 0xC3]);
+    }
+
+    /// 有字符在当前编码里表示不了时，**照样发出去但必须警告**——静默替换掉用户
+    /// 要发的字符，比直接报错更难排查。
+    #[test]
+    fn unmappable_character_produces_a_visible_warning() {
+        let (mut app, handle) = connected_app();
+        app.text_encoding = TextEncoding::Gbk;
+        app.send_text = "\u{1D11E}".to_string();
+
+        assert!(app.send_data());
+
+        assert_eq!(handle.write_count(), 1, "能发就还是发");
+        assert!(
+            app.receive_text.contains("无法表示"),
+            "必须给出可见警告：{}",
+            app.receive_text
+        );
     }
 
     // ---------- 定时发送 ----------

@@ -14,6 +14,7 @@
 //! 3. **空负载不等于"要发一个空包"。** 输入为空且行尾为「无」时没有任何字节要
 //!    发出去；而输入为空但行尾为 LF 时，发一个 `0x0A` 是完全合理的用法。
 
+use crate::receive::TextEncoding;
 use serde::{Deserialize, Serialize};
 
 /// 发送历史的容量上限（条）。超出后淘汰最旧的一条。
@@ -119,26 +120,66 @@ pub fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// 文本负载的编码入口。
+/// 一次发送要写出去的字节，以及一个必须让用户知道的警告。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Payload {
+    pub bytes: Vec<u8>,
+    /// 有字符在当前编码里无法表示，已被编码器替换。
+    ///
+    /// `encoding_rs` 在无法映射时会写入 **HTML 数字字符引用**（例如把某个字符写成
+    /// `&#1234;`），这在串口场景下几乎肯定不是用户想要的。所以**照样发出去，但必须
+    /// 明说**——静默换掉用户要发的字符比直接报错更难排查。
+    pub had_unmappable: bool,
+}
+
+/// 文本负载的编码。
 ///
-/// 目前固定 UTF-8。`FUTURE_ROADMAP.md` 的 F2（编码选择）会把这里换成按用户所选
-/// 的编码编码——**这是 F2 唯一需要改的发送侧位置**，所以它单独成为一个函数。
-pub fn encode_text(text: &str) -> Vec<u8> {
-    text.as_bytes().to_vec()
+/// 三个分支各有原因：
+///
+/// - **UTF-8**：直接取字节，不走 `encoding_rs`（省一次调用，行为也最直白）。
+/// - **UTF-16LE**：**必须自己写**。`encoding_rs` 的 UTF-16LE 是**只解码**的编码——
+///   它的 `output_encoding()` 返回 UTF-8，`encode()` 会原样把 UTF-8 字节吐回来。
+///   这里按小端写出每个 UTF-16 码元。**不加 BOM**：设备要不要 BOM 是设备的事，
+///   替用户多塞两个字节只会更容易让设备认不出帧头。
+/// - **GBK / GB18030**：交给 `encoding_rs`。注意两者的**编码器不同**（GB18030 支持
+///   四字节序列），虽然**解码器相同**——所以"接收看着一样、发出去不一样"是正常的。
+pub fn encode_text(text: &str, encoding: TextEncoding) -> (Vec<u8>, bool) {
+    match encoding {
+        TextEncoding::Utf8 => (text.as_bytes().to_vec(), false),
+        TextEncoding::Utf16Le => {
+            let mut out = Vec::with_capacity(text.len() * 2);
+            for unit in text.encode_utf16() {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+            // UTF-16 能表示全部 Unicode 标量值，不存在"表示不了"的字符
+            (out, false)
+        }
+        _ => {
+            let (bytes, _detected, had_unmappable) = encoding.encoding().encode(text);
+            (bytes.into_owned(), had_unmappable)
+        }
+    }
 }
 
 /// 组装本次要写进通道的字节：先解析负载，再在**字节层**追加行尾。
+///
+/// HEX 模式**不经过编码**：输入本身就是字节的十六进制写法，再按编码解释一遍等于
+/// 多此一举，还会把 `41 42` 变成别的意思。
 pub fn build_payload(
     text: &str,
     format: SendFormat,
     ending: SendLineEnding,
-) -> Result<Vec<u8>, String> {
-    let mut bytes = match format {
-        SendFormat::Text => encode_text(text),
-        SendFormat::Hex => parse_hex(text)?,
+    encoding: TextEncoding,
+) -> Result<Payload, String> {
+    let (mut bytes, had_unmappable) = match format {
+        SendFormat::Text => encode_text(text, encoding),
+        SendFormat::Hex => (parse_hex(text)?, false),
     };
     bytes.extend_from_slice(ending.bytes());
-    Ok(bytes)
+    Ok(Payload {
+        bytes,
+        had_unmappable,
+    })
 }
 
 /// 把定时发送间隔夹回合法区间。
@@ -328,18 +369,29 @@ mod tests {
 
     // ---------- 负载组装 ----------
 
+    /// 默认编码下组装负载。多数用例不关心编码，用它少写一个参数。
+    fn payload(text: &str, format: SendFormat, ending: SendLineEnding) -> Result<Payload, String> {
+        build_payload(text, format, ending, TextEncoding::Utf8)
+    }
+
     #[test]
     fn line_endings_append_at_byte_level() {
         assert_eq!(
-            build_payload("AB", SendFormat::Text, SendLineEnding::None).unwrap(),
+            payload("AB", SendFormat::Text, SendLineEnding::None)
+                .unwrap()
+                .bytes,
             b"AB"
         );
         assert_eq!(
-            build_payload("AB", SendFormat::Text, SendLineEnding::Lf).unwrap(),
+            payload("AB", SendFormat::Text, SendLineEnding::Lf)
+                .unwrap()
+                .bytes,
             b"AB\n"
         );
         assert_eq!(
-            build_payload("AB", SendFormat::Text, SendLineEnding::Crlf).unwrap(),
+            payload("AB", SendFormat::Text, SendLineEnding::Crlf)
+                .unwrap()
+                .bytes,
             b"AB\r\n"
         );
     }
@@ -347,21 +399,24 @@ mod tests {
     /// HEX 模式下行尾必须是**字节**：`0x0D 0x0A`，而不是把 `"\r\n"` 当文本发出去。
     #[test]
     fn line_ending_in_hex_mode_is_bytes_not_characters() {
-        let payload = build_payload("41", SendFormat::Hex, SendLineEnding::Crlf).unwrap();
-        assert_eq!(payload, vec![0x41, 0x0D, 0x0A]);
+        let payload = payload("41", SendFormat::Hex, SendLineEnding::Crlf).unwrap();
+        assert_eq!(payload.bytes, vec![0x41, 0x0D, 0x0A]);
     }
 
     /// 只发一个换行是合法用法（输入为空 + 行尾 LF）。
     #[test]
     fn empty_input_with_line_ending_still_sends() {
         assert_eq!(
-            build_payload("", SendFormat::Text, SendLineEnding::Lf).unwrap(),
+            payload("", SendFormat::Text, SendLineEnding::Lf)
+                .unwrap()
+                .bytes,
             b"\n"
         );
         // 而输入为空、行尾为「无」时确实没有任何字节要发
         assert!(
-            build_payload("", SendFormat::Text, SendLineEnding::None)
+            payload("", SendFormat::Text, SendLineEnding::None)
                 .unwrap()
+                .bytes
                 .is_empty()
         );
     }
@@ -369,15 +424,70 @@ mod tests {
     /// 解析失败时**不能**产出任何字节——调用方据此决定"不发、也不清空输入框"。
     #[test]
     fn failed_parse_yields_no_payload() {
-        assert!(build_payload("4", SendFormat::Hex, SendLineEnding::None).is_err());
-        assert!(build_payload("4", SendFormat::Hex, SendLineEnding::Crlf).is_err());
+        assert!(payload("4", SendFormat::Hex, SendLineEnding::None).is_err());
+        assert!(payload("4", SendFormat::Hex, SendLineEnding::Crlf).is_err());
     }
 
     #[test]
-    fn text_payload_is_utf8() {
+    fn text_payload_is_utf8_by_default() {
         assert_eq!(
-            encode_text("你好"),
+            encode_text("你好", TextEncoding::Utf8).0,
             vec![0xE4, 0xBD, 0xA0, 0xE5, 0xA5, 0xBD]
+        );
+    }
+
+    // ---------- 文本编码（F2） ----------
+
+    #[test]
+    fn gbk_encoding_produces_gbk_bytes() {
+        let (bytes, unmappable) = encode_text("你好", TextEncoding::Gbk);
+        assert_eq!(bytes, vec![0xC4, 0xE3, 0xBA, 0xC3]);
+        assert!(!unmappable);
+    }
+
+    /// GBK 与 GB18030 的**解码器**相同，但**编码器**不同：GB18030 能表示 GBK
+    /// 表示不了的字符（四字节序列）。所以同一段文本在两档下的字节可以不同。
+    #[test]
+    fn utf8_is_unaffected_by_choosing_gbk() {
+        // ASCII 在 GBK 下与 UTF-8 完全一致——这是"切换编码不该让纯英文命令变样"的保证
+        assert_eq!(encode_text("AT+RST", TextEncoding::Gbk).0, b"AT+RST");
+        assert_eq!(encode_text("AT+RST", TextEncoding::Gb18030).0, b"AT+RST");
+        assert_eq!(encode_text("", TextEncoding::Utf16Le).0, Vec::<u8>::new());
+    }
+
+    #[test]
+    fn utf16le_encoding_adds_null_bytes() {
+        assert_eq!(
+            encode_text("AB", TextEncoding::Utf16Le).0,
+            vec![0x41, 0x00, 0x42, 0x00]
+        );
+    }
+
+    /// 表示不了的字符必须**如实报告**，不能静默替换掉。
+    ///
+    /// GBK 没有 U+1D11E（音乐符号）这样的码位，`encoding_rs` 会写入 HTML 数字字符
+    /// 引用；这在串口场景下几乎肯定不是用户要的，所以要 `had_unmappable` 让上层提示。
+    #[test]
+    fn unmappable_characters_are_reported() {
+        let (_bytes, had_unmappable) = encode_text("\u{1D11E}", TextEncoding::Gbk);
+        assert!(had_unmappable, "生僻字符在 GBK 下表示不了，必须报告");
+    }
+
+    /// HEX 模式不经过编码：输入本身就是字节的十六进制写法。
+    #[test]
+    fn hex_mode_ignores_the_text_encoding() {
+        let bytes = build_payload(
+            "C4 E3",
+            SendFormat::Hex,
+            SendLineEnding::None,
+            TextEncoding::Gbk,
+        )
+        .unwrap()
+        .bytes;
+        assert_eq!(
+            bytes,
+            vec![0xC4, 0xE3],
+            "HEX 输入就是字节，不该再被编码一次"
         );
     }
 

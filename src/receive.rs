@@ -34,6 +34,9 @@ use crate::communicationtrait::ChannelEvent;
 use chrono::Local;
 use eframe::egui;
 use egui::Ui;
+// 遗留编码（GBK / GB18030 / UTF-16LE）的增量解码。UTF-8 不用它——那条路是本项目
+// 自己的严格解码实现，行为已被一组测试固定（见 `AnsiDecoder::flush_pending`）。
+use encoding_rs::{DecoderResult, Encoding, GB18030, GBK, UTF_8, UTF_16LE};
 
 /// 接收区滚动视图的持久化 ID。
 ///
@@ -164,14 +167,94 @@ fn color256(n: u8) -> egui::Color32 {
     }
 }
 
+/// 文本的字符编码（接收解码与发送编码共用同一个偏好）。
+///
+/// **GBK 与 GB18030 的接收行为完全相同**：`encoding_rs` 的文档写明
+/// "The decoder for this encoding is the same as the decoder for gb18030"——
+/// 两者的差异只在**编码器**上（GB18030 能表示四字节序列对应的字符，GBK 不能）。
+/// 因此接收侧这两档可以混用，发送侧才需要区分。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum TextEncoding {
+    #[default]
+    Utf8,
+    Gbk,
+    Gb18030,
+    Utf16Le,
+}
+
+impl TextEncoding {
+    /// 界面上按这个顺序单选。
+    pub const ALL: [Self; 4] = [Self::Utf8, Self::Gbk, Self::Gb18030, Self::Utf16Le];
+
+    /// 界面显示名。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Utf8 => "UTF-8",
+            Self::Gbk => "GBK",
+            Self::Gb18030 => "GB18030",
+            Self::Utf16Le => "UTF-16LE",
+        }
+    }
+
+    /// `encoding_rs` 里对应的编码。解码器与编码器都从这里取。
+    ///
+    /// 注意 GBK 这一项取到的是 `GBK`（而不是 `GB18030`）是有意的：两者的**解码器**
+    /// 相同，但**编码器**不同——`GBK.encode()` 的行为贴近 Windows 代码页 936，
+    /// 对老设备的兼容性更好；要用四字节序列表示生僻字请选 GB18030。
+    pub(crate) fn encoding(self) -> &'static Encoding {
+        match self {
+            Self::Utf8 => UTF_8,
+            Self::Gbk => GBK,
+            Self::Gb18030 => GB18030,
+            Self::Utf16Le => UTF_16LE,
+        }
+    }
+
+    /// 该编码是否与 ASCII 兼容——决定能不能做**字节级**的 ANSI 转义序列识别。
+    ///
+    /// UTF-16LE 里 `ESC` 是 `1B 00` 两个字节：若仍按字节找 `0x1B`，会把 `1B` 吃进
+    /// 转义序列、再因为下一字节不是 `[` 而把这两个字节一起丢掉——**那是丢数据**。
+    /// 所以 UTF-16LE 干脆不做 ANSI 解析（真实世界里也没有 UTF-16 的彩色终端）。
+    fn is_ascii_compatible(self) -> bool {
+        !matches!(self, Self::Utf16Le)
+    }
+}
+
+/// 为一个非法字节序列生成灰色标记。
+///
+/// `consumed` 是本次解码调用**累计**消费到的绝对位置（含坏字节本身，以及解码器为
+/// 试探下个序列而多吃的 `extra` 个字节）；坏字节因此位于 `consumed - extra` 之前。
+///
+/// 关键是**宁可退化也不编造**：`DecoderResult::Malformed` 的文档说明坏字节"可能来自
+/// 更早的输入缓冲"，这时它并不在本次缓冲区里。取不到就只给一个 `[??]`——显示成别的
+/// 字节比显示得含糊更糟，那会让用户去排查一个根本不存在的字节。
+fn malformed_mark(bytes: &[u8], consumed: usize, bad_len: usize, extra: usize) -> String {
+    let end = consumed.saturating_sub(extra);
+    let start = end.saturating_sub(bad_len);
+    if start < end && end <= bytes.len() && bad_len > 0 {
+        bytes[start..end]
+            .iter()
+            .map(|b| format!("[{b:02X}]"))
+            .collect()
+    } else {
+        "[??]".to_string()
+    }
+}
+
 /// 接收数据的文本视图解码器。
 ///
-/// 持有两份跨数据块的残留：`pending_utf8` 保存被截断的多字节序列，
+/// 持有两份跨数据块的残留：`pending_bytes` 保存被截断的多字节序列，
 /// `pending_ansi` 保存尚未收齐的 CSI 转义序列。样式状态 `style` 同样跨块延续，
 /// 因为一条 SGR 序列的影响范围是其后所有字节，而不是当前数据块。
 pub struct AnsiDecoder {
     pending_ansi: Vec<u8>,
-    pending_utf8: Vec<u8>,
+    pending_bytes: Vec<u8>,
+    /// 当前生效的编码。由 `feed` 传入并在变化时同步，不单独暴露 setter——
+    /// "忘记同步编码"会让同一批字节被两种编码解释，而这种错很难看出来。
+    encoding: TextEncoding,
+    /// `encoding_rs` 的增量解码器。它自己保存"被截断的半个字符"，因此跨包拼接
+    /// 不需要手工判定边界（见 `flush_non_utf8` 的注释）。
+    decoder: encoding_rs::Decoder,
     pub style: AnsiStyle,
 }
 
@@ -179,7 +262,9 @@ impl Default for AnsiDecoder {
     fn default() -> Self {
         Self {
             pending_ansi: Vec::new(),
-            pending_utf8: Vec::new(),
+            pending_bytes: Vec::new(),
+            encoding: TextEncoding::default(),
+            decoder: TextEncoding::default().encoding().new_decoder(),
             style: AnsiStyle::default(),
         }
     }
@@ -187,23 +272,31 @@ impl Default for AnsiDecoder {
 
 impl AnsiDecoder {
     /// 丢弃全部残留状态与样式，回到初始态。「清空日志」时调用。
+    ///
+    /// 只清残留、**不动编码偏好**：那是用户设置，不该因为点了一下「清空日志」就变。
     pub fn reset(&mut self) {
         self.pending_ansi.clear();
-        self.pending_utf8.clear();
+        self.pending_bytes.clear();
+        self.decoder = self.encoding.encoding().new_decoder();
         self.style = AnsiStyle::default();
     }
 
     /// 送入一个数据块，返回本次可确定输出的片段。
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<ColoredSpan> {
+    ///
+    /// 编码是**参数**而不是字段赋值：这样"这一批字节按哪种编码解释"只由调用点决定，
+    /// 不存在"设了编码但忘了让解码器知道"的中间态。
+    pub fn feed(&mut self, bytes: &[u8], encoding: TextEncoding) -> Vec<ColoredSpan> {
+        self.sync_encoding(encoding);
+
         let mut spans = Vec::new();
         for &b in bytes {
             if self.pending_ansi.is_empty() {
-                if b == 0x1B {
+                if self.encoding.is_ascii_compatible() && b == 0x1B {
                     // 遇到 ESC：先输出已积累的普通文本，再开始收集转义序列
-                    self.flush_utf8(&mut spans);
+                    self.flush_pending(&mut spans);
                     self.pending_ansi.push(b);
                 } else {
-                    self.pending_utf8.push(b);
+                    self.pending_bytes.push(b);
                 }
             } else {
                 // 正在收集 ESC 序列
@@ -220,16 +313,109 @@ impl AnsiDecoder {
                 }
             }
         }
-        self.flush_utf8(&mut spans);
+        self.flush_pending(&mut spans);
         spans
     }
 
-    fn flush_utf8(&mut self, spans: &mut Vec<ColoredSpan>) {
-        if self.pending_utf8.is_empty() {
+    /// 编码变化时**丢弃跨包残留**并换上新的解码器。
+    ///
+    /// 这一步是必须的：把上一批留下的半截字节用新编码解一遍，会输出一段随机汉字，
+    /// 而且看上去"像是设备发的"。
+    fn sync_encoding(&mut self, encoding: TextEncoding) {
+        if self.encoding == encoding {
             return;
         }
-        let valid_len = utf8_complete_prefix_len(&self.pending_utf8);
-        let (complete, tail) = self.pending_utf8.split_at(valid_len);
+        self.encoding = encoding;
+        self.decoder = encoding.encoding().new_decoder();
+        self.pending_bytes.clear();
+    }
+
+    /// 把积累的字节解成片段。UTF-8 与其它编码走两条路，原因见各自分支的注释。
+    fn flush_pending(&mut self, spans: &mut Vec<ColoredSpan>) {
+        if self.pending_bytes.is_empty() {
+            return;
+        }
+        if self.encoding == TextEncoding::Utf8 {
+            self.flush_utf8(spans);
+        } else {
+            self.flush_non_utf8(spans);
+        }
+    }
+
+    /// 非 UTF-8 编码：交给 `encoding_rs` 的**增量**解码器。
+    ///
+    /// 为什么不自己判定"完整前缀"：各编码的边界规则各不相同（GB18030 有四字节
+    /// 序列、UTF-16 有代理对），手写一遍就是给自己种 bug——而 `Decoder` 正是为
+    /// 流式输入设计的，它自己保存被截断的字符，跨包拼接由构造保证。
+    ///
+    /// 代价是**非法序列只能标一个 `[??]`**：`DecoderResult::Malformed` 的文档明确
+    /// 说明它报出的坏字节"可能来自更早的输入缓冲"，因此无法可靠地逐字节定位。
+    /// UTF-8 那条路仍然逐字节给出 `[XX]`，不受影响。
+    fn flush_non_utf8(&mut self, spans: &mut Vec<ColoredSpan>) {
+        let bad_style = AnsiStyle {
+            fg: Some(ASCII_NONPRINT_COLOR),
+            bold: false,
+        };
+        let bytes = std::mem::take(&mut self.pending_bytes);
+        let mut good = String::new();
+        let mut offset = 0usize;
+
+        while offset < bytes.len() {
+            // 这个 API 把 `String` 的**剩余容量**当输出上限，并且明确保证不会自己
+            // 扩容（"guarantees not to cause a reallocation"），所以必须先 reserve。
+            // 用解码器自己给的界，比拍一个倍数可靠。
+            let need = self
+                .decoder
+                .max_utf8_buffer_length_without_replacement(bytes.len() - offset)
+                .unwrap_or((bytes.len() - offset) * 4 + 8);
+            good.reserve(need);
+
+            let base = offset;
+            // `*_without_replacement` 这一族返回的是 `DecoderResult`（不是 3 元组的
+            // `CoderResult`）：元组里只有"读了几个字节"，写入量看 `good.len()` 的变化。
+            let (result, read) =
+                self.decoder
+                    .decode_to_string_without_replacement(&bytes[base..], &mut good, false);
+            offset = base + read;
+
+            match result {
+                DecoderResult::InputEmpty => break,
+                DecoderResult::OutputFull => {
+                    // 上面已按解码器给出的上界预留，正常到不了这里；真到了也只在
+                    // 完全没有进展时退出，绝不空转。
+                    if read == 0 {
+                        break;
+                    }
+                }
+                DecoderResult::Malformed(bad_len, extra) => {
+                    if !good.is_empty() {
+                        spans.push(ColoredSpan {
+                            text: std::mem::take(&mut good),
+                            style: self.style,
+                        });
+                    }
+                    spans.push(ColoredSpan {
+                        text: malformed_mark(&bytes, offset, bad_len as usize, extra as usize),
+                        style: bad_style,
+                    });
+                }
+            }
+        }
+
+        if !good.is_empty() {
+            spans.push(ColoredSpan {
+                text: good,
+                style: self.style,
+            });
+        }
+    }
+
+    fn flush_utf8(&mut self, spans: &mut Vec<ColoredSpan>) {
+        if self.pending_bytes.is_empty() {
+            return;
+        }
+        let valid_len = utf8_complete_prefix_len(&self.pending_bytes);
+        let (complete, tail) = self.pending_bytes.split_at(valid_len);
         if !complete.is_empty() {
             // 严格解码：合法片段原样输出；非法字节以灰色 [XX] 十六进制标记显示，
             // 不再静默生成 U+FFFD（字体缺字形时会渲染成不可读的 □）
@@ -278,7 +464,7 @@ impl AnsiDecoder {
                 });
             }
         }
-        self.pending_utf8 = tail.to_vec();
+        self.pending_bytes = tail.to_vec();
     }
 
     fn parse_ansi(&mut self, seq: &[u8]) {
@@ -793,8 +979,11 @@ impl ComTool {
                 // ASCII 模式：逐字节解码，控制字符/高位字节转义为可见形式
                 ascii_spans_from_bytes(&received)
             } else {
-                // 文本模式：解析 ANSI 颜色并跨包拼接 UTF-8
-                self.decoder.feed(&received)
+                // 文本模式：解析 ANSI 颜色并按当前编码跨包拼接。
+                //
+                // 编码必须是 `feed` 的参数：编码解码只在**文本视图**这条路上发生，
+                // 而 HEX / 字节查看两个视图看到的是原始字节，与编码无关。
+                self.decoder.feed(&received, self.text_encoding)
             };
 
             spans = self.apply_timestamp_prefix(spans);
@@ -935,10 +1124,17 @@ mod tests {
         assert_eq!(joined("中".as_bytes()), "\\xE4\\xB8\\xAD");
     }
 
-    /// 文本模式解码：把 AnsiDecoder 输出拼成纯文本
+    /// 文本模式解码：把 AnsiDecoder 输出拼成纯文本。
+    ///
+    /// 明确传 `Utf8`：下面这一组测试锁的是**本项目自己的 UTF-8 严格解码**，
+    /// 它不因为 F2 引入 `encoding_rs` 而改变（见 `AnsiDecoder::flush_pending`）。
     fn decoded(bytes: &[u8]) -> String {
+        decoded_with(bytes, TextEncoding::Utf8)
+    }
+
+    fn decoded_with(bytes: &[u8], encoding: TextEncoding) -> String {
         AnsiDecoder::default()
-            .feed(bytes)
+            .feed(bytes, encoding)
             .into_iter()
             .map(|s| s.text)
             .collect()
@@ -958,9 +1154,9 @@ mod tests {
     fn decoder_keeps_split_multibyte_across_feeds() {
         // “中” 被拆到两次 feed：第一次不完整 → 无输出；第二次补齐 → 完整字符
         let mut d = AnsiDecoder::default();
-        assert!(d.feed(&[0xE4, 0xB8]).is_empty());
+        assert!(d.feed(&[0xE4, 0xB8], TextEncoding::Utf8).is_empty());
         assert_eq!(
-            d.feed(&[0xAD, b'!'])
+            d.feed(&[0xAD, b'!'], TextEncoding::Utf8)
                 .into_iter()
                 .map(|s| s.text)
                 .collect::<String>(),
@@ -971,6 +1167,119 @@ mod tests {
     #[test]
     fn decoder_valid_utf8_passes_through() {
         assert_eq!(decoded("ok中⣿".as_bytes()), "ok中⣿");
+    }
+
+    // ---------- 文本编码（F2） ----------
+
+    #[test]
+    fn gbk_decodes_two_byte_chinese() {
+        // “你好” 的 GBK 编码
+        assert_eq!(
+            decoded_with(&[0xC4, 0xE3, 0xBA, 0xC3], TextEncoding::Gbk),
+            "你好"
+        );
+    }
+
+    /// **F2 的关键测试**：GBK 字符被拆到两批里仍然完整。
+    ///
+    /// 若实现改成"收到一批就 lossy 解一次"，第一批会变成 U+FFFD，这条一定失败——
+    /// 而那种退化在界面上看起来只是"偶尔出现一个乱码字"，很难被发现。
+    #[test]
+    fn gbk_keeps_split_multibyte_across_feeds() {
+        let mut d = AnsiDecoder::default();
+        assert!(
+            d.feed(&[0xC4], TextEncoding::Gbk).is_empty(),
+            "半截 GBK 字符不该提前输出"
+        );
+        assert_eq!(
+            d.feed(&[0xE3], TextEncoding::Gbk)
+                .into_iter()
+                .map(|s| s.text)
+                .collect::<String>(),
+            "你"
+        );
+    }
+
+    /// 编码切换必须丢弃跨包残留：否则剩下的半截字节会被新编码解成一个随机汉字。
+    #[test]
+    fn switching_encoding_discards_pending_bytes() {
+        let mut d = AnsiDecoder::default();
+        assert!(d.feed(&[0xC4], TextEncoding::Gbk).is_empty());
+
+        // 换成 UTF-8：那个孤立的 0xC4 是非法起首字节，但**更不该**被当成 GBK 的
+        // 前半个字与下一步拼起来。它要么被丢弃，要么被标成非法——都不会变成汉字。
+        let out: String = d
+            .feed(&[0xE3], TextEncoding::Utf8)
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_ne!(out, "你", "切换编码后不该还把两批拼成一个 GBK 字符");
+    }
+
+    /// GBK 与 GB18030 共用解码器，所以同一段字节在两档下解出同样的文字。
+    #[test]
+    fn gbk_and_gb18030_decode_identically() {
+        let bytes = [0xC4, 0xE3, 0xBA, 0xC3];
+        assert_eq!(
+            decoded_with(&bytes, TextEncoding::Gbk),
+            decoded_with(&bytes, TextEncoding::Gb18030)
+        );
+    }
+
+    #[test]
+    fn gbk_malformed_bytes_are_marked() {
+        // 0xFF 在 GBK 里不是合法字节：要标出来，而不是悄悄丢掉或显示成方块
+        let out = decoded_with(&[0xFF, b'A'], TextEncoding::Gbk);
+        assert!(
+            out.contains("[FF]") || out.contains("[??]"),
+            "输出为 {out:?}"
+        );
+        assert!(
+            out.ends_with('A'),
+            "坏字节之后的内容必须继续解出来：{out:?}"
+        );
+    }
+
+    /// **UTF-16LE 不做 ANSI 解析**：`ESC` 在它里面是 `1B 00` 两个字节，按字节找
+    /// `0x1B` 会把这两个字节一起吃进转义序列再丢掉——那是丢数据。
+    #[test]
+    fn utf16le_does_not_swallow_escape_bytes() {
+        // "A" + ESC 的 UTF-16LE 字节
+        let bytes = [0x41, 0x00, 0x1B, 0x00];
+        let out = decoded_with(&bytes, TextEncoding::Utf16Le);
+        assert_eq!(out, "A\u{1B}", "ESC 不能被当成 ANSI 序列吃掉");
+    }
+
+    #[test]
+    fn utf16le_decodes_chinese() {
+        // “中” = U+4E2D → 字节 2D 4E
+        assert_eq!(decoded_with(&[0x2D, 0x4E], TextEncoding::Utf16Le), "中");
+    }
+
+    #[test]
+    fn utf16le_keeps_split_code_unit_across_feeds() {
+        let mut d = AnsiDecoder::default();
+        assert!(d.feed(&[0x2D], TextEncoding::Utf16Le).is_empty());
+        assert_eq!(
+            d.feed(&[0x4E], TextEncoding::Utf16Le)
+                .into_iter()
+                .map(|s| s.text)
+                .collect::<String>(),
+            "中"
+        );
+    }
+
+    /// 编码只影响**文本视图**。HEX 与字节查看两条路看到的是原始字节，与编码无关。
+    #[test]
+    fn hex_and_byte_views_ignore_the_encoding() {
+        let bytes = [0xC4, 0xE3];
+        assert_eq!(
+            ascii_spans_from_bytes(&bytes)
+                .into_iter()
+                .map(|s| s.text)
+                .collect::<String>(),
+            "\\xC4\\xE3"
+        );
     }
 
     // —— 日志长度上限（FIFO 淘汰）——

@@ -18,7 +18,8 @@ use eframe::egui;
 use egui::Ui;
 
 use super::menu_bar::{
-    send_format_radios, send_line_ending_radios, theme_radios, timestamp_radios,
+    send_format_radios, send_line_ending_radios, text_encoding_radios, theme_radios,
+    timestamp_radios,
 };
 
 /// 左侧标签列的宽度，让右侧控件纵向对齐。
@@ -67,6 +68,16 @@ impl ComTool {
                         });
                 });
                 ui.weak("语言选项尚未接入界面文案，仅作占位");
+
+                ui.separator();
+                ui.heading("文本编码");
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("编码"));
+                    text_encoding_radios(ui, &mut self.text_encoding);
+                });
+                ui.weak("接收解码与发送编码共用这一档：不会出现「收到的中文按 GBK 解出来、发出去的却是 UTF-8」");
+                ui.weak("GBK 与 GB18030 的接收结果相同（共用解码器），仅发送时的可表示字符范围不同");
+                ui.weak("切换到别的编码会丢弃上一批残留的半个字符，已经显示的内容不受影响");
 
                 ui.separator();
                 ui.heading("接收");
