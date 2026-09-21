@@ -8,9 +8,16 @@ use egui::{FontData, FontDefinitions, FontFamily};
 mod app;
 mod communicationtrait;
 mod config;
+mod panels;
 mod receive;
 mod serial_impl;
 mod sidebar;
+
+/// 应用标题，同时也是 `eframe` 用来定位存档目录的 app id。
+///
+/// 只在这里定义一次：`run_native` 与「信息」窗口都引用它，避免两处字符串漂移后
+/// 出现"关于窗口显示的存档路径不是真正的存档路径"。
+pub const APP_TITLE: &str = "ComTool-RS";
 
 /// 配置 egui 字体回退链。
 ///
@@ -74,7 +81,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "ComTool-RS",
+        APP_TITLE,
         options,
         Box::new(|cc| {
             setup_fonts(&cc.egui_ctx);

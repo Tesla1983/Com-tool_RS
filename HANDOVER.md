@@ -112,7 +112,31 @@ cd E:/Downloads/Zed/AI_comtool-rs
 cargo fmt && cargo check --all-targets && cargo test
 ```
 
-19 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试。
+34 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试，
+以及两条用 `egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图）。
+
+### 3.1 本轮增量（2026-09-21：P2 菜单栏 + 设置面板，P3 部分提前）
+
+| 项 | 值 |
+|---|---|
+| 新增模块 | `src/panels/{mod,menu_bar,settings,info}.rs` |
+| 新增持久化字段 | `theme` `auto_scroll` `max_log_chars` `repaint_interval_ms` `clear_send_after_send` `default_log_file_name` `check_update_on_start` `show_receive_panel` `show_send_panel` |
+| 新增运行时字段 | `show_info`（与 `show_settings` 一样 `#[serde(skip)]`） |
+| 门禁 | `cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** · `cargo test` **34 passed** · clippy 仍是 9 条既有警告（新代码 0 新增） |
+
+- **上游 F 组（顶栏与菜单）4 项全部可用**：File(Info/Quit) · Settings 菜单 · 主题切换
+  （浅色/深色/跟随系统）· 面板显隐勾选（至少保留一个可见）。
+- **上游 G 组（设置项）6 项中 4 项已真正接线**：日志长度上限 · 发送后清空 · 自动滚动 ·
+  重绘间隔（16~1000 ms）。剩下 2 项**只有设置项本身**：`default_log_file_name` 等 P4 的
+  实时文件日志消费、`check_update_on_start` 等 P6 的版本检查消费——两者在设置窗口里都
+  带了明确标注，不会让人误以为已经生效。
+- **P3 提前完成的部分**：`max_log_chars` FIFO 淘汰（四份镜像各自按同一字符预算裁剪、
+  能从句中切开 `ColoredSpan` 并保留其样式、按字符边界切分不破坏 UTF-8）+ `auto_scroll`
+  开关。P3 剩下的"可选时间戳前缀"仍未做。
+- **P2 的一处偏离**：设置做成了窗口（`egui::Window`）而不是停靠面板，上游是设置面板。
+  功能等价，未按上游搬。
+- **仍未实测**：磁盘持久化（需实机运行，见 §4②）；P2 的界面外观也只通过了无头渲染
+  冒烟测试（证明"画得出来不 panic"），**没有肉眼确认过**。
 
 ---
 
@@ -156,7 +180,7 @@ cargo fmt && cargo check --all-targets && cargo test
 
 | 严重度 | 问题 | 位置 | 说明 |
 |---|---|---|---|
-| **高** | **接收缓冲无上限** | `receive.rs` 的 `receive_data` | `receive_text` / `display_spans` / `ascii_text` / `ascii_spans` 只增不减，长时间挂机必然内存膨胀。参考实现有 30000 字符的 FIFO 上限，本项目没有。**这也是接收日志不参与持久化的原因**——先做上限，再考虑恢复日志 |
+| ~~**高**~~ **已修** | ~~**接收缓冲无上限**~~ | `receive.rs` 的 `trim_receive_logs` | 已于 2026-09-21 修复：新增 `max_log_chars`（默认 30000，0 = 不限）FIFO 淘汰，四份镜像各自按同一字符预算裁剪，支持从句中切开 `ColoredSpan`。接收日志仍不参与持久化（退出时保存大日志只会变慢，无明确需求） |
 | **高** | **`connected` 假阳性** | `app.rs::open_port` | `open()` 只要线程成功 spawn 就返回 `Ok`，随即 `connected = true`；真正打开失败要等 `Failed` 事件回来才置 false。UI 会闪一下「已连接」 |
 | 中 | 自动重连无退避 | `app.rs::auto_reconnect` | 每 500 ms 失败一次就新建线程，串口被占用时会持续重试 |
 | 中 | 待发队列无上限 | `channel.rs::worker_main` 的 `outgoing` | 设备长期不可写 + 用户持续点发送时队列增长。原实现用 unbounded mpsc 同样无上限，未引入新问题，但应加背压 |
@@ -175,9 +199,9 @@ cargo fmt && cargo check --all-targets && cargo test
 |---|---|---|
 | **P0** 架构拆分 | `app.rs` 拆为模块 | ✅ **已完成** |
 | **P1** 配置与持久化 | `AppSettings` + `ComTool` 派生 serde + `save()` | ✅ **已完成**（未做磁盘实测，见 §4②） |
-| **P2** 菜单栏 + 设置面板 | 顶部 `TopBottomPanel`：File(Info/Quit) / Settings / 主题切换 / Byte mode / 面板显隐互斥。把 `config.rs` 的持久化字段接上真正的设置 UI | ⬜ **下一步**（当前「设置」窗口只有语言占位下拉） |
-| **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，`ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | ⬜ 建议排在 P2 后 |
-| **P4** 实时文件日志 | Start/Stop Log 开关 + 默认文件名 `LogFile_%Y-%m-%d_%H-%M-%S.txt`（chrono 现成）；**写入必须走独立线程 + `BufWriter`，绝不在 UI 线程 `write_all`** | ⬜ |
+| **P2** 菜单栏 + 设置面板 | 顶部面板：File(Info/Quit) / Settings / 主题切换 / Byte mode / 面板显隐互斥。把 `config.rs` 的持久化字段接上真正的设置 UI | ✅ **已完成**（见 §3.1；G 组中「默认文件名」「启动检查更新」两项只有设置项，等 P4/P6 消费） |
+| **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，`ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | 🟡 **部分完成**：FIFO 淘汰与 `auto_scroll` 已提前做完；时间戳前缀未做 |
+| **P4** 实时文件日志 | Start/Stop Log 开关 + 默认文件名 `LogFile_%Y-%m-%d_%H-%M-%S.txt`（chrono 现成）；**写入必须走独立线程 + `BufWriter`，绝不在 UI 线程 `write_all`** | ⬜ **下一步**（设置项 `default_log_file_name` 已就位） |
 | **P5** 实时图表 | 建议引 `egui_plot` 而非移植上游手绘代码；支持逗号分隔多通道；`stream_buffer` 处理跨包分片 | ⬜ |
 | **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或 3s 超时静默失败**，内网要能跳过）；应用图标；`[profile.release] opt-level = 2`；清理未使用依赖 | ⬜ |
 
@@ -189,6 +213,15 @@ P2 完成约 75%（可日常使用）；P5 完成约 88%（功能对齐上游）
 ## 7. 硬性约定（改代码前务必遵守）
 
 来自 `AGENTS.md` 与 `DEVELOPMENT_GUIDE.md`，这里只列最容易踩的：
+
+0. **⛔ 未经项目所有者逐次批准，禁止运行本项目（`cargo run` / 直接跑 exe），禁止以任何方式
+   占用或打断 COM3。** 开发阶段只用 `cargo fmt` / `cargo check --all-targets` / `cargo test`
+   验证（34 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
+   完整条文在 `AGENTS.md` 顶部与 `DEVELOPMENT_GUIDE.md` §0。
+   **该规则已配置机器级硬拦截**：PreToolUse 钩子 `~/.workbuddy/hooks/comtool-run-guard.sh`
+   （注册于 `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json`），命中即拒绝工具调用，
+   fail-closed；自测 `python3 .workbuddy/hooks/test_guard.py`；限时批准由所有者本人执行
+   `bash ~/.workbuddy/hooks/comtool-approve.sh 30`（批准只放行"运行"，COM3 永远拒绝）。
 
 1. **串口读写绝不能在 UI 线程。** 一切 IO 都在 `SerialChannel` 的后台线程；UI 只投递消息。
    停机靠向命令通道发 `Halt`，**不要改回共享标志位轮询**——那正是先前版本死锁风险的来源。
@@ -203,6 +236,14 @@ P2 完成约 75%（可日常使用）；P5 完成约 88%（功能对齐上游）
 6. **三种接收视图共用 `SCROLL_AREA_ID`**，切换模式时滚动位置延续，`clear_receive()` 也用它复位。
 7. **不要从 `SerialGUI-rs/` 抄代码。** 那是 GPLv3 的参考实现，已被 `.gitignore` 排除；
    它的存在只是为了对照功能。`SerialGUI-rs/` 内部有**独立的嵌套 git 仓库**，别在它里面提交东西。
+8. **日志长度上限只有一处实现**：`trim_receive_logs()`，在 `receive_data()` 末尾无条件调用。
+   四份镜像**各自**按同一字符预算裁剪（三种模式写入的镜像不同，彼此没有下标对应关系），
+   必须按字符边界切分，且要能把边界上的 `ColoredSpan` 从中间切开并保留其样式。
+9. **绘制顺序：菜单栏 → 侧边栏 → 中央区**（`CentralPanel` 必须最后），egui 面板按添加
+   顺序抢占空间。面板显隐有"至少保留一个"的不变量（`visible_panel_count() >= 1`），
+   改动时必须同时维护：`visible_panel_count()`、视图菜单勾选框、`restore_runtime_state` 兜底。
+10. **主题偏好存自有枚举 `ThemeChoice`**，不要直接把 `egui::ThemePreference` 写进存档——
+   外部枚举取值一旦变动就旧存档读不出来。
 
 ---
 
@@ -243,7 +284,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 19 passed / fmt 干净）
+# 3. 建立门禁基线（应为 0 warning / 34 passed / fmt 干净）
 cargo fmt && cargo check --all-targets && cargo test
 
 # 4. 看清两个版本的差异

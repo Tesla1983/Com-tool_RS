@@ -7,7 +7,8 @@
 //! - `ascii_text` / `ascii_spans`：逐字节转义后的可见化文本，供字节查看视图渲染。
 //!
 //! 三者必须同步清空、同步追加——任何只动其中一份的改动都会让切换视图时
-//! 看到不一致的内容。
+//! 看到不一致的内容。三者也都受 [`crate::app::ComTool::max_log_chars`] 约束：
+//! 每轮接收结束后一起裁剪，从最旧的内容开始淘汰（见 [`ComTool::trim_receive_logs`]）。
 //!
 //! 两种解码路径：
 //!
@@ -408,11 +409,74 @@ fn layout_job_from(spans: &[ColoredSpan], default_color: egui::Color32) -> egui:
     job
 }
 
+/// 从头部删除多余字符，只保留最后 `max` 个字符。
+///
+/// 按**字符边界**切分（不是字节下标），因此不会把多字节 UTF-8 序列切成半个。
+/// 快速路径用字节长度判断：字节数 ≤ 上限时字符数必然也 ≤ 上限，省掉一次全串扫描。
+fn trim_text_front(text: &mut String, max: usize) {
+    if text.len() <= max {
+        return;
+    }
+    let total = text.chars().count();
+    if total <= max {
+        return;
+    }
+    let drop = total - max;
+    let cut = text
+        .char_indices()
+        .nth(drop)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len());
+    text.drain(..cut);
+}
+
+/// 从头部淘汰片段，只保留最后 `max` 个字符对应的内容。
+///
+/// 保留下来的第一个片段可能需要**从中间切开**（它只有一部分落在窗口内），
+/// 这是旧实现里 `ColoredSpan` 最容易被漏掉的地方：整片段删/留都不对。
+fn trim_spans_front(spans: &mut Vec<ColoredSpan>, max: usize) {
+    let total: usize = spans.iter().map(|span| span.text.chars().count()).sum();
+    if total <= max {
+        return;
+    }
+
+    // 先整片段地数过去，找到第一个需要保留的片段及其内部偏移
+    let mut drop = total - max;
+    let mut keep_from = 0;
+    while keep_from < spans.len() {
+        let len = spans[keep_from].text.chars().count();
+        if len <= drop {
+            drop -= len;
+            keep_from += 1;
+        } else {
+            break;
+        }
+    }
+
+    // total > max 保证了循环一定在中途 break，因此 keep_from < spans.len()
+    let cut = spans[keep_from]
+        .text
+        .char_indices()
+        .nth(drop)
+        .map(|(idx, _)| idx)
+        .unwrap_or(spans[keep_from].text.len());
+
+    if keep_from > 0 {
+        spans.drain(..keep_from);
+    }
+    if cut > 0 {
+        spans[0].text.drain(..cut);
+    }
+}
+
 /// 绘制接收区滚动视图（可选中、右键复制全部日志），返回是否点击了「复制全部日志」。
-fn show_receive_scroll(ui: &mut Ui, job: egui::text::LayoutJob) -> bool {
+///
+/// `stick_to_bottom` 由 [`crate::app::ComTool::auto_scroll`] 决定：关掉自动滚动后，
+/// 用户向上翻阅历史时不会被强行拉回底部。
+fn show_receive_scroll(ui: &mut Ui, job: egui::text::LayoutJob, stick_to_bottom: bool) -> bool {
     let mut copy_all = false;
     egui::ScrollArea::vertical()
-        .stick_to_bottom(true)
+        .stick_to_bottom(stick_to_bottom)
         .auto_shrink([false, false])
         .max_height(400.0)
         .id_salt(SCROLL_AREA_ID)
@@ -430,7 +494,7 @@ fn show_receive_scroll(ui: &mut Ui, job: egui::text::LayoutJob) -> bool {
 
 /// 普通文本模式接收区：不折行（Extend）+ 纵/横双向滚动，
 /// 等宽 galley 绘制保证盲文 ASCII 图案整行对齐；可选中、右键复制全部日志。
-pub(crate) fn show_plain_receive(ui: &mut Ui, text: &str) {
+pub(crate) fn show_plain_receive(ui: &mut Ui, text: &str, stick_to_bottom: bool) {
     let job = egui::text::LayoutJob::simple(
         text.to_owned(),
         egui::FontId::monospace(14.0),
@@ -438,7 +502,7 @@ pub(crate) fn show_plain_receive(ui: &mut Ui, text: &str) {
         f32::INFINITY,
     );
     egui::ScrollArea::both()
-        .stick_to_bottom(true)
+        .stick_to_bottom(stick_to_bottom)
         .auto_shrink([false, false])
         .max_height(400.0)
         .id_salt(SCROLL_AREA_ID)
@@ -510,6 +574,27 @@ impl ComTool {
                 }
             }
         }
+
+        // 无论本次有没有新数据都裁一遍：开销是 O(日志长度) 的字符计数，且不会
+        // 增长内存。放在这里而不是各分支内部，是为了让"上限"只有一处实现。
+        self.trim_receive_logs();
+    }
+
+    /// 把四份接收镜像各自裁剪到 [`crate::app::ComTool::max_log_chars`] 以内（0 = 不限）。
+    ///
+    /// 为什么是"各自裁剪"而不是"按 `receive_text` 裁好再同步"：三种模式写入的镜像
+    /// 并不相同（HEX/文本模式写 `display_spans`，字节查看模式写 `ascii_spans`，而
+    /// `receive_text` 三种模式都写），三者之间没有一一对应的下标关系。各自裁到同一
+    /// 上限后，任何视图渲染时看到的长度都不会超过上限，这就够了。
+    pub fn trim_receive_logs(&mut self) {
+        let max = self.max_log_chars;
+        if max == 0 {
+            return;
+        }
+        trim_text_front(&mut self.receive_text, max);
+        trim_spans_front(&mut self.display_spans, max);
+        trim_text_front(&mut self.ascii_text, max);
+        trim_spans_front(&mut self.ascii_spans, max);
     }
 
     /// 清空三份接收镜像、复位解码器残留，并把滚动位置一并归零。
@@ -540,7 +625,7 @@ impl ComTool {
         let job = self.build_layout(egui::Color32::BLACK);
 
         // ③ 在函数内部绘制滚动区，替换掉主界面里默认的滚动区
-        if show_receive_scroll(ui, job) {
+        if show_receive_scroll(ui, job, self.auto_scroll) {
             ui.ctx().copy_text(self.receive_text.clone());
         }
     }
@@ -554,7 +639,7 @@ impl ComTool {
         let job = self.build_ascii_layout(egui::Color32::BLACK);
 
         // ③ 绘制滚动区（样式与彩色模式一致）
-        if show_receive_scroll(ui, job) {
+        if show_receive_scroll(ui, job, self.auto_scroll) {
             ui.ctx().copy_text(self.receive_text.clone());
         }
     }
@@ -630,5 +715,138 @@ mod tests {
     #[test]
     fn decoder_valid_utf8_passes_through() {
         assert_eq!(decoded("ok中⣿".as_bytes()), "ok中⣿");
+    }
+
+    // —— 日志长度上限（FIFO 淘汰）——
+
+    fn span(text: &str) -> ColoredSpan {
+        ColoredSpan {
+            text: text.to_string(),
+            style: AnsiStyle::default(),
+        }
+    }
+
+    fn span_text(spans: &[ColoredSpan]) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn trim_text_noop_when_within_limit() {
+        let mut text = String::from("abc");
+        trim_text_front(&mut text, 3);
+        assert_eq!(text, "abc");
+    }
+
+    #[test]
+    fn trim_text_keeps_the_tail() {
+        let mut text = String::from("0123456789");
+        trim_text_front(&mut text, 4);
+        assert_eq!(text, "6789");
+    }
+
+    /// 必须按字符边界切分：若用字节下标，"中" 会被切成半个导致 panic 或乱码。
+    #[test]
+    fn trim_text_cuts_on_char_boundary() {
+        let mut text = String::from("中文abc");
+        trim_text_front(&mut text, 3);
+        assert_eq!(text, "abc");
+
+        let mut text = String::from("a中文");
+        trim_text_front(&mut text, 2);
+        assert_eq!(text, "中文");
+    }
+
+    #[test]
+    fn trim_spans_drops_whole_spans() {
+        let mut spans = vec![span("aaaa"), span("bb"), span("c")];
+        trim_spans_front(&mut spans, 3);
+        assert_eq!(span_text(&spans), "bbc");
+        assert_eq!(spans.len(), 2);
+    }
+
+    /// 边界片段要被**从中间切开**，而不是整段删除或整段保留。
+    #[test]
+    fn trim_spans_splits_the_boundary_span() {
+        // 拼接后为 "abcdefghi"（9 字符），上限 5 → 保留尾部 "efghi"：
+        // "abc" 整段淘汰，"defg" 被切掉首字符 d，剩余 "efg" + "hi"
+        let mut spans = vec![span("abc"), span("defg"), span("hi")];
+        trim_spans_front(&mut spans, 5);
+        assert_eq!(span_text(&spans), "efghi");
+        assert_eq!(span_text(&spans).chars().count(), 5);
+        assert_eq!(spans.len(), 2);
+    }
+
+    /// 部分切分后必须保留该片段原本的样式，否则 ANSI 颜色会随裁剪丢失。
+    #[test]
+    fn trim_spans_keeps_style_of_the_kept_part() {
+        let color = egui::Color32::from_rgb(1, 2, 3);
+        let mut spans = vec![ColoredSpan {
+            text: "abcdef".to_string(),
+            style: AnsiStyle {
+                fg: Some(color),
+                bold: true,
+            },
+        }];
+        trim_spans_front(&mut spans, 2);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "ef");
+        assert_eq!(spans[0].style.fg, Some(color));
+        assert!(spans[0].style.bold);
+    }
+
+    #[test]
+    fn trim_spans_handles_empty_and_exact_length() {
+        let mut spans: Vec<ColoredSpan> = Vec::new();
+        trim_spans_front(&mut spans, 10);
+        assert!(spans.is_empty());
+
+        let mut spans = vec![span("abcd")];
+        trim_spans_front(&mut spans, 4);
+        assert_eq!(span_text(&spans), "abcd");
+    }
+
+    #[test]
+    fn trim_spans_multibyte_boundary() {
+        // 拼接后为 "中文字符ab"（6 字符），上限 3 → 保留尾部 "符ab"
+        let mut spans = vec![span("中文字符"), span("ab")];
+        trim_spans_front(&mut spans, 3);
+        assert_eq!(span_text(&spans), "符ab");
+        assert_eq!(span_text(&spans).chars().count(), 3);
+    }
+
+    #[test]
+    fn trim_receive_logs_treats_zero_as_unlimited() {
+        let mut app = ComTool {
+            max_log_chars: 0,
+            ..ComTool::default()
+        };
+        app.receive_text = "x".repeat(100);
+        app.display_spans = vec![span(&"y".repeat(100))];
+        app.trim_receive_logs();
+        assert_eq!(app.receive_text.chars().count(), 100);
+        assert_eq!(app.display_spans[0].text.chars().count(), 100);
+    }
+
+    /// 四份镜像各写各的（三种模式写入的镜像并不相同），但都必须被裁到同一上限。
+    #[test]
+    fn trim_receive_logs_bounds_all_four_mirrors() {
+        let mut app = ComTool {
+            max_log_chars: 10,
+            ..ComTool::default()
+        };
+        app.receive_text = "0123456789abc".to_string();
+        app.display_spans = vec![span("01234"), span("56789"), span("abc")];
+        app.ascii_text = "0123456789abc".to_string();
+        app.ascii_spans = vec![span("0123456789abc")];
+
+        app.trim_receive_logs();
+
+        assert_eq!(app.receive_text.chars().count(), 10);
+        assert_eq!(span_text(&app.display_spans).chars().count(), 10);
+        assert_eq!(app.ascii_text.chars().count(), 10);
+        assert_eq!(span_text(&app.ascii_spans).chars().count(), 10);
+        // 淘汰的是最旧的内容，保留的是尾部
+        assert_eq!(app.receive_text, "3456789abc");
+        assert_eq!(span_text(&app.display_spans), "3456789abc");
     }
 }

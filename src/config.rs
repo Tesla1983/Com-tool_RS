@@ -8,10 +8,14 @@
 //! - 串口句柄与事件通道：句柄无法序列化，连接也必须由用户显式发起；
 //! - 端口枚举结果 `ports`：沿用上次退出时的快照只会显示已经拔掉的设备，
 //!   启动时必须按当前系统重新枚举；
-//! - 接收日志 `receive_text` / `display_spans` / `ascii_spans`：目前没有长度
-//!   上限（见开发计划 P3），而 eframe 会周期性自动保存，落盘等于把一个无界
-//!   字符串反复写进磁盘；
-//! - 模态窗口开关 `show_settings`：不应该在启动瞬间自动弹窗。
+//! - 接收日志 `receive_text` / `display_spans` / `ascii_text` / `ascii_spans`：虽然
+//!   现在有 `max_log_chars` 上限，但把日志写进存档会让退出时的保存变慢，且没有
+//!   明确需求（见开发计划 P3），因此仍不落盘；
+//! - 模态窗口开关 `show_settings` / `show_info`：不应该在启动瞬间自动弹窗。
+//!
+//! 除了"存什么"，本模块还负责**启动时的不变量修复**：手改过的存档可能包含越界的
+//! 重绘间隔、或者一个面板都不显示的界面配置，这些都在 [`restore_runtime_state`]
+//! 里统一兜底。
 
 use crate::app::ComTool;
 use crate::serial_impl::scan_ports;
@@ -50,6 +54,7 @@ pub fn restore_runtime_state(app: &mut ComTool) {
 
     // 模态窗口不应在启动时自动出现。
     app.show_settings = false;
+    app.show_info = false;
 
     // 端口列表必须反映当前系统：插拔设备后重启，看到的不该是旧快照。
     app.ports = scan_ports();
@@ -57,12 +62,28 @@ pub fn restore_runtime_state(app: &mut ComTool) {
         // 一个端口都没有时，留着上次的名字只会让界面显示一个不存在的端口。
         app.selected_port.clear();
     }
+
+    normalize_panel_visibility(app);
+
+    // 重绘间隔越界会让界面要么卡顿、要么 CPU 空转；越界值在这里夹回合法区间，
+    // 使用处 `app.rs` 也会再夹一次，双保险。
+    app.repaint_interval_ms = app.repaint_interval_ms.clamp(16, 1000);
+}
+
+/// 保证「至少有一个面板可见」。
+///
+/// 视图菜单已经禁止把最后一个可见面板取消掉，但存档可以被手改（或者来自更早的
+/// 版本），启动时兜底修正，避免出现"界面一片空白、用户以为程序坏了"。
+fn normalize_panel_visibility(app: &mut ComTool) {
+    if app.visible_panel_count() == 0 {
+        app.show_receive_panel = true;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Language;
+    use crate::app::{Language, ThemeChoice};
     use crate::receive::{AnsiStyle, ColoredSpan};
     // 调用 `get_string`/`set_string` 需要 trait 本身在作用域内
     use eframe::Storage as _;
@@ -111,6 +132,15 @@ mod tests {
             sidebar_open: false,
             language: Language::En,
             last_opened_port: Some("COM42".to_string()),
+            theme: ThemeChoice::Dark,
+            auto_scroll: false,
+            max_log_chars: 4_096,
+            repaint_interval_ms: 40,
+            clear_send_after_send: false,
+            default_log_file_name: "MyLog_%Y.txt".to_string(),
+            check_update_on_start: true,
+            show_receive_panel: true,
+            show_send_panel: false,
             ..ComTool::default()
         }
     }
@@ -143,6 +173,25 @@ mod tests {
         assert_eq!(restored.sidebar_open, original.sidebar_open);
         assert_eq!(restored.language, original.language);
         assert_eq!(restored.last_opened_port, original.last_opened_port);
+        // P2/P3 新增的偏好字段同样要能往返
+        assert_eq!(restored.theme, original.theme);
+        assert_eq!(restored.auto_scroll, original.auto_scroll);
+        assert_eq!(restored.max_log_chars, original.max_log_chars);
+        assert_eq!(restored.repaint_interval_ms, original.repaint_interval_ms);
+        assert_eq!(
+            restored.clear_send_after_send,
+            original.clear_send_after_send
+        );
+        assert_eq!(
+            restored.default_log_file_name,
+            original.default_log_file_name
+        );
+        assert_eq!(
+            restored.check_update_on_start,
+            original.check_update_on_start
+        );
+        assert_eq!(restored.show_receive_panel, original.show_receive_panel);
+        assert_eq!(restored.show_send_panel, original.show_send_panel);
     }
 
     /// 运行时状态必须被丢弃，而不是从存档里带回来。
@@ -151,6 +200,7 @@ mod tests {
         let mut saved = customized();
         saved.connected = true;
         saved.show_settings = true;
+        saved.show_info = true;
         saved.receive_text = "上一次会话的日志".to_string();
         saved.display_spans.push(ColoredSpan {
             text: "x".to_string(),
@@ -163,8 +213,11 @@ mod tests {
         assert!(restored.serial.is_none(), "串口句柄必须重建");
         assert!(restored.event_rx.is_none(), "事件通道必须重建");
         assert!(!restored.show_settings, "设置窗口不该自动弹出");
+        assert!(!restored.show_info, "信息窗口不该自动弹出");
         assert!(restored.receive_text.is_empty(), "接收日志不参与持久化");
         assert!(restored.display_spans.is_empty());
+        assert!(restored.ascii_text.is_empty());
+        assert!(restored.ascii_spans.is_empty());
         assert_eq!(
             restored.ports,
             scan_ports(),
@@ -223,5 +276,51 @@ mod tests {
         restore_runtime_state(&mut app);
         assert!(app.serial.is_none());
         assert!(!app.connected);
+        assert!(app.visible_panel_count() > 0);
+        assert_eq!(app.max_log_chars, crate::app::DEFAULT_MAX_LOG_CHARS);
+    }
+
+    /// 存档被手改成"一个面板都不显示"时，启动兜底修好，而不是给用户一片空白。
+    #[test]
+    fn all_panels_hidden_is_repaired_on_load() {
+        let mut saved = customized();
+        saved.sidebar_open = false;
+        saved.show_receive_panel = false;
+        saved.show_send_panel = false;
+
+        let restored = round_trip(&saved);
+
+        assert!(
+            restored.visible_panel_count() >= 1,
+            "至少要有面板可见，否则界面一片空白"
+        );
+        assert!(restored.show_receive_panel);
+    }
+
+    /// 只隐藏了一部分面板是合法配置，不能被兜底逻辑改掉。
+    #[test]
+    fn partially_hidden_panels_are_left_alone() {
+        let mut saved = customized();
+        saved.show_receive_panel = true;
+        saved.show_send_panel = false;
+        saved.sidebar_open = false;
+
+        let restored = round_trip(&saved);
+
+        assert!(restored.show_receive_panel);
+        assert!(!restored.show_send_panel);
+        assert!(!restored.sidebar_open);
+    }
+
+    /// 重绘间隔越界（手改存档）时夹回 16~1000。
+    #[test]
+    fn repaint_interval_is_clamped_on_load() {
+        let mut too_fast = customized();
+        too_fast.repaint_interval_ms = 1;
+        assert_eq!(round_trip(&too_fast).repaint_interval_ms, 16);
+
+        let mut too_slow = customized();
+        too_slow.repaint_interval_ms = 100_000;
+        assert_eq!(round_trip(&too_slow).repaint_interval_ms, 1_000);
     }
 }

@@ -4,10 +4,11 @@
 //!
 //! 1. [`ComTool`] 的状态定义与默认值；
 //! 2. 串口生命周期操作（打开 / 关闭 / 发送 / 自动重连 / 导出）；
-//! 3. [`eframe::App`] 的顶层编排——把各个面板按顺序画出来，并把用户操作
+//! 3. [`eframe::App`] 的顶层编排——按顺序画出菜单栏、侧边栏与中央区，并把用户操作
 //!    派发到对应的方法上。
 //!
-//! 接收链路的解码与渲染在 [`crate::receive`]，右侧边栏在 [`crate::sidebar`]。
+//! 接收链路的解码与裁剪在 [`crate::receive`]，右侧边栏在 [`crate::sidebar`]，
+//! 菜单栏与各类窗口在 [`crate::panels`]。
 
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::receive::{AnsiDecoder, AnsiStyle, ColoredSpan, show_plain_receive};
@@ -23,6 +24,38 @@ pub enum Language {
     Zh,
     En,
 }
+
+/// 主题偏好。
+///
+/// 不直接存 `egui::ThemePreference`：那是外部类型，取值一旦被上游调整就会让旧存档
+/// 读不出来。这里用自有枚举做持久化，转换只发生在应用主题的那一刻。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum ThemeChoice {
+    /// 跟随系统（与 egui 自身默认值一致）
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl From<ThemeChoice> for egui::ThemePreference {
+    fn from(choice: ThemeChoice) -> Self {
+        match choice {
+            ThemeChoice::System => Self::System,
+            ThemeChoice::Light => Self::Light,
+            ThemeChoice::Dark => Self::Dark,
+        }
+    }
+}
+
+/// 日志长度上限的默认值（字符数），与参考实现的默认档位一致。
+pub const DEFAULT_MAX_LOG_CHARS: usize = 30_000;
+
+/// 默认重绘间隔（毫秒）。16 ms ≈ 60 FPS，是设置项允许的下限。
+pub const DEFAULT_REPAINT_INTERVAL_MS: u64 = 30;
+
+/// 默认日志文件名模板（P4 实时文件日志使用，`chrono` 负责展开时间占位）。
+pub const DEFAULT_LOG_FILE_NAME: &str = "LogFile_%Y-%m-%d_%H-%M-%S.txt";
 
 /// 应用状态。
 ///
@@ -85,12 +118,34 @@ pub struct ComTool {
     // 模态窗口开关，不该在启动时自动弹出
     #[serde(skip)]
     pub show_settings: bool,
+    #[serde(skip)]
+    pub show_info: bool,
     pub ascii_view: bool,
 
     #[serde(skip)]
     pub ascii_text: String,
     #[serde(skip)]
     pub ascii_spans: Vec<ColoredSpan>,
+
+    // —— 界面与接收行为的用户偏好（全部落盘）——
+    /// 主题偏好（浅色 / 深色 / 跟随系统）
+    pub theme: ThemeChoice,
+    /// 接收区是否自动滚动到最新
+    pub auto_scroll: bool,
+    /// 日志长度上限（字符数，0 = 不限）；超出后从最旧的内容开始淘汰
+    pub max_log_chars: usize,
+    /// 界面重绘间隔（毫秒），实际使用时会被夹到 16~1000
+    pub repaint_interval_ms: u64,
+    /// 发送后是否清空输入框
+    pub clear_send_after_send: bool,
+    /// 默认日志文件名模板（P4 使用）
+    pub default_log_file_name: String,
+    /// 启动时是否检查更新（P6 使用，默认关闭）
+    pub check_update_on_start: bool,
+    /// 接收区是否显示
+    pub show_receive_panel: bool,
+    /// 发送区是否显示
+    pub show_send_panel: bool,
 }
 
 impl ComTool {
@@ -252,7 +307,30 @@ impl ComTool {
             }
         }
 
-        self.send_text.clear();
+        if self.clear_send_after_send {
+            self.send_text.clear();
+        }
+    }
+}
+
+impl ComTool {
+    /// 当前可见的面板数量（侧边栏 / 接收区 / 发送区）。
+    ///
+    /// 「至少保留一个可见」这条不变量在两个地方用到：视图菜单里决定勾选框是否可点，
+    /// 以及 [`crate::config::restore_runtime_state`] 里修正被手改坏的存档。
+    pub fn visible_panel_count(&self) -> usize {
+        usize::from(self.sidebar_open)
+            + usize::from(self.show_receive_panel)
+            + usize::from(self.show_send_panel)
+    }
+
+    /// 把主题偏好同步给 egui——仅在与当前生效值不同时调用，避免每帧都触发
+    /// `options_mut` 造成的无谓重绘。
+    pub fn apply_theme(&self, ctx: &egui::Context) {
+        let want: egui::ThemePreference = self.theme.into();
+        if ctx.options(|opt| opt.theme_preference) != want {
+            ctx.set_theme(want);
+        }
     }
 }
 
@@ -284,9 +362,19 @@ impl Default for ComTool {
             sidebar_open: true,
             language: Language::Zh,
             show_settings: false,
+            show_info: false,
             ascii_view: false,
             ascii_text: String::new(),
             ascii_spans: Vec::new(),
+            theme: ThemeChoice::default(),
+            auto_scroll: true,
+            max_log_chars: DEFAULT_MAX_LOG_CHARS,
+            repaint_interval_ms: DEFAULT_REPAINT_INTERVAL_MS,
+            clear_send_after_send: true,
+            default_log_file_name: DEFAULT_LOG_FILE_NAME.to_string(),
+            check_update_on_start: false,
+            show_receive_panel: true,
+            show_send_panel: true,
         }
     }
 }
@@ -299,9 +387,27 @@ impl eframe::App for ComTool {
         // 串口意外断开时自动重连（节流 500ms）
         self.auto_reconnect();
 
-        // 不断刷新 GUI
-        ui.ctx().request_repaint_after(Duration::from_millis(30));
+        // 主题偏好只在与当前生效值不同时下发一次
+        self.apply_theme(ui.ctx());
 
+        // 不断刷新 GUI；间隔可配，越界值（手改存档）在这里夹回合法区间
+        let repaint_ms = self.repaint_interval_ms.clamp(16, 1000);
+        ui.ctx()
+            .request_repaint_after(Duration::from_millis(repaint_ms));
+
+        // ① 顶部菜单栏必须最先画：egui 的面板先画先占位，先画才能横跨整幅宽度
+        let menu = self.show_menu_bar(ui);
+        if menu.info_requested {
+            self.show_info = true;
+        }
+        if menu.settings_requested {
+            self.show_settings = true;
+        }
+        if menu.quit_requested {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        // ② 右侧边栏
         let mut sidebar_open = self.sidebar_open;
         let action = self.show_sidebar(ui, &mut sidebar_open);
 
@@ -318,32 +424,11 @@ impl eframe::App for ComTool {
             self.export_receive_text();
         }
 
+        // ③ 中央区
         egui::CentralPanel::default().show(ui, |ui| {
-            //ui.heading("");
-            if self.show_settings {
-                egui::Window::new("设置")
-                    .collapsible(false)
-                    .resizable(false)
-                    .open(&mut self.show_settings)
-                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(20.0, 20.0))
-                    .show(ui.ctx(), |ui| {
-                        ui.label("language:");
-                        egui::ComboBox::from_id_salt("language")
-                            .selected_text(match self.language {
-                                Language::Zh => "中文",
-                                Language::En => "English",
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.language, Language::Zh, "中文");
-                                ui.selectable_value(&mut self.language, Language::En, "English");
-                            });
-
-                        ui.separator();
-                        ui.weak("（语言选项暂未接入界面文案，仅作占位）");
-                    });
-            }
-
-            ui.separator();
+            // 设置 / 信息两个窗口跟着中央区一起绘制（主界面的常驻部分）
+            self.show_settings_window(ui);
+            self.show_info_window(ui);
 
             ui.horizontal(|ui| {
                 ui.toggle_value(&mut self.sidebar_open, "☰ 侧边栏");
@@ -357,72 +442,78 @@ impl eframe::App for ComTool {
 
             ui.separator();
 
-            // 接收设置：文本/HEX 用 checkbox 表达（底层互斥，因为收到数据只能按一种格式解析）
-            let mut show_hex = self.hex_view;
-            let mut show_text = !self.hex_view;
-            ui.horizontal(|ui| {
-                ui.label("接收设置:");
-                if ui.checkbox(&mut show_hex, "HEX").changed() && show_hex {
-                    show_text = false; // 勾 HEX → 取消文本
-                }
-                if ui.checkbox(&mut show_text, "文本").changed() && show_text {
-                    show_hex = false; // 勾文本 → 取消 HEX
-                }
+            if self.show_receive_panel {
+                // 接收设置：文本/HEX 用 checkbox 表达（底层互斥，因为收到数据只能按一种格式解析）
+                let mut show_hex = self.hex_view;
+                let mut show_text = !self.hex_view;
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.color_view, "颜色");
-                    ui.checkbox(&mut self.ascii_view, "字节查看");
+                    ui.label("接收设置:");
+                    if ui.checkbox(&mut show_hex, "HEX").changed() && show_hex {
+                        show_text = false; // 勾 HEX → 取消文本
+                    }
+                    if ui.checkbox(&mut show_text, "文本").changed() && show_text {
+                        show_hex = false; // 勾文本 → 取消 HEX
+                    }
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.color_view, "颜色");
+                        ui.checkbox(&mut self.ascii_view, "字节查看");
+                    });
                 });
-            });
-            self.hex_view = show_hex; // 文本 = !hex_view；两个都取消时退回文本
+                self.hex_view = show_hex; // 文本 = !hex_view；两个都取消时退回文本
 
-            // 接收区
-            if self.color_view {
-                self.render_color_receive(ui);
-            } else if self.ascii_view {
-                // ASCII 模式：逐字节解码，控制字符/高位字节转义为可见形式
-                self.render_ascii_receive(ui);
-            } else {
-                // 普通文本模式：不折行 + 纵/横双向滚动 + 可选中 + 右键复制全部
-                show_plain_receive(ui, &self.receive_text);
+                // 接收区
+                if self.color_view {
+                    self.render_color_receive(ui);
+                } else if self.ascii_view {
+                    // ASCII 模式：逐字节解码，控制字符/高位字节转义为可见形式
+                    self.render_ascii_receive(ui);
+                } else {
+                    // 普通文本模式：不折行 + 纵/横双向滚动 + 可选中 + 右键复制全部
+                    show_plain_receive(ui, &self.receive_text, self.auto_scroll);
+                }
             }
 
-            ui.separator();
+            if self.show_receive_panel && self.show_send_panel {
+                ui.separator();
+            }
 
-            // 发送区
-            ui.label("发送区:");
+            if self.show_send_panel {
+                // 发送区
+                ui.label("发送区:");
 
-            let send_edit_response = ui.add(
-                egui::TextEdit::multiline(&mut self.send_text)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(4)
-                    .font(egui::FontId::monospace(14.0))
-                    .return_key(egui::KeyboardShortcut::new(
-                        egui::Modifiers::SHIFT,
-                        egui::Key::Enter,
-                    )),
-            );
+                let send_edit_response = ui.add(
+                    egui::TextEdit::multiline(&mut self.send_text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(4)
+                        .font(egui::FontId::monospace(14.0))
+                        .return_key(egui::KeyboardShortcut::new(
+                            egui::Modifiers::SHIFT,
+                            egui::Key::Enter,
+                        )),
+                );
 
-            let enter_to_send = send_edit_response.has_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                let enter_to_send = send_edit_response.has_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
 
-            let mut do_send = false;
-            let mut do_clear = false;
-            ui.horizontal(|ui| {
-                if ui.button("发送").clicked() {
+                let mut do_send = false;
+                let mut do_clear = false;
+                ui.horizontal(|ui| {
+                    if ui.button("发送").clicked() {
+                        do_send = true;
+                    }
+                    if ui.button("清空发送").clicked() {
+                        do_clear = true;
+                    }
+                });
+                if enter_to_send {
                     do_send = true;
                 }
-                if ui.button("清空发送").clicked() {
-                    do_clear = true;
+                if do_send {
+                    self.send_data();
                 }
-            });
-            if enter_to_send {
-                do_send = true;
-            }
-            if do_send {
-                self.send_data();
-            }
-            if do_clear {
-                self.send_text.clear();
+                if do_clear {
+                    self.send_text.clear();
+                }
             }
         });
     }
