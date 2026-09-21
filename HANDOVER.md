@@ -67,7 +67,8 @@ Rust 串口调试上位机（GUI 串口助手）。技术栈：
 ```
 src/
 ├── main.rs                 入口；字体回退链；eframe::run_native；APP_TITLE 常量；挂 `app_icon` 到窗口图标
-├── app_icon.rs   (540)     256×256 圆角方波图标，代码绘制、零资源文件、11 测试（1 条 ASCII 预览默认跳过）
+├── app_icon.rs   (540)     256×256 圆角方波图标，代码绘制、零资源文件、11 条单元测试
+│                           （外加 1 条默认跳过的 ASCII 预览测试）
 ├── app.rs        (613)     ComTool 状态 + Default + 串口生命周期 + eframe::App 编排
 ├── receive.rs   (1465)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
 │                           + 可选时间戳前缀（TimestampPrefix）+ 三种渲染
@@ -96,7 +97,7 @@ src/
 
 **权威约定文档**（改代码前先读）：
 - `AGENTS.md` — 给 AI/协作者的模块地图与硬性约束（简短，必读）
-- `DEVELOPMENT_GUIDE.md` — 中文开发参考：四层架构、数据流、新增功能的完整流程、注意事项 20 条
+- `DEVELOPMENT_GUIDE.md` — 中文开发参考：四层架构、数据流、新增功能的完整流程、注意事项 28 条
 
 ---
 
