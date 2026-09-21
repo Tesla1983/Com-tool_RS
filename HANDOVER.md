@@ -68,19 +68,19 @@ Rust 串口调试上位机（GUI 串口助手）。技术栈：
 src/
 ├── main.rs                 入口；字体回退链；eframe::run_native；APP_TITLE 常量；挂 `app_icon` 到窗口图标
 ├── app_icon.rs   (540)     256×256 圆角方波图标，代码绘制、零资源文件、11 测试（1 条 ASCII 预览默认跳过）
-├── app.rs        (595)     ComTool 状态 + Default + 串口生命周期 + eframe::App 编排
-├── receive.rs   (1365)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
+├── app.rs        (613)     ComTool 状态 + Default + 串口生命周期 + eframe::App 编排
+├── receive.rs   (1465)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
 │                           + 可选时间戳前缀（TimestampPrefix）+ 三种渲染
-│                           + FIFO 淘汰（35 测试）
+│                           + 显示模式互斥（resolve_display_mode）+ FIFO 淘汰（39 测试）
 ├── chart.rs      (485)     实时图表数据层：多通道数值流解析 + 跨包分片
 │                           + 样本 FIFO 淘汰 + 通道上限（20 测试）
 ├── log_file.rs   (801)     实时文件日志：后台写盘线程 + 文件名模板渲染
 │                           + 同名防截断 + 待写队列上限（14 测试）
 ├── sidebar.rs    (288)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
-├── config.rs     (453)     持久化策略 + 启动不变量修复（13 测试）
+├── config.rs     (497)     持久化策略 + 启动不变量修复（15 测试）
 ├── panels/
 │   ├── mod.rs     (151)    面板模块出口（5 条无头 UI 冒烟测试）
-│   ├── menu_bar.rs(118)    顶部菜单栏；返回 MenuAction；主题/时间戳单选共用入口
+│   ├── menu_bar.rs(132)    顶部菜单栏；返回 MenuAction；主题/时间戳/显示模式单选共用入口
 │   ├── settings.rs(182)    设置窗口（含实时图表与文件日志区块）
 │   ├── chart.rs   (223)    实时图表面板：egui_plot 绘制 + 绘制点抽样（5 测试）
 │   └── info.rs    (53)     信息窗口
@@ -91,7 +91,7 @@ src/
 │   └── mod.rs     (13)     出口
 ```
 
-测试函数合计 **110**（`cargo test` 报 109 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
+测试函数合计 **116**（`cargo test` 报 115 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
 需要目视时用 `cargo test app_icon::tests::ascii_preview -- --ignored --nocapture`）。
 
 **权威约定文档**（改代码前先读）：
@@ -117,12 +117,12 @@ src/
 
 ### 质量门禁（P0/P1 改动前 → 改动后）
 
-| 命令 | 前 | P0/P1 后 | P4 后 | P5 后 | P6 第 1 批后 | 本轮（P6 第 2 批 / P3）后 |
-|---|---|---|---|---|---|---|
-| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
-| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed** | **109 passed**（1 ignored，为图标 ASCII 预览） |
-| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** | **干净** |
-| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（逐条同上） | **8 warning**（逐条同上：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`；时间戳这批新代码 0 新增） |
+| 命令 | 前 | P0/P1 后 | P4 后 | P5 后 | P6 第 1 批后 | P6 第 2 批 / P3 后 | 本轮（显示模式互斥修复）后 |
+|---|---|---|---|---|---|---|---|
+| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
+| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed** | **109 passed**（1 ignored，为图标 ASCII 预览） | **115 passed**（1 ignored） |
+| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** |
+| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（逐条同上） | **8 warning**（逐条同上） | **8 warning**（逐条同上；本次改动 0 新增） |
 
 跑法：
 
@@ -131,12 +131,14 @@ cd E:/Downloads/Zed/AI_comtool-rs
 cargo fmt && cargo check --all-targets && cargo test
 ```
 
-109 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
+115 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
 一条把字节经事件通道注入后核对日志文件内容的集成测试、五条用
 `egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图、
 侧边栏、图表面板），11 条对应用图标做纯断言的单元测试（尺寸、透明度、渐变、
 前景笔画、越界检查、确定性），以及 17 条 P3 时间戳前缀测试（格式、三种模式下
 的插入位置、跨批次不重复、程序提示不加前缀、清空后重新标注、不进图表）。
+显示模式的互斥规则另有 6 条测试（两个点击方向、启动修复方向、合法组合不被改动、
+冲突存档往返后被修好）。
 
 ### 3.1 增量（2026-09-21：P2 菜单栏 + 设置面板，P3 部分提前）
 
@@ -331,6 +333,41 @@ cargo fmt && cargo check --all-targets && cargo test
   的手写 `Default`、若干 `manual_range_contains` 等），`cargo clippy --fix` 可一键清掉，
   但那会改动本任务范围之外的代码，因此留给下次专门做一次"清警告"提交。
 
+### 3.6 增量（2026-09-21：修复「HEX 接收 + 字节查看」空视图缺陷）
+
+**问题**：接收设置行里「HEX」与「文本」是互斥的，但「字节查看」是自由勾选的。两者同时勾上
+时走 HEX 分支（HEX 优先），片段只写 `display_spans`；而「颜色」未勾时渲染的正是
+`ascii_spans`——**接收区一片空白**。不是"两种格式混排"，是"什么都没有"。
+
+**做了什么**
+
+- 互斥规则收敛到唯一实现 `ComTool::resolve_display_mode()`（`receive.rs`）：置上用户刚勾中的
+  那一项、关掉另一项。参数是"本轮哪个刚被勾上"，而**不是**无条件让 HEX 胜出——否则用户在
+  HEX 模式下点「字节查看」会被当场撤销，表现为"点了没反应"，比空视图更难排查。
+- 两个界面入口都改走它：接收设置行（`app.rs`）与视图菜单（`panels/menu_bar.rs`，新增
+  `display_mode_checkboxes()`）。**规则只有一处定义**，不会出现"菜单里能同时勾上、主界面里
+  不能"这种两边不一致。
+- **启动修复**：旧存档里两个都可能为 `true`（那个组合曾经能从界面勾出来）。
+  `config::restore_runtime_state` 现在调用 `resolve_display_mode(false, false)` 修好它，方向与
+  `receive_data()` 的分支优先级一致（HEX 胜出）：与旧版本实际走的解析分支一致，而且修好之后
+  给用户的是一份**非空**视图。
+- `receive_data()` 里的 `!hex_view && ascii_view` 落点判据**保留**，作为纵深防御：手改存档、
+  或将来有调用方绕过 UI 直接置位时，落点仍与分支一致。
+  `hex_takes_precedence_over_ascii_like_before` 继续守着它（注释已改写为说明这层防御性质）。
+
+**验证**：新增 6 条测试（`receive::tests` 4 条：两个点击方向各一条、启动修复方向、合法组合
+不被改动；`config::tests` 2 条：冲突存档往返后被修好、只开字节查看不受影响）。另外把
+`config::tests::customized()` 里 `hex_view` / `ascii_view` **同时为真**的样本改成合法组合——
+它此前正是那个非法状态，修复逻辑一上线就会被它撞出来（第一次 `cargo test` 正是这么红的）。
+
+**未做 / 未验证**
+
+- **点击行为没有肉眼确认过**：互斥逻辑由单元测试覆盖，但"点一下是不是真的关掉了另一个"
+  只能在实机界面上看。§4② 的手工验证清单已加入这一项。
+- 「颜色」与「字节查看」同时勾选时**渲染的是彩色视图**（`color_view` 在渲染顺序里优先），
+  此时「字节查看」勾着却不显示对应视图。这是同一类"勾了没反应"的老问题，但性质比空视图轻
+  （不丢内容、只是被另一视图盖住），本次未动——见 §5 末行，需要一次界面行为决策。
+
 ---
 
 ## 4. 未决事项
@@ -394,10 +431,20 @@ cargo fmt && cargo check --all-targets && cargo test
 18. 选「每行」→ 之后每行开头应出现灰色的 `[HH:MM:SS.mmm]`；发一条不带换行的数据，
     再发一条以换行结尾的数据 → 前缀应只在行的开头出现，**不会**在同一行的后半段重复
 19. 选「每批」→ 一个数据块只标注一次：同一块里的第二行**不带**前缀（与「每行」对照）
-20. 切到 HEX 与字节查看视图 → 前缀仍然出现（它是注解，不是数据）；把设置改回「关闭」→
+20. 分别切到 HEX 视图与字节查看视图（这两个现在**互斥**，需要分别切换，见下面 23~26）→
+    前缀仍然出现（它是注解，不是数据）；把设置改回「关闭」→
     接收区内容应恢复成纯数据，与开启前完全一致
 21. 开着「每行」时点侧边栏「清空日志」，再发一行 → 清空后的第一行应重新带上前缀
 22. 开着前缀时开始记录日志 → 日志文件里的每一行也应带前缀（与接收区一致）
+
+**同一趟也可以把显示模式互斥验掉**（本轮修复项，见 §3.6）：
+
+23. 接收设置行先勾「HEX」，再点「字节查看」→ **「HEX」应自动取消**，接收区显示转义后的
+    字节（不是空白）；反过来先勾「字节查看」再点「HEX」→「字节查看」应自动取消
+24. 视图菜单 →「显示模式」里同样试一遍 → 行为必须与接收设置行一致（两处走的是同一条规则）
+25. 退出程序再重新打开 → 显示模式保持你最后的选择，且**不会**停在"接收区空白"的状态
+26. 若手边正好有修复前留下的存档（`hex_view` 与 `ascii_view` 都是 `true`），直接启动 →
+    接收区应有内容（HEX 视图），而不是空白的字节视图
 
 ### ③ 仓库状态
 
@@ -422,7 +469,8 @@ cargo fmt && cargo check --all-targets && cargo test
 | 低 | 绘制抽样（4000 点/曲线）未在界面暴露 | `panels/chart.rs` | 样本上限（可配）与绘制抽样（固定 4000）是两层不同的限制，界面只显示了前者。用户设到 10 万时会看到"曲线比样本数少"，目前只能靠文档解释 |
 | 低 | 图表 x 轴是组序号而非时间 | `chart.rs` | 串口数据没有可靠时间基准，因此看不出真实时间跨度或采样率。若将来要显示"每秒多少个样本"，需要在解析端额外维护时间戳 |
 | 低 | 图表解析在面板隐藏时也照常进行 | `receive.rs::receive_data` | 刻意如此：打开面板时立刻能看到已有曲线，而不是"打开后才从零开始"。代价是即使用户从不看图，每次接收仍会做一次扫描与少量解析 |
-| 低 | 「HEX 接收」与「字节查看」同时勾上时**字节查看视图是空的** | `app.rs` 接收设置行 / `receive.rs` 的镜像落点 | 既有行为，本次改写刻意保持不变（`hex_takes_precedence_over_ascii_like_before` 锁的就是它）：HEX 分支优先，片段写进 `display_spans`，`ascii_spans` 保持为空，而「颜色」未勾时渲染的正是 `ascii_spans`。最小修法是在 UI 上把两者做成互斥（勾一个自动取消另一个，与「HEX / 文本」那对一致），属于界面行为决策，未在本轮范围内 |
+| ~~低~~ **已修** | ~~「HEX 接收」与「字节查看」同时勾上时**字节查看视图是空的**~~ | `app.rs` 接收设置行 / `panels/menu_bar.rs` / `receive.rs` | **已于 2026-09-21 修复**：两者改为互斥，规则收敛在 `ComTool::resolve_display_mode()`（两个界面入口 + 启动修复都走它），`receive_data()` 里的落点判据保留作纵深防御。见 §3.6 |
+| 低 | 「颜色」与「字节查看」同时勾选时，显示的是彩色视图 | `app.rs` 的渲染分支顺序 | `color_view` 在渲染顺序里优先，于是「字节查看」勾着却不显示对应视图——同类"勾了没反应"，但**不丢内容**，只是被另一视图盖住（上面的空视图缺陷已修）。最小修法是二选一：让字节视图在渲染里优先，或勾上字节视图时把「颜色」置灰。需要一次界面行为决策 |
 | 低 | 时间戳前缀在 HEX / 字节查看视图里是"注解"而不是收到的字节 | `receive.rs` | 刻意如此（三种视图一致 + 日志文件一致），靠方括号与灰色区分。要一份纯字节记录请关掉前缀（默认就是关闭）。实时日志文件同样会带上前缀 |
 
 ---
@@ -450,7 +498,7 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
 ① §4② 的磁盘持久化实机验证（**必须由所有者亲手跑**，AI 不运行本项目）；
 ② §4① 的 GPLv3 合规二选一（已降为最低优先级，仅对外分发前必须拍板）；
 ③ §5 里那 8 条既有 clippy 警告的清理（`cargo clippy --fix` 一键，建议单独一次提交）；
-④ §5 里「HEX + 字节查看同时勾选」的界面互斥（需要一次界面行为决策）。
+④ §5 里「颜色 + 字节查看同时勾选」的界面行为决策（后者被前者盖住；已不丢内容，属同类小问题）。
 其余可做的新功能（例如图表按通道显示/隐藏、x 轴改成真实时间基准）都不在原计划内。
 
 ---
@@ -461,7 +509,7 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
 
 0. **⛔ 未经项目所有者逐次批准，禁止运行本项目（`cargo run` / 直接跑 exe），禁止以任何方式
    占用或打断 COM3。** 开发阶段只用 `cargo fmt` / `cargo check --all-targets` / `cargo test`
-   验证（109 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
+   验证（115 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
    完整条文在 `AGENTS.md` 顶部与 `DEVELOPMENT_GUIDE.md` §0。
    **该规则已配置机器级硬拦截**：PreToolUse 钩子 `~/.workbuddy/hooks/comtool-run-guard.sh`
    （注册于 `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json`），命中即拒绝工具调用，
@@ -506,6 +554,12 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
     （`at_receive_line_start()`），**不要另设平行字段**；一批只取一次 `Local::now()`；
     没有内容（无**非空**片段）时一个前缀都不加。改动 `receive_data()` 的分支时，务必
     核对**镜像落点与分支一一对应**：HEX 优先于字节查看，落点是 `!hex_view && ascii_view`。
+15. **「HEX 接收」与「字节查看」互斥，规则只有一处**：`ComTool::resolve_display_mode()`
+    （`receive.rs`）。界面两个入口（接收设置行、视图菜单）与启动修复都调它——不要在某个
+    界面上就地写 `if hex { ascii = false; }`，规则一分散就迟早出现"菜单里能同时勾上、
+    主界面里不能"。参数是"本轮哪个刚被勾上"，**不要改成无条件让 HEX 胜出**：那样用户点
+    「字节查看」会被当场撤销，表现为"点了没反应"。原因见 §3.6：两个同时为真时字节视图
+    渲染的 `ascii_spans` 自始至终没人写过，接收区是**一片空白**。
 
 ---
 
@@ -546,7 +600,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 109 passed / 1 ignored / fmt 干净）
+# 3. 建立门禁基线（应为 0 warning / 115 passed / 1 ignored / fmt 干净）
 cargo fmt && cargo check --all-targets && cargo test
 
 # 4. 看清两个版本的差异

@@ -16,7 +16,7 @@
   默认值、配置、测试或脚本；不得停止/杀掉/禁用任何可能占用 COM3 的进程、服务或驱动。
   对 COM3 只能"看"（不打开端口的只读枚举，且需先说明理由），不能"碰"。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。109 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。115 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
 - 一次批准只对当次生效，不构成对后续轮次的授权。
@@ -308,8 +308,8 @@ impl eframe::App for ComTool {
 | 打开/关闭串口 | `connected`、`serial`、`event_rx`、`last_opened_port` | `open_port()` / `close_port()`（`app.rs`） | 侧边栏「打开串口」/「关闭串口」按钮 |
 | 自动重连 | `last_reconnect_attempt` | `auto_reconnect()`（`app.rs`） | 无（每帧自动尝试，500 ms 节流） |
 | 接收数据显示 | `display_spans`、`receive_text`、`decoder` | `receive_data()`、`build_layout()`（`receive.rs`） | 接收区滚动区 + 「颜色」勾选框 |
-| 字节查看视图 | `ascii_text`、`ascii_spans` | `render_ascii_receive()`（`receive.rs`） | 「字节查看」勾选框 |
-| HEX 模式 | `hex_view` | `receive_data()` 的 HEX 分支 | 「HEX / 文本」勾选框 |
+| 字节查看视图 | `ascii_text`、`ascii_spans` | `render_ascii_receive()`（`receive.rs`） | 「字节查看」勾选框（与「HEX 接收」互斥，见 §6 第 28 条） |
+| HEX 模式 | `hex_view` | `receive_data()` 的 HEX 分支 | 「HEX / 文本」勾选框；与「字节查看」互斥，规则在 `resolve_display_mode()` |
 | 清空接收 | 全部四份镜像 | `clear_receive()`（`receive.rs`） | 侧边栏「清空日志」按钮 |
 | 导出接收数据 | `receive_text` | `export_receive_text()`（`app.rs`） | 侧边栏「导出日志」按钮 |
 | 发送数据 | `send_text` | `send_data()`（`app.rs`） | 「发送」按钮 / Enter 键 |
@@ -401,4 +401,9 @@ impl eframe::App for ComTool {
     - 一批只取**一次** `Local::now()`：同一块数据里的多行本来就同时到达，逐行取时间会造出"每隔几毫秒来一行"的假象。
     - **没有内容就不加前缀**，判据是"有非空片段"而不是"片段数组非空"——文本模式收到半个多字节序列时片段是空的，此时加前缀等于凭空造出一行。
     - 行边界就是 `\n`，所以 HEX 视图（每批一行）下"每行"自然退化为"每批"，这是设计如此，不是缺陷。
-    - 片段的落点必须与模式分支顺序一致：HEX 优先于字节查看，因此落点是 `!hex_view && ascii_view`。写成 `ascii_view` 会让"两个勾选框同时打开"时片段落进另一份镜像——这正是改写 `receive_data` 时最容易悄悄引入的回归（`receive::tests::hex_takes_precedence_over_ascii_like_before` 锁住了它）。
+    - 片段的落点必须与模式分支顺序一致：HEX 优先于字节查看，因此落点是 `!hex_view && ascii_view`。写成 `ascii_view` 会让"两个勾选框同时打开"时片段落进另一份镜像。界面层现在**禁止**这个组合（见第 28 条），所以这里的 `!hex_view` 是纵深防御：手改存档、或将来有调用方绕过 UI 直接置位时，落点仍与分支一致（`receive::tests::hex_takes_precedence_over_ascii_like_before` 锁住了它）。
+28. **「HEX 接收」与「字节查看」互斥，而且规则只有一处实现**：`ComTool::resolve_display_mode()`（`receive.rs`）。界面两个入口（接收设置行、视图菜单的 `display_mode_checkboxes()`）与启动修复（`config::restore_runtime_state`）都调它。
+    - **为什么必须互斥**：`receive_data()` 的三条模式分支里 HEX 优先，HEX 分支只写 `display_spans`；而「颜色」未勾时渲染的正是 `ascii_spans`。两者同时为真 → 字节视图**一片空白**（不是"两种格式混排"，是"什么都没有"）。
+    - **参数是"本轮哪个刚被勾上"，不要改成无条件让 HEX 胜出**：那样用户在 HEX 模式下点「字节查看」会被当场撤销，表现为"点了没反应"——比空视图更难排查。本函数负责把点击落实下来（置上刚点的那项、关掉另一项），调用方不必先自己写回字段。
+    - 启动时传 `(false, false)` 用于修复旧存档里的非法组合，方向按 `receive_data()` 的分支优先级（HEX 胜出），保证修好后是一份**非空**视图。
+    - **不要在某个界面上就地写 `if hex { ascii = false; }`**：规则一分散，迟早出现"菜单里能同时勾上、主界面里不能"这种两边不一致。

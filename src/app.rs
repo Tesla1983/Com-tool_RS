@@ -120,6 +120,8 @@ pub struct ComTool {
     // 上次成功打开的串口（自动重连时优先用它，避免跳到 COM1）
     pub last_opened_port: Option<String>,
 
+    /// HEX 视图：本批字节直接转十六进制文本。它与"文本"是同一个开关的两面
+    /// （`hex_view == false` 即文本模式），并与 [`ComTool::ascii_view`] 互斥。
     pub hex_view: bool,
     #[serde(skip)]
     pub display_spans: Vec<ColoredSpan>,
@@ -133,6 +135,11 @@ pub struct ComTool {
     pub show_settings: bool,
     #[serde(skip)]
     pub show_info: bool,
+    /// 字节查看视图：渲染 `ascii_spans`。
+    ///
+    /// **与 [`ComTool::hex_view`] 互斥**——HEX 分支只写 `display_spans`，两个同时为真时
+    /// 这个视图必然是空的。互斥由 [`ComTool::resolve_display_mode`] 统一裁决，界面（菜单
+    /// 与接收设置行）与启动修复都走它，不要在别处另写一份判断。
     pub ascii_view: bool,
 
     #[serde(skip)]
@@ -508,20 +515,31 @@ impl eframe::App for ComTool {
                 // 接收设置：文本/HEX 用 checkbox 表达（底层互斥，因为收到数据只能按一种格式解析）
                 let mut show_hex = self.hex_view;
                 let mut show_text = !self.hex_view;
+                // 「字节查看」与「HEX 接收」也互斥（见 `resolve_display_mode`）。这里必须
+                // 分别记下"哪个是刚被勾上的"，交给那一个函数统一裁决，而不是就地写
+                // `if hex { ascii = false; }`——规则两处各写一遍，迟早有一处忘了改。
+                let mut hex_just_enabled = false;
+                let mut ascii_just_enabled = false;
                 ui.horizontal(|ui| {
                     ui.label("接收设置:");
                     if ui.checkbox(&mut show_hex, "HEX").changed() && show_hex {
                         show_text = false; // 勾 HEX → 取消文本
+                        hex_just_enabled = true;
                     }
                     if ui.checkbox(&mut show_text, "文本").changed() && show_text {
                         show_hex = false; // 勾文本 → 取消 HEX
                     }
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut self.color_view, "颜色");
-                        ui.checkbox(&mut self.ascii_view, "字节查看");
+                        if ui.checkbox(&mut self.ascii_view, "字节查看").changed()
+                            && self.ascii_view
+                        {
+                            ascii_just_enabled = true;
+                        }
                     });
                 });
                 self.hex_view = show_hex; // 文本 = !hex_view；两个都取消时退回文本
+                self.resolve_display_mode(hex_just_enabled, ascii_just_enabled);
 
                 // 接收区
                 if self.color_view {

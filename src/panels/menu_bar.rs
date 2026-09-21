@@ -60,8 +60,7 @@ impl ComTool {
                     ui.separator();
                     ui.label("显示模式");
                     ui.checkbox(&mut self.color_view, "颜色");
-                    ui.checkbox(&mut self.ascii_view, "字节查看");
-                    ui.checkbox(&mut self.hex_view, "HEX 接收");
+                    self.display_mode_checkboxes(ui);
                     ui.separator();
                     ui.checkbox(&mut self.auto_scroll, "自动滚动");
                     ui.separator();
@@ -72,6 +71,21 @@ impl ComTool {
         });
 
         action
+    }
+
+    /// 「HEX 接收」与「字节查看」勾选，并保证两者**互斥**。
+    ///
+    /// 互斥规则本身只有一处实现（[`ComTool::resolve_display_mode`]），这里只负责把
+    /// "本轮哪个刚被勾上"传给它。用局部变量而不是直接绑定字段，是因为本轮改动前后的
+    /// 值都要参与判断，且必须一次性写回——边画边改字段会让两个勾选框在同一帧里互相覆盖。
+    fn display_mode_checkboxes(&mut self, ui: &mut Ui) {
+        let mut hex_view = self.hex_view;
+        let mut ascii_view = self.ascii_view;
+        let hex_just_enabled = ui.checkbox(&mut hex_view, "HEX 接收").changed() && hex_view;
+        let ascii_just_enabled = ui.checkbox(&mut ascii_view, "字节查看").changed() && ascii_view;
+        self.hex_view = hex_view;
+        self.ascii_view = ascii_view;
+        self.resolve_display_mode(hex_just_enabled, ascii_just_enabled);
     }
 
     /// 面板显隐勾选，并保证**至少保留一个可见面板**。

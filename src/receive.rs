@@ -681,6 +681,34 @@ impl ComTool {
         self.receive_text.is_empty() || self.receive_text.ends_with('\n')
     }
 
+    /// 让「HEX 接收」与「字节查看」收敛为**互斥**的合法组合。
+    ///
+    /// 为什么两者必须互斥：`receive_data()` 的三种显示模式是一条 `if/else` 链，且
+    /// **HEX 优先于字节查看**——两个都开着时片段只写 `display_spans`，而字节视图渲染
+    /// 的是 `ascii_spans`。结果不是"两种格式混排"，而是字节视图**一片空白**。
+    ///
+    /// 参数是"本轮用户刚把哪一个勾上"（`.changed()` 且新值为 `true`）。本函数是**把点击
+    /// 落实下来的那一处**：置上刚点的那项、关掉另一项，所以调用方不必先自己把值写回字段，
+    /// 漏写也不会丢点击。不要把方向改成"一律让 HEX 胜出"：那样用户在 HEX 模式下点击
+    /// 「字节查看」会被当场撤销，表现为"点了没反应"——比原来的空视图更难排查。
+    ///
+    /// 两者都为 `false` 时用于**启动修复**（旧存档可能把两个 `true` 都存了进去），此时
+    /// 不改变任何值，只按 `receive_data()` 的分支优先级把冲突修成"HEX 胜出"。
+    ///
+    /// 菜单与接收设置行都调这一个函数——互斥规则只有一处定义，就不会出现"菜单里能
+    /// 同时勾上、主界面里不能"这种两边不一致。
+    pub fn resolve_display_mode(&mut self, hex_just_enabled: bool, ascii_just_enabled: bool) {
+        if hex_just_enabled {
+            self.hex_view = true;
+            self.ascii_view = false;
+        } else if ascii_just_enabled {
+            self.ascii_view = true;
+            self.hex_view = false;
+        } else if self.hex_view && self.ascii_view {
+            self.ascii_view = false;
+        }
+    }
+
     /// 按 [`ComTool::timestamp_prefix`] 给本批接收片段加上时间戳前缀。
     ///
     /// 关闭时原样返回，连时间都不取——没有开这个功能的人不该为此付出任何代价。
@@ -761,10 +789,13 @@ impl ComTool {
 
             spans = self.apply_timestamp_prefix(spans);
 
-            // 镜像落点必须与上面那条 if/else 链**逐分支对应**：HEX 优先于字节查看
-            // （两个勾选框同时打开时走 HEX 分支），所以这里也要把 hex_view 排除掉。
-            // 否则"同时开了 HEX 与字节查看"这个配置下，片段会落进另一份镜像，
-            // 与改写这条链路之前的行为不一致。
+            // 镜像落点必须与上面那条 if/else 链**逐分支对应**：HEX 优先于字节查看，
+            // 所以字节镜像的条件里也要把 hex_view 排除掉。
+            //
+            // 界面层已经让两者互斥（[`ComTool::resolve_display_mode`]，菜单与接收设置行
+            // 都走它），所以正常操作下到不了这里。这个 `!hex_view` 是**纵深防御**：手改
+            // 存档、或将来有别的调用方绕过 UI 直接置位时，落点仍然与分支一致，而不是把
+            // HEX 片段塞进字节镜像、让字节视图显示出一份"看着像数据其实不该在这"的内容。
             let to_ascii_mirror = !self.hex_view && self.ascii_view;
             let mut plain = String::new();
             for span in spans {
@@ -1261,6 +1292,10 @@ mod tests {
     ///
     /// 这条锁定的是这次改写**没有**悄悄改变镜像落点：`receive_data` 的三条分支刚被
     /// 收敛成一条公共尾部，镜像落点若不再与分支一一对应，就是这个配置下露出来。
+    ///
+    /// 界面层现在让两者互斥（[`ComTool::resolve_display_mode`]），所以这个组合只能由
+    /// 直接置位构造出来——这条测试守的正是那条**纵深防御**：无论谁绕过 UI 把两个都设成
+    /// `true`，落点都必须跟着分支走，而不是把 HEX 片段塞进字节镜像。
     #[test]
     fn hex_takes_precedence_over_ascii_like_before() {
         let mut app = ComTool {
@@ -1278,6 +1313,71 @@ mod tests {
         assert_eq!(app.display_spans.len(), 1, "HEX 分支应写入 display_spans");
         assert!(app.ascii_spans.is_empty(), "HEX 优先时不该再写 ascii_spans");
         assert!(app.ascii_text.is_empty());
+    }
+
+    /// 勾上「HEX 接收」时关掉「字节查看」。
+    ///
+    /// 这个组合就是缺陷本身：HEX 分支只写 `display_spans`，而字节视图渲染的是
+    /// `ascii_spans`——两个都开着时接收区是**一片空白**，不是"两种格式混排"。
+    #[test]
+    fn enabling_hex_turns_the_byte_view_off() {
+        let mut app = ComTool {
+            ascii_view: true,
+            ..ComTool::default()
+        };
+        app.resolve_display_mode(true, false);
+
+        assert!(app.hex_view);
+        assert!(!app.ascii_view, "字节视图留着必然是空的");
+    }
+
+    /// 勾上「字节查看」时关掉「HEX 接收」。
+    ///
+    /// 方向很重要：这一项必须是**用户刚点的那个**。若函数一律让 HEX 胜出，用户点击
+    /// 「字节查看」会被当场撤销，表现为"点了没反应"——比原来的空视图更难排查。
+    #[test]
+    fn enabling_the_byte_view_turns_hex_off() {
+        let mut app = ComTool {
+            hex_view: true,
+            ..ComTool::default()
+        };
+        app.resolve_display_mode(false, true);
+
+        assert!(!app.hex_view);
+        assert!(app.ascii_view, "刚点的那一项必须留下来");
+    }
+
+    /// 没有点击事件时（启动修复），非法组合按 HEX 优先修好。
+    #[test]
+    fn stale_conflicting_modes_are_repaired_in_favour_of_hex() {
+        let mut app = ComTool {
+            hex_view: true,
+            ascii_view: true,
+            ..ComTool::default()
+        };
+        app.resolve_display_mode(false, false);
+
+        assert!(app.hex_view, "与 receive_data 的分支顺序一致");
+        assert!(!app.ascii_view);
+    }
+
+    /// 合法组合、以及"两个都关掉"（纯文本视图）都不该被这个函数改动。
+    #[test]
+    fn legal_display_combinations_are_left_alone() {
+        for (hex_view, ascii_view) in [(true, false), (false, true), (false, false)] {
+            let mut app = ComTool {
+                hex_view,
+                ascii_view,
+                ..ComTool::default()
+            };
+            app.resolve_display_mode(false, false);
+
+            assert_eq!(
+                (app.hex_view, app.ascii_view),
+                (hex_view, ascii_view),
+                "HEX={hex_view} 字节查看={ascii_view} 是合法组合，不该被改"
+            );
+        }
     }
 
     /// HEX 视图里前缀是"顶在字节串前面的注解"：方括号本身就把注解与数据分开了，

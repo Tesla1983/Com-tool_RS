@@ -77,6 +77,13 @@ pub fn restore_runtime_state(app: &mut ComTool) {
 
     normalize_panel_visibility(app);
 
+    // 「HEX 接收」与「字节查看」**互斥**（见 `ComTool::resolve_display_mode`）。旧存档里
+    // 两个可能都是 `true`——那个组合曾经能从界面上勾出来（接收设置行只互斥了 HEX 与文本，
+    // 漏了字节查看）。两个参数都传 `false` 表示"本轮没有点击"，于是按 `receive_data()`
+    // 的分支优先级让 HEX 胜出：与旧版本实际走的解析分支一致，而且修好之后给用户的是一份
+    // **非空**视图——不然字节视图渲染的 `ascii_spans` 自始至终没人写过，接收区一片空白。
+    app.resolve_display_mode(false, false);
+
     // 重绘间隔越界会让界面要么卡顿、要么 CPU 空转；越界值在这里夹回合法区间，
     // 使用处 `app.rs` 也会再夹一次，双保险。
     app.repaint_interval_ms = app.repaint_interval_ms.clamp(16, 1000);
@@ -146,7 +153,10 @@ mod tests {
             send_text: "AT+RST\n".to_string(),
             hex_view: true,
             color_view: true,
-            ascii_view: true,
+            // 与 `hex_view` **互斥**（见 `ComTool::resolve_display_mode`），所以这份"填满
+            // 非默认值"的样本里两者只能有一个为真。`ascii_view` 为真时的往返由
+            // `ascii_view_alone_survives_round_trip` 单独覆盖。
+            ascii_view: false,
             sidebar_open: false,
             language: Language::En,
             last_opened_port: Some("COM42".to_string()),
@@ -416,6 +426,40 @@ mod tests {
             !restored.show_receive_panel,
             "已经有一个可见面板时不该被兜底逻辑强行打开接收区"
         );
+    }
+
+    /// 旧存档里「HEX 接收」与「字节查看」同时为真时，启动修复只留 HEX。
+    ///
+    /// 那个组合渲染出来是**空的**接收区：HEX 分支写 `display_spans`，字节视图读的却是
+    /// `ascii_spans`。修复方向与 `receive_data()` 的分支优先级一致。
+    #[test]
+    fn conflicting_display_modes_are_repaired_on_load() {
+        let mut saved = customized();
+        saved.hex_view = true;
+        saved.ascii_view = true;
+
+        let restored = round_trip(&saved);
+
+        assert!(
+            restored.hex_view,
+            "HEX 优先，与 receive_data 的分支顺序一致"
+        );
+        assert!(!restored.ascii_view, "字节视图留着必然是空的，必须被关掉");
+    }
+
+    /// 只开「字节查看」是合法配置，不能被上面那条修复顺手关掉；
+    /// 顺带覆盖 `ascii_view`（非默认值）的往返——`customized()` 里它必须是 `false`，
+    /// 因为与 `hex_view` 互斥。
+    #[test]
+    fn ascii_view_alone_survives_round_trip() {
+        let mut saved = customized();
+        saved.hex_view = false;
+        saved.ascii_view = true;
+
+        let restored = round_trip(&saved);
+
+        assert!(!restored.hex_view);
+        assert!(restored.ascii_view);
     }
 
     /// 重绘间隔越界（手改存档）时夹回 16~1000。
