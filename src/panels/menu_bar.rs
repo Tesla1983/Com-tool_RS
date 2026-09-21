@@ -85,6 +85,10 @@ impl ComTool {
             egui::Checkbox::new(&mut self.show_receive_panel, "接收区"),
         );
         ui.add_enabled(
+            can_hide || !self.show_chart_panel,
+            egui::Checkbox::new(&mut self.show_chart_panel, "实时图表"),
+        );
+        ui.add_enabled(
             can_hide || !self.show_send_panel,
             egui::Checkbox::new(&mut self.show_send_panel, "发送区"),
         );

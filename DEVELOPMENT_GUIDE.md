@@ -16,7 +16,7 @@
   默认值、配置、测试或脚本；不得停止/杀掉/禁用任何可能占用 COM3 的进程、服务或驱动。
   对 COM3 只能"看"（不打开端口的只读枚举，且需先说明理由），不能"碰"。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。50 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。79 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
 - 一次批准只对当次生效，不构成对后续轮次的授权。
@@ -53,7 +53,7 @@
 |---|---|---|---|
 | **状态层** | `struct ComTool`（`src/app.rs`） | 定义功能所需的跨帧/跨调用状态字段 | `connected`、`display_spans`、`color_view` |
 | **初始化层** | `impl Default for ComTool`（`src/app.rs`） | 给所有状态字段设默认值（漏了会编译报错） | `color_view: false`、`baud_rate: DEFAULT_BAUD_RATE` |
-| **业务逻辑层** | `impl ComTool`（`src/app.rs` / `src/receive.rs` / `src/log_file.rs`） | 串口生命周期、数据解析、布局构建、日志写盘 | `open_port()`、`receive_data()`、`build_layout()`、`start_logging()` |
+| **业务逻辑层** | `impl ComTool`（`src/app.rs` / `src/receive.rs` / `src/log_file.rs` / `src/chart.rs`） | 串口生命周期、数据解析、布局构建、日志写盘、数值流解析 | `open_port()`、`receive_data()`、`build_layout()`、`start_logging()` |
 | **UI 层** | `impl eframe::App for ComTool`（`src/app.rs`）+ `show_sidebar()`（`src/sidebar.rs`） | 绘制控件并把 UI 事件接到业务方法上 | `ui.button("发送").clicked()` |
 | **持久化层** | `src/config.rs` | 决定哪些字段落盘、哪些在启动时重建 | `load()`、`save()`、`restore_runtime_state()` |
 
@@ -65,11 +65,13 @@
 | `src/app.rs` | `ComTool` 状态、`Default`、`ThemeChoice`、串口生命周期、视图级辅助方法、`eframe::App` 顶层编排 |
 | `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`、字节级可视化、三种视图渲染、`max_log_chars` FIFO 淘汰 |
 | `src/log_file.rs` | 实时文件日志：后台写盘线程（`LogSink`）、文件名模板渲染、同名防截断、待写队列上限 |
+| `src/chart.rs` | 实时图表数据层：原始字节 → 多通道数值序列（`ChartData`）、跨包分片、样本 FIFO、非数值计数；不依赖 `egui` |
 | `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态 |
 | `src/panels/mod.rs` | 面板模块声明 + 无头 UI 冒烟测试 |
 | `src/panels/menu_bar.rs` | 顶部菜单栏（文件 / 设置 / 视图）；返回 `MenuAction` |
 | `src/panels/settings.rs` | 设置窗口：把用户偏好接到真正的控件上 |
 | `src/panels/info.rs` | 信息窗口：版本、技术栈、存档路径、快捷键 |
+| `src/panels/chart.rs` | 实时图表面板：`egui_plot` 绘制、图例、绘制点抽样（`points_for_drawing`） |
 | `src/config.rs` | 持久化策略 + 启动时不变量修复 |
 | `src/communicationtrait.rs` | `ByteChannel` trait 与 `ChannelEvent` |
 | `src/serial_impl/channel.rs` | 串口实现：后台线程 + 命令/事件双通道 |
@@ -84,6 +86,7 @@
         │
         ▼
 receive_data()                     ← 业务层（src/receive.rs）：拉取原始字节
+   ├─ 原始字节 → chart.push_bytes()  → 多通道数值序列（与显示模式无关，见 §2.2）
    ├─ HEX 模式    → 逐字节转文本        → push 进 display_spans
    ├─ 字节查看    → ascii_spans_from_bytes → push 进 ascii_spans
    └─ 文本模式    → decoder.feed() 解析 ANSI 颜色 → push 进 display_spans
@@ -113,6 +116,34 @@ receive_data() ─┬─ 四个内存镜像（显示用，受 max_log_chars 截�
   （同时写 `receive_text` 与日志）。**不要在 `receive_data` 里绕开它们直接 `push_str`**。
 - 日志文件**不受** `max_log_chars` 约束，也不会被「清空日志」截断——那两个只作用于内存镜像。
 - 写盘失败或队列满都由 `poll_log_events()` 在每帧开头检查，命中即自动停止记录并写一条提示。
+
+### 2.2 实时图表的旁路（P5）
+
+图表**不是第五份镜像**：它有独立的解析规则、独立的上限、独立的清空入口
+（`ComTool::clear_chart()`），只是恰好也从 `receive_data` 拿到同一批原始字节。
+
+```
+receive_data() ──原始字节──> ChartData::push_bytes() ──> 每通道 VecDeque<[x, y]>
+                                                            │
+                       panels/chart.rs::render_chart_panel() ◄┘
+                       （每帧抽样到 ≤4000 点/通道，交给 egui_plot）
+```
+
+- **喂数据的位置在三种显示模式的分支之前**，所以切到 HEX / 字节查看时曲线照常推进。
+  不要把它挪进任何一个模式分支。
+- **输入格式：一行一组样本，字段用逗号分隔**（`\n` 或 `\r\n` 结束一组）。第 *k* 个字段
+  永远对应第 *k* 条曲线；同一组的字段共享同一个 x（**组序号**，不是时间戳）。
+- 解析上的几条硬约定（改动前先读 `src/chart.rs` 的模块文档）：
+  - 整行没有数值 → **不产出样本，也不推进 x**（否则文本噪声会在曲线上打出空洞）；
+  - 非数值字段 → 计入 `ignored_fields` 并在界面上提示，绝不静默丢弃；
+  - 某行字段数少于已建立的通道数 → 该组这些通道**不记样本**（曲线断开），
+    **不许补 0**；补 0 会画出从未到达的数据；
+  - 半行超过 `MAX_PENDING_BYTES` → **整行丢弃**，该行剩余字节一直丢到换行符为止
+    （否则被腰斩的尾部会变成一个假样本）；
+  - 通道数只增不减（由最宽的行决定），上限 `MAX_CHANNELS`（16）；每通道样本数
+    受 `chart_max_samples` 约束，超出时从最旧的开始淘汰。
+- 图表数据是纯运行时状态（`#[serde(skip)]`），跨会话不保留；`chart_max_samples`
+  在 `restore_runtime_state` 里夹到合法区间。
 
 发送方向：
 
@@ -166,6 +197,7 @@ ui.button("发送") → send_data() → ByteChannel::write(bytes)
 │ ④ 在 impl ComTool 里写业务逻辑方法                         │
 │      放对模块：接收相关 → receive.rs；串口生命周期 → app.rs  │
 │                文件日志相关 → log_file.rs                    │
+│                数值流解析 → chart.rs                         │
 └────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -261,11 +293,15 @@ impl eframe::App for ComTool {
 | 自动滚动 | `auto_scroll` | 三个接收视图的 `stick_to_bottom` 参数 | 设置窗口 / 视图菜单 |
 | 重绘间隔 | `repaint_interval_ms` | `ui()` 里的 `request_repaint_after` | 设置窗口「重绘间隔」 |
 | 发送后清空 | `clear_send_after_send` | `send_data()`（`app.rs`） | 设置窗口 |
-| 面板显隐（至少留一个） | `sidebar_open` / `show_receive_panel` / `show_send_panel` | `visible_panel_count()`（`app.rs`） | 视图菜单「面板」 |
+| 面板显隐（至少留一个） | `sidebar_open` / `show_receive_panel` / `show_chart_panel` / `show_send_panel` | `visible_panel_count()`（`app.rs`） | 视图菜单「面板」 |
 | 信息窗口 | `show_info` / `APP_TITLE` | `show_info_window()`（`panels/info.rs`） | 文件菜单「信息」 |
 | 实时文件日志 | `log`（`Some` = 记录中）、`log_dir`、`default_log_file_name` | `start_logging()` / `stop_logging()` / `toggle_logging()` / `log_append()`（`log_file.rs`） | 侧边栏「文件日志」区 / 文件菜单「开始-停止记录日志」 |
 | 日志写盘故障上报 | — | `poll_log_events()`（`log_file.rs`，每帧在 `receive_data()` 之后调用） | 无（自动停止并在接收区提示） |
 | 日志输出目录选择 | `log_dir` | `pick_log_dir()` / `reset_log_dir()` / `effective_log_dir()`（`log_file.rs`） | 设置窗口「选择目录」/「恢复默认」，侧边栏「选择目录」 |
+| 实时图表显示 | `show_chart_panel`、`chart`（运行时） | `render_chart_panel()`（`panels/chart.rs`） | 视图菜单「面板 → 实时图表」/ 设置窗口 |
+| 数值流解析（多通道） | `chart`、`chart_max_samples` | `ChartData::push_bytes()`（`chart.rs`，在 `receive_data()` 里对原始字节调用） | 无（自动） |
+| 图表样本上限 / 自动缩放 | `chart_max_samples`、`chart_auto_bounds` | `ChartData::push_bytes` 的淘汰逻辑 / `Plot::auto_bounds` | 设置窗口「实时图表」区 |
+| 清空图表 | `chart` | `clear_chart()`（`chart.rs`） | 图表面板「清空图表」/ 设置窗口 |
 
 ---
 
@@ -295,15 +331,15 @@ impl eframe::App for ComTool {
 
 11. **日志长度上限只有一处实现**：`ComTool::trim_receive_logs()`，在 `receive_data()` 末尾无条件调用。四份镜像**各自**按同一字符预算裁剪——三种模式写入的镜像并不相同（HEX/文本模式写 `display_spans`，字节查看模式写 `ascii_spans`，`receive_text` 三种都写），它们之间没有下标对应关系，不要试图"按 `receive_text` 裁好再同步"。裁剪必须按**字符**边界（不是字节下标），并且要能把边界上的 `ColoredSpan` **从中间切开**且保留其 `AnsiStyle`。
 
-12. **面板显隐有一条不变量**：`sidebar_open` / `show_receive_panel` / `show_send_panel` 至少要有一个为真（`visible_panel_count() >= 1`）。三处需要同时维护：`visible_panel_count()`、视图菜单的勾选框（唯一可见项置灰）、`config::restore_runtime_state` 里的兜底修复。新增面板时三处都要加。
+12. **面板显隐有一条不变量**：`sidebar_open` / `show_receive_panel` / `show_chart_panel` / `show_send_panel` 至少要有一个为真（`visible_panel_count() >= 1`）。三处需要同时维护：`visible_panel_count()`、视图菜单的勾选框（唯一可见项置灰）、`config::restore_runtime_state` 里的兜底修复。新增面板时三处都要加。
 
-13. **`ComTool::ui()` 的绘制顺序是有约束的**：菜单栏 → 侧边栏 → 中央区（`CentralPanel` 必须最后）。egui 的面板按添加顺序抢占空间，顺序错了菜单栏就不会横跨整幅宽度。
+13. **`ComTool::ui()` 的绘制顺序是有约束的**：菜单栏 → 侧边栏 → 中央区（`CentralPanel` 必须最后）；中央区内部是 接收区 → 图表 → 发送区。egui 的面板按添加顺序抢占空间，顺序错了菜单栏就不会横跨整幅宽度。
 
 14. **主题偏好存自有枚举 `ThemeChoice`，不要存 `egui::ThemePreference`**：外部枚举的取值一旦被上游调整，旧存档就读不出来了。转换只发生在 `apply_theme()` 里，且仅在与当前生效值不同时才下发（避免每帧 `options_mut` 导致无谓重绘）。
 
 15. **启动期的不变量修复放 `config::restore_runtime_state`**：存档是可以被手改的（也可能来自更早的版本），重绘间隔越界、面板全隐藏这类情况统一在那里兜底，并配单元测试——`restore_runtime_state` 不依赖 `eframe::CreationContext`，正是为了可测试才拆出来的。
 
-16. **UI 冒烟测试用 `egui::__run_test_ui`**：`src/panels/mod.rs` 底部已有先例（菜单栏、设置/信息窗口、三种接收视图、侧边栏）。它不需要窗口、不需要串口，能覆盖"面板嵌套顺序、控件 ID 冲突、布局调用"这类只有运行期才暴露的问题，但也**只能**证明"画得出来不 panic"，外观仍需人工确认。
+16. **UI 冒烟测试用 `egui::__run_test_ui`**：`src/panels/mod.rs` 底部已有先例（菜单栏、设置/信息窗口、三种接收视图、侧边栏、图表面板）。它不需要窗口、不需要串口，能覆盖"面板嵌套顺序、控件 ID 冲突、布局调用"这类只有运行期才暴露的问题，但也**只能**证明"画得出来不 panic"，外观仍需人工确认。
 
 17. **实时文件日志的写盘只能在后台线程**（`log_file.rs::worker_main`）：UI 线程不许对日志文件做任何 `write`。停机靠投 `Halt`，且 `Drop` 里必须用 **`try_send`**——队列满时 `send` 会阻塞，一个卡住的磁盘就能让"停止记录"把 UI 线程永久挂住。文件由 UI 线程 `File::create` 打开后再交给线程：这是刻意不同于 `open_port()`「先乐观置位、失败再回滚」的写法（那个假阳性缺陷还没修），不要改回去。
 
@@ -312,3 +348,14 @@ impl eframe::App for ComTool {
 19. **"记录中"的唯一事实来源是 `log.is_some()`**：不要再加 `bool` 标志位（两个字段表达同一件事迟早不一致），查询统一用 `is_logging()` / `log_path()` / `log_written_bytes()`。日志文件**绝不允许被静默覆盖**——同名时 `create_log_file()` 会追加 `_1`、`_2` 后缀，改成 `File::create` 就等于让用户丢日志。
 
 20. **日志文件名模板来自用户输入，必须当不可信数据处理**：`chrono` 的 `DateTime::format` 遇到非法占位符会 **panic**，所以先用 `StrftimeItems` 逐项检查再格式化（`render_log_file_name()`）；路径分隔符等非法字符会被替换为 `_`，避免 `../` 之类把日志写出选定目录。
+
+21. **图表吃的是原始字节，不是解码后的文本**：`receive_data()` 里对原始字节调 `chart.push_bytes()`，位置在 HEX / 字节查看 / 文本三个分支**之前**。所以切到 HEX 看字节时曲线照常推进（图表是并列的第四种解释，不是"文本视图的附属品"）。不要把它挪进某个模式分支——那样一换显示模式曲线就不动了，而且不报错，很难发现。
+
+22. **图表宁可断线也不许编造数据**：
+    - 某行字段数少于已建立的通道数 → 该组这些通道**不记样本**（曲线断开），**不许补 0**。补 0 会画出从未到达的数据，而曲线上看不出来。
+    - 无换行的连续逗号流**不**按固定通道数循环分组。那样通道语义取决于猜出来的通道数，猜错就把数据画错位；明确不支持比猜错更好，所以半行超长时**整行丢弃**（剩余字节一直丢到换行符为止，否则被腰斩的尾部会变成一个假样本）。
+    - 整行没有数值时不产出样本、**也不推进 x**，否则混进来的纯文本日志会在曲线上打出等距空洞。
+
+23. **绘制点数必须封顶，且抽样要保留最后一个点**：`panels/chart.rs::points_for_drawing` 把每条曲线抽到 `MAX_DRAWN_POINTS`（4000）以内。样本上限是用户可以调到 10 万的设置项，而 `egui_plot` 每帧都要把点转成它自己的结构——不封顶的话一个设置项就能把界面拖死。抽样时**必须留下最后一个点**（那是最新数据），只按步长取点会把曲线末端切掉，看起来像"设备停了"。曲线配色 `CHANNEL_COLORS` 是**数据编码**（哪条线是哪个通道），刻意不随主题变化，并与主题色区分开。
+
+24. **`egui_plot` 的版本号与 `egui` 并不同步**：`egui_plot 0.37` 才依赖 `egui ^0.36`，而 `egui_plot 0.36` 依赖的是 `egui ^0.35`。升级任何一个之前先核实真实依赖（`cargo tree -i egui`，或直接看本地 `registry/src/**/egui_plot-*/Cargo.toml`），不要凭版本号数字相同就断定兼容。

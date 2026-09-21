@@ -13,7 +13,9 @@
 //!   明确需求（见开发计划 P3），因此仍不落盘；
 //! - 模态窗口开关 `show_settings` / `show_info`：不应该在启动瞬间自动弹窗；
 //! - 实时文件日志 `log`：它持有文件句柄与写盘线程，活不过进程边界；而且「启动
-//!   即自动开始写文件」不是用户要的行为——上一次会话的记录必须由用户显式停止。
+//!   即自动开始写文件」不是用户要的行为——上一次会话的记录必须由用户显式停止；
+//! - 实时图表 `chart`：样本缓冲由数据速率决定大小，把上一次会话的曲线带回来没有
+//!   意义（跨会话的曲线会接在序号 0 上，看起来像同一段时间的数据）。
 //!
 //! 除了"存什么"，本模块还负责**启动时的不变量修复**：手改过的存档可能包含越界的
 //! 重绘间隔、或者一个面板都不显示的界面配置，这些都在 [`restore_runtime_state`]
@@ -62,6 +64,10 @@ pub fn restore_runtime_state(app: &mut ComTool) {
     // 直接赋值即可——`LogSink` 的 Drop 会投 `Halt` 并等待缓冲区落盘。
     app.log = None;
 
+    // 实时图表的样本缓冲同样是纯运行时内容：把上一次会话的曲线带回来没有意义，
+    // 而且它只受 `chart_max_samples` 约束，落盘只会平白撑大存档。
+    app.chart.clear();
+
     // 端口列表必须反映当前系统：插拔设备后重启，看到的不该是旧快照。
     app.ports = scan_ports();
     if app.ports.is_empty() {
@@ -74,6 +80,12 @@ pub fn restore_runtime_state(app: &mut ComTool) {
     // 重绘间隔越界会让界面要么卡顿、要么 CPU 空转；越界值在这里夹回合法区间，
     // 使用处 `app.rs` 也会再夹一次，双保险。
     app.repaint_interval_ms = app.repaint_interval_ms.clamp(16, 1000);
+
+    // 图表样本上限同时决定内存与每帧绘制成本，越界值（手改存档）同样夹回去；
+    // 解析入口 `ChartData::push_bytes` 还会再夹一次，双保险。
+    app.chart_max_samples = app
+        .chart_max_samples
+        .clamp(crate::chart::MIN_SAMPLES, crate::chart::MAX_SAMPLES);
 }
 
 /// 保证「至少有一个面板可见」。
@@ -148,6 +160,9 @@ mod tests {
             check_update_on_start: true,
             show_receive_panel: true,
             show_send_panel: false,
+            show_chart_panel: true,
+            chart_max_samples: 500,
+            chart_auto_bounds: false,
             ..ComTool::default()
         }
     }
@@ -200,6 +215,10 @@ mod tests {
         );
         assert_eq!(restored.show_receive_panel, original.show_receive_panel);
         assert_eq!(restored.show_send_panel, original.show_send_panel);
+        // P5 新增的图表偏好同样要能往返
+        assert_eq!(restored.show_chart_panel, original.show_chart_panel);
+        assert_eq!(restored.chart_max_samples, original.chart_max_samples);
+        assert_eq!(restored.chart_auto_bounds, original.chart_auto_bounds);
     }
 
     /// 运行时状态必须被丢弃，而不是从存档里带回来。
@@ -214,6 +233,8 @@ mod tests {
             text: "x".to_string(),
             style: AnsiStyle::default(),
         });
+        saved.chart.push_bytes(b"1,2,3\n", 100);
+        assert!(!saved.chart.is_empty(), "先确认确实有图表数据要丢弃");
 
         let restored = round_trip(&saved);
 
@@ -227,6 +248,8 @@ mod tests {
         assert!(restored.display_spans.is_empty());
         assert!(restored.ascii_text.is_empty());
         assert!(restored.ascii_spans.is_empty());
+        assert!(restored.chart.is_empty(), "图表样本不参与持久化");
+        assert_eq!(restored.chart.channel_count(), 0);
         assert_eq!(
             restored.ports,
             scan_ports(),
@@ -292,6 +315,9 @@ mod tests {
             app.log_dir.is_empty(),
             "默认输出目录留空 = 用平台默认目录，而不是把本机路径烧进默认值"
         );
+        assert!(!app.show_chart_panel, "图表默认不显示，避免占掉接收区高度");
+        assert!(app.chart.is_empty(), "默认没有图表数据");
+        assert_eq!(app.chart_max_samples, crate::app::DEFAULT_CHART_MAX_SAMPLES);
     }
 
     /// 正在进行的实时文件日志不得跨进程延续。
@@ -325,6 +351,7 @@ mod tests {
         saved.sidebar_open = false;
         saved.show_receive_panel = false;
         saved.show_send_panel = false;
+        saved.show_chart_panel = false;
 
         let restored = round_trip(&saved);
 
@@ -341,13 +368,35 @@ mod tests {
         let mut saved = customized();
         saved.show_receive_panel = true;
         saved.show_send_panel = false;
+        saved.show_chart_panel = false;
         saved.sidebar_open = false;
 
         let restored = round_trip(&saved);
 
         assert!(restored.show_receive_panel);
         assert!(!restored.show_send_panel);
+        assert!(!restored.show_chart_panel);
         assert!(!restored.sidebar_open);
+    }
+
+    /// **只显示图表**是合法配置：图表也计入 `visible_panel_count`，
+    /// 所以它自己就能满足"至少保留一个可见"。
+    #[test]
+    fn chart_panel_alone_counts_as_visible() {
+        let mut saved = customized();
+        saved.sidebar_open = false;
+        saved.show_receive_panel = false;
+        saved.show_send_panel = false;
+        saved.show_chart_panel = true;
+
+        let restored = round_trip(&saved);
+
+        assert_eq!(restored.visible_panel_count(), 1);
+        assert!(restored.show_chart_panel);
+        assert!(
+            !restored.show_receive_panel,
+            "已经有一个可见面板时不该被兜底逻辑强行打开接收区"
+        );
     }
 
     /// 重绘间隔越界（手改存档）时夹回 16~1000。
@@ -360,5 +409,26 @@ mod tests {
         let mut too_slow = customized();
         too_slow.repaint_interval_ms = 100_000;
         assert_eq!(round_trip(&too_slow).repaint_interval_ms, 1_000);
+    }
+
+    /// 图表样本上限越界（手改存档）时同样夹回合法区间。
+    ///
+    /// 这一项既决定内存也决定每帧绘制成本，0 还会让"每来一个样本就被淘汰"看起来
+    /// 像功能坏了，所以下限不是 0。
+    #[test]
+    fn chart_sample_limit_is_clamped_on_load() {
+        let mut too_small = customized();
+        too_small.chart_max_samples = 0;
+        assert_eq!(
+            round_trip(&too_small).chart_max_samples,
+            crate::chart::MIN_SAMPLES
+        );
+
+        let mut too_large = customized();
+        too_large.chart_max_samples = usize::MAX;
+        assert_eq!(
+            round_trip(&too_large).chart_max_samples,
+            crate::chart::MAX_SAMPLES
+        );
     }
 }

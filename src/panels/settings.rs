@@ -3,11 +3,13 @@
 //! 旧版这里是「只有一个语言占位下拉」的空壳；现在每一项都绑到实际生效的字段。
 //! 生效范围分三类，界面上如实标注：
 //!
-//! - **立即生效**：主题、日志长度上限、自动滚动、重绘间隔、发送后清空、文件名模板；
+//! - **立即生效**：主题、日志长度上限、自动滚动、重绘间隔、发送后清空、文件名模板、
+//!   图表样本上限、图表自动缩放；
 //! - **打开窗口时生效**：日志输出目录（记录过程中改动会在下次开始记录时生效）；
 //! - **接线待做**：启动时检查更新（P6 版本检查使用，默认关闭）。
 
 use crate::app::{ComTool, Language};
+use crate::chart::{MAX_SAMPLES, MIN_SAMPLES};
 use crate::log_file::render_log_file_name;
 use chrono::Local;
 use eframe::egui;
@@ -29,6 +31,7 @@ impl ComTool {
         // 等窗口画完、闭包结束之后再派发（与 sidebar 的 action 同一条约定）。
         let mut pick_dir = false;
         let mut reset_dir = false;
+        let mut clear_chart = false;
 
         // 用局部变量接收窗口开关再回写：与 sidebar.rs 同一套写法，避免在闭包里
         // 同时可变借用 self 与 self.show_settings。
@@ -88,6 +91,39 @@ impl ComTool {
                 ui.checkbox(&mut self.clear_send_after_send, "发送后清空输入框");
 
                 ui.separator();
+                ui.heading("实时图表");
+                ui.checkbox(
+                    &mut self.show_chart_panel,
+                    "显示图表面板（也可从「视图 → 面板」切换）",
+                );
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("样本上限"));
+                    ui.add(
+                        egui::DragValue::new(&mut self.chart_max_samples)
+                            .range(MIN_SAMPLES..=MAX_SAMPLES)
+                            .speed(100.0),
+                    );
+                    ui.label(format!("点/曲线（{MIN_SAMPLES}~{MAX_SAMPLES}）"));
+                });
+                ui.weak("超出上限时从最旧的样本开始淘汰；绘制时每条曲线最多取 4000 点");
+                ui.checkbox(
+                    &mut self.chart_auto_bounds,
+                    "自动缩放（关掉后保留手动拖动/缩放的视图）",
+                );
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("当前数据"));
+                    if ui.button("清空图表").clicked() {
+                        clear_chart = true;
+                    }
+                    ui.label(format!(
+                        "{} 通道 · {} 样本",
+                        self.chart.channel_count(),
+                        self.chart.sample_count()
+                    ));
+                });
+                ui.weak("格式：一行一组样本，字段用逗号分隔（如 1.0,2.0,3.0）；与接收显示模式无关");
+
+                ui.separator();
                 ui.heading("文件日志");
                 ui.horizontal(|ui| {
                     ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("文件名模板"));
@@ -136,6 +172,9 @@ impl ComTool {
         }
         if reset_dir {
             self.reset_log_dir();
+        }
+        if clear_chart {
+            self.clear_chart();
         }
     }
 }

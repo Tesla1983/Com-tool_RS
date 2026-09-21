@@ -59,7 +59,7 @@ Rust 串口调试上位机（GUI 串口助手）。技术栈：
 | 语言/版本 | Rust **edition 2024**（需 rustc ≥ 1.85；实测工具链 `rustc 1.97.1`） |
 | GUI | `egui` / `eframe` **0.36.1**（`glow` 后端 + `persistence` feature） |
 | 串口 | `serialport` 4.10.0（manifest 写 `"4.7.2"` 是 caret 要求，实解析到 4.10.0） |
-| 其它 | `rfd`（文件对话框）、`serde`（持久化）、`chrono`（日志文件名时间戳，**P4 起真正在用**）、`tokio` / `egui-chinese-font`（**已声明但当前零调用**） |
+| 其它 | `rfd`（文件对话框）、`serde`（持久化）、`chrono`（日志文件名时间戳，P4 起真正在用）、`egui_plot` 0.37（实时图表，P5 起在用）、`tokio` / `egui-chinese-font`（**已声明但当前零调用**） |
 | 类型 | 单 binary crate（无 workspace、无 CI、无 lint 配置） |
 
 ### 模块结构（`ai-refactor` 分支）
@@ -67,17 +67,20 @@ Rust 串口调试上位机（GUI 串口助手）。技术栈：
 ```
 src/
 ├── main.rs                 入口；字体回退链；eframe::run_native；APP_TITLE 常量
-├── app.rs        (558)     ComTool 状态 + Default + 串口生命周期 + eframe::App 编排
-├── receive.rs    (878)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
+├── app.rs        (595)     ComTool 状态 + Default + 串口生命周期 + eframe::App 编排
+├── receive.rs    (886)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
 │                           + 三种渲染 + FIFO 淘汰（17 测试）
+├── chart.rs      (485)     实时图表数据层：多通道数值流解析 + 跨包分片
+│                           + 样本 FIFO 淘汰 + 通道上限（20 测试）
 ├── log_file.rs   (801)     实时文件日志：后台写盘线程 + 文件名模板渲染
 │                           + 同名防截断 + 待写队列上限（14 测试）
 ├── sidebar.rs    (286)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
-├── config.rs     (364)     持久化策略 + 启动不变量修复（10 测试）
+├── config.rs     (434)     持久化策略 + 启动不变量修复（12 测试）
 ├── panels/
-│   ├── mod.rs     (84)     面板模块出口（3 条无头 UI 冒烟测试）
-│   ├── menu_bar.rs(102)    顶部菜单栏；返回 MenuAction
-│   ├── settings.rs(141)    设置窗口（含文件日志区块）
+│   ├── mod.rs     (151)    面板模块出口（5 条无头 UI 冒烟测试）
+│   ├── menu_bar.rs(106)    顶部菜单栏；返回 MenuAction
+│   ├── settings.rs(180)    设置窗口（含实时图表与文件日志区块）
+│   ├── chart.rs   (223)    实时图表面板：egui_plot 绘制 + 绘制点抽样（5 测试）
 │   └── info.rs    (53)     信息窗口
 ├── communicationtrait.rs (68)  ByteChannel trait + ChannelEvent
 ├── serial_impl/
@@ -85,6 +88,8 @@ src/
 │   ├── config.rs  (46)     SerialConfig + 波特率档位
 │   └── mod.rs     (13)     出口
 ```
+
+测试函数合计 **79**（`cargo test` 报 79 passed；两者一致）。
 
 **权威约定文档**（改代码前先读）：
 - `AGENTS.md` — 给 AI/协作者的模块地图与硬性约束（简短，必读）
@@ -109,12 +114,12 @@ src/
 
 ### 质量门禁（P0/P1 改动前 → 改动后）
 
-| 命令 | 前 | P0/P1 后 | 本轮（P4）后 |
-|---|---|---|---|
-| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
-| `cargo test` | 7 passed | **19 passed** | **50 passed** |
-| `cargo fmt --check` | 2 处差异 | **干净** | **干净** |
-| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning**（全部在我本轮未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） |
+| 命令 | 前 | P0/P1 后 | P4 后 | 本轮（P5）后 |
+|---|---|---|---|---|
+| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
+| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** |
+| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** |
+| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） |
 
 跑法：
 
@@ -123,9 +128,10 @@ cd E:/Downloads/Zed/AI_comtool-rs
 cargo fmt && cargo check --all-targets && cargo test
 ```
 
-50 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
-一条把字节经事件通道注入后核对日志文件内容的集成测试，以及三条用
-`egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图、侧边栏）。
+79 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
+一条把字节经事件通道注入后核对日志文件内容的集成测试，以及五条用
+`egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图、
+侧边栏、图表面板）。
 
 ### 3.1 增量（2026-09-21：P2 菜单栏 + 设置面板，P3 部分提前）
 
@@ -193,6 +199,53 @@ cargo fmt && cargo check --all-targets && cargo test
   与类型推导，没有实机触发过**。
 - 界面外观仍未肉眼确认（同上）。
 
+### 3.3 增量（2026-09-21：P5 实时图表）
+
+| 项 | 值 |
+|---|---|
+| 新增模块 | `src/chart.rs`（485 行 / 20 测试）、`src/panels/chart.rs`（223 行 / 5 测试） |
+| 新增依赖 | `egui_plot = "0.37.0"`（MIT OR Apache-2.0；依赖 `egui ^0.36`，与本项目 0.36.1 匹配——**注意它的版本号与 egui 并不同步**：0.36 依赖的是 `egui ^0.35`） |
+| 新增持久化字段 | `show_chart_panel`（默认 **false**）、`chart_max_samples`（默认 2000）、`chart_auto_bounds`（默认 true） |
+| 新增运行时字段 | `chart: ChartData`（`#[serde(skip)]`） |
+| 门禁 | `cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** · `cargo test` **79 passed** · clippy **8 条**（与上轮逐条相同，**新代码 0 新增**） |
+
+**做了什么**
+
+- **数据层与绘制层分开**：`chart.rs` 只做「原始字节 → 多通道数值序列」，不依赖 `egui`，
+  因此可以纯单元测试固定行为；`panels/chart.rs` 只负责画。
+- **图表吃原始字节，与显示模式解耦**：喂数据的位置在 `receive_data` 里 HEX / 字节查看 /
+  文本三个分支**之前**，所以切到 HEX 看字节时曲线照常推进。图表不是"第五份镜像"，
+  它有自己的解析规则、上限与清空入口（`clear_chart`）。
+- **输入格式**：一行一组样本、字段用逗号分隔、`\n` 或 `\r\n` 结束一组。第 *k* 个字段
+  对应第 *k* 条曲线，同组共享一个 x（**组序号**，不是时间戳）。≥4 通道是验收要求，
+  上限 `MAX_CHANNELS` = 16。
+- **数据诚实性（三条"宁可断线也不编造"）**：字段少的行，缺的通道该组**不记样本**
+  （曲线断开），**不补 0**；无换行的连续逗号流**不**按固定通道数循环分组（通道数只能猜，
+  猜错就画错位，明确不支持）；整行没有数值时不产出样本、**也不推进 x**（否则混进来的
+  纯文本日志会在曲线上打出等距空洞）。
+- **跨包分片**：半行残留留在 `pending` 里等下一块补齐（与 `AnsiDecoder` 跨包拼接 UTF-8
+  同一理由）。半行超过 4096 字节即判定格式不符，**整行丢弃**——剩余字节一直丢到换行符
+  为止，否则被腰斩的尾部会变成一个假样本。丢弃计入 `discarded_segments` 并在界面上显示。
+- **非数值字段计数**（`ignored_fields`）而不是静默跳过，界面显示"忽略 N 个非数值字段"，
+  让用户能看出"格式配错了"而不是对着一片空白猜。
+- **绘制点封顶**：`points_for_drawing` 把每条曲线抽到 4000 点以内。样本上限是用户可以调到
+  10 万的设置项，而 `egui_plot` 每帧都要把点转成它自己的结构——不封顶的话一个设置项就能
+  把界面拖死。抽样**保留最后一个点**（最新数据），否则曲线末端被切掉会看起来像"设备停了"。
+- **图例常开**：多通道时"哪条线是哪个通道"只能靠颜色对照。配色 `CHANNEL_COLORS`（8 色循环）
+  是**数据编码**，刻意不随主题变化。
+- **入口**：视图菜单「面板 → 实时图表」· 设置窗口「实时图表」区（显隐 / 样本上限 /
+  自动缩放 / 清空）· 图表面板自身的「清空图表」「自动缩放」。
+- 图表面板**默认不显示**：它会在中央区占掉一块高度，而"有没有曲线"取决于设备是否发数值流，
+  让新用户一上来就对着空图表没有意义。
+
+**未做 / 未验证**
+
+- **界面外观与交互（缩放、拖动、图例排布）全部没有肉眼确认过**，只有无头渲染冒烟测试。
+- 图表**没有"按通道显示/隐藏"这类控件**，通道多了只能靠图例对照。
+- 样本上限之外还有一层 4000 点的绘制抽样，两者是不同的上限（前者管内存，后者管每帧成本），
+  界面上只暴露了前者——抽样这件事目前只在文档与代码注释里。
+- x 轴是组序号而非时间，因此**无法看出真实的时间跨度或采样率**。
+
 ---
 
 ## 4. 未决事项
@@ -238,6 +291,19 @@ cargo fmt && cargo check --all-targets && cargo test
 9. 再点一次「开始记录」→ 同一秒内会产生 `…_1.txt` 而不是覆盖上一个文件
 10. 把文件名模板改成 `%Q`（非法占位符）→ 设置窗口里的预览应立即显示退回默认模板的名字
 
+**同一趟也可以把 P5 图表验掉**（需要设备按「一行一组、逗号分隔」发数值，没有设备时
+用任意串口助手手工发下面的文本即可）：
+
+11. 视图菜单 →「面板 → 实时图表」→ 中央区应出现图表面板（首次为「等待数据…」）
+12. 发 `1,2,3,4\n` → 应出现 4 条不同颜色的曲线，图例显示 CH1~CH4，通道数显示 4
+13. 继续发几行不同数值 → 曲线应向右推进；勾掉「自动缩放」后手动滚轮缩放，
+    视图应保持不变（不再被自动拉回）
+14. 发一行 `1,2\n`（只有 2 个字段）→ CH3/CH4 应**断开**而不是掉到 0 ——
+    这是刻意的：补 0 会画出从未到达的数据
+15. 发一行 `hello\n` → 曲线不动，界面出现「忽略 1 个非数值字段」的提示
+16. 点「清空图表」→ 曲线清空、通道数与样本数归零
+17. 把设置里的「样本上限」改成 10，再连发 20 行数据 → 图表最多保留 10 个点/曲线
+
 ### ③ 仓库状态
 
 `AI_comtool-rs` 的 `ai-refactor` 分支工作区是干净的。
@@ -254,9 +320,13 @@ cargo fmt && cargo check --all-targets && cargo test
 | 中 | 自动重连无退避 | `app.rs::auto_reconnect` | 每 500 ms 失败一次就新建线程，串口被占用时会持续重试 |
 | 中 | 待发队列无上限 | `channel.rs::worker_main` 的 `outgoing` | 设备长期不可写 + 用户持续点发送时队列增长。原实现用 unbounded mpsc 同样无上限，未引入新问题，但应加背压 |
 | 中 | 写路径瞬态错误静默重试 | `channel.rs::worker_main` | `WouldBlock` / `Interrupted` 直接重试是合理的，但设备长期不接受数据时用户得不到提示。建议侧边栏显示「待发字节数」 |
-| 低 | 2 个未使用依赖 | `Cargo.toml` | `tokio` / `egui-chinese-font` 零调用。`tokio` 启用 `full` 会明显拖慢编译。保留是因为它们对应计划里的「版本检查」与中文字体内置，是否移除由你决定（`chrono` 自 P4 起已在用） |
-| 低 | 8 条 clippy 风格警告 | `app.rs` / `receive.rs` | `derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`。全部位于本轮未改动的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写；其余 8 条留待 P6 一并处理） |
+| 低 | 2 个未使用依赖 | `Cargo.toml` | `tokio` / `egui-chinese-font` 零调用。`tokio` 启用 `full` 会明显拖慢编译。保留是因为它们对应计划里的「版本检查」与中文字体内置，是否移除由你决定（`chrono` 自 P4、`egui_plot` 自 P5 起已在用） |
+| 低 | 8 条 clippy 风格警告 | `app.rs` / `receive.rs` | `derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`。全部位于截至 P5 未改动的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写；其余 8 条留待 P6 一并处理） |
 | 低 | 记录中途改配置不切换文件 | `log_file.rs` | 记录过程中改「文件名模板」或「输出目录」不会切到新文件，下次开始记录才生效；界面上没有特别提示 |
+| 低 | **图表不支持无换行的连续逗号流** | `chart.rs::push_bytes` | 通道语义（第 k 个字段 = 第 k 条曲线）要求「一行一组」；无换行时通道数只能靠猜，猜错就画错位。因此这类数据在超过 4096 字节后被**整行丢弃**并在界面计数。属于明确的设计取舍，不是待修 bug |
+| 低 | 绘制抽样（4000 点/曲线）未在界面暴露 | `panels/chart.rs` | 样本上限（可配）与绘制抽样（固定 4000）是两层不同的限制，界面只显示了前者。用户设到 10 万时会看到"曲线比样本数少"，目前只能靠文档解释 |
+| 低 | 图表 x 轴是组序号而非时间 | `chart.rs` | 串口数据没有可靠时间基准，因此看不出真实时间跨度或采样率。若将来要显示"每秒多少个样本"，需要在解析端额外维护时间戳 |
+| 低 | 图表解析在面板隐藏时也照常进行 | `receive.rs::receive_data` | 刻意如此：打开面板时立刻能看到已有曲线，而不是"打开后才从零开始"。代价是即使用户从不看图，每次接收仍会做一次扫描与少量解析 |
 
 ---
 
@@ -272,11 +342,14 @@ cargo fmt && cargo check --all-targets && cargo test
 | **P2** 菜单栏 + 设置面板 | 顶部面板：File(Info/Quit) / Settings / 主题切换 / Byte mode / 面板显隐互斥。把 `config.rs` 的持久化字段接上真正的设置 UI | ✅ **已完成**（见 §3.1；G 组中「默认文件名」「启动检查更新」两项只有设置项，等 P4/P6 消费） |
 | **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，`ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | 🟡 **部分完成**：FIFO 淘汰与 `auto_scroll` 已提前做完；时间戳前缀未做 |
 | **P4** 实时文件日志 | Start/Stop Log 开关 + 默认文件名 `LogFile_%Y-%m-%d_%H-%M-%S.txt`（chrono 现成）；**写入必须走独立线程 + `BufWriter`，绝不在 UI 线程 `write_all`** | ✅ **已完成**（见 §3.2；落在 `src/log_file.rs` 而非计划里的 `src/panels/file_log.rs`，另加了输出目录选择与同名防截断） |
-| **P5** 实时图表 | 建议引 `egui_plot` 而非移植上游手绘代码；支持逗号分隔多通道；`stream_buffer` 处理跨包分片 | ⬜ **下一步** |
-| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或 3s 超时静默失败**，内网要能跳过）；应用图标；`[profile.release] opt-level = 2`；清理未使用依赖 | 🟡 Info 弹窗已完成；其余未做 |
+| **P5** 实时图表 | 建议引 `egui_plot` 而非移植上游手绘代码；支持逗号分隔多通道；`stream_buffer` 处理跨包分片 | ✅ **已完成**（见 §3.3；落在 `src/chart.rs` + `src/panels/chart.rs`，多通道上限 16、绘制点封顶 4000、数据不足时断线而不补 0） |
+| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或 3s 超时静默失败**，内网要能跳过）；应用图标；`[profile.release] opt-level = 2`；清理未使用依赖 | 🟡 Info 弹窗已完成；其余未做 —— **下一步** |
 
 **覆盖率参考**：改动前相对 `SerialGUI-rs` 约 40%（核心链路约 90%）；P0/P1 完成后全局约 45%；
-P2 完成约 75%（可日常使用）；**P4 完成约 80%**；P5 完成约 88%（功能对齐上游）。
+P2 完成约 75%（可日常使用）；P4 完成约 80%；**P5 完成约 88%（功能对齐上游）**。
+
+**P3 的收尾项**：计划里的「可选时间戳前缀」仍未做（FIFO 淘汰与 `auto_scroll` 已在 P2 期间提前完成）。
+它与 P6 都可以作为下一步；P6 里的「版本检查」需要联外网，内网环境建议做成默认关闭。
 
 ---
 
@@ -286,7 +359,7 @@ P2 完成约 75%（可日常使用）；**P4 完成约 80%**；P5 完成约 88%�
 
 0. **⛔ 未经项目所有者逐次批准，禁止运行本项目（`cargo run` / 直接跑 exe），禁止以任何方式
    占用或打断 COM3。** 开发阶段只用 `cargo fmt` / `cargo check --all-targets` / `cargo test`
-   验证（50 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
+   验证（79 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
    完整条文在 `AGENTS.md` 顶部与 `DEVELOPMENT_GUIDE.md` §0。
    **该规则已配置机器级硬拦截**：PreToolUse 钩子 `~/.workbuddy/hooks/comtool-run-guard.sh`
    （注册于 `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json`），命中即拒绝工具调用，
@@ -309,9 +382,11 @@ P2 完成约 75%（可日常使用）；**P4 完成约 80%**；P5 完成约 88%�
 8. **日志长度上限只有一处实现**：`trim_receive_logs()`，在 `receive_data()` 末尾无条件调用。
    四份镜像**各自**按同一字符预算裁剪（三种模式写入的镜像不同，彼此没有下标对应关系），
    必须按字符边界切分，且要能把边界上的 `ColoredSpan` 从中间切开并保留其样式。
-9. **绘制顺序：菜单栏 → 侧边栏 → 中央区**（`CentralPanel` 必须最后），egui 面板按添加
-   顺序抢占空间。面板显隐有"至少保留一个"的不变量（`visible_panel_count() >= 1`），
-   改动时必须同时维护：`visible_panel_count()`、视图菜单勾选框、`restore_runtime_state` 兜底。
+9. **绘制顺序：菜单栏 → 侧边栏 → 中央区**（`CentralPanel` 必须最后；中央区内部是
+   接收区 → 图表 → 发送区）。egui 面板按添加顺序抢占空间。面板显隐有"至少保留一个"
+   的不变量（`visible_panel_count() >= 1`），改动时必须同时维护：`visible_panel_count()`、
+   视图菜单勾选框、`restore_runtime_state` 兜底。**当前面板有四个**：
+   `sidebar_open` / `show_receive_panel` / `show_chart_panel` / `show_send_panel`。
 10. **主题偏好存自有枚举 `ThemeChoice`**，不要直接把 `egui::ThemePreference` 写进存档——
     外部枚举取值一旦变动就旧存档读不出来。
 11. **实时文件日志的写盘只能在后台线程**（`log_file.rs` 的 `worker_main`），UI 线程不许
@@ -363,7 +438,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 50 passed / fmt 干净）
+# 3. 建立门禁基线（应为 0 warning / 79 passed / fmt 干净）
 cargo fmt && cargo check --all-targets && cargo test
 
 # 4. 看清两个版本的差异
@@ -372,7 +447,7 @@ git diff master ai-refactor --stat
 # 5. 读这三份文档再动手
 #    AGENTS.md / DEVELOPMENT_GUIDE.md / REFACTOR_REPORT.md
 
-# 6. 建议的第一件活：P5 实时图表（见 §6）；GPLv3 合规已降为最低优先级（§4①）
+# 6. 建议的第一件活：P6 收尾（见 §6）、或 P3 剩下的时间戳前缀；GPLv3 合规已降为最低优先级（§4①）
 ```
 
 如果你要对照原版行为：`git -C E:\Downloads\Zed\comtool-rs log -1`（原版停在 `04dc007`），

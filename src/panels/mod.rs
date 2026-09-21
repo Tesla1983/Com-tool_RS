@@ -8,6 +8,7 @@
 //! 模块内都是 `impl ComTool` 的固有方法，因此这里没有对外 re-export：方法随类型
 //! 可见，不需要（也无法）用 `use` 再引出一次。
 
+mod chart;
 mod info;
 mod menu_bar;
 mod settings;
@@ -80,5 +81,71 @@ mod tests {
         });
         assert!(open, "仅绘制不应改变侧边栏开关");
         assert!(!app.is_logging(), "仅绘制不得开始写日志文件");
+    }
+
+    /// 图表面板在三条分支上都能画出来：无数据、有曲线、以及解析有异常时的
+    /// 诊断提示行。
+    ///
+    /// 这条测试的价值在于覆盖 `egui_plot` 本身——它有自己的内存状态与纹理管理，
+    /// 出错只会在运行期暴露；无头渲染能在不开窗口、不碰串口的前提下把它跑一遍。
+    /// 它证明的仍然只是"画得出来不 panic"，外观与交互手感仍需人工确认。
+    #[test]
+    fn chart_panel_renders_without_panic() {
+        let mut app = ComTool {
+            show_chart_panel: true,
+            ..ComTool::default()
+        };
+
+        // ① 还没有数据：只画标题与"等待数据…"
+        egui::__run_test_ui(|ui| {
+            app.render_chart_panel(ui);
+        });
+
+        // ② 四条通道各一个样本（验收要求 ≥4 通道）：此时自动缩放面对的是
+        //    零宽度的 x 范围，是最容易让坐标轴计算退化的一种输入
+        app.chart.push_bytes(b"1,2,3,4\n", app.chart_max_samples);
+        assert_eq!(app.chart.channel_count(), 4);
+        egui::__run_test_ui(|ui| {
+            app.render_chart_panel(ui);
+        });
+
+        // ③ 多个样本：正常的曲线
+        app.chart
+            .push_bytes(b"1.5,2.5,3.5,4.5\n", app.chart_max_samples);
+        egui::__run_test_ui(|ui| {
+            app.render_chart_panel(ui);
+        });
+
+        // ④ 有被忽略的字段：走"诊断提示"那条分支
+        app.chart.push_bytes(b"junk\n", app.chart_max_samples);
+        assert!(app.chart.ignored_fields() > 0);
+        egui::__run_test_ui(|ui| {
+            app.render_chart_panel(ui);
+        });
+
+        // ⑤ 关掉自动缩放：不再下发 auto_bounds
+        app.chart_auto_bounds = false;
+        egui::__run_test_ui(|ui| {
+            app.render_chart_panel(ui);
+        });
+    }
+
+    /// 面板隐藏时绘制函数必须直接返回，不能借绘制之名改动任何状态。
+    #[test]
+    fn hidden_chart_panel_draws_nothing() {
+        let mut app = ComTool {
+            show_chart_panel: false,
+            ..ComTool::default()
+        };
+        app.chart.push_bytes(b"1,2\n", app.chart_max_samples);
+        let samples_before = app.chart.sample_count();
+        let channels_before = app.chart.channel_count();
+
+        egui::__run_test_ui(|ui| {
+            app.render_chart_panel(ui);
+        });
+
+        assert_eq!(app.chart.sample_count(), samples_before);
+        assert_eq!(app.chart.channel_count(), channels_before);
     }
 }

@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 egui = "0.36.1"
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland"] }
+# 绘图控件。版本号与 egui 并不同步：egui_plot 0.37 才依赖 egui ^0.36，
+# 0.36 依赖的是 egui ^0.35，升级前务必核对（见 DEVELOPMENT_GUIDE §2）。
+egui_plot = "0.37.0"
 serde = { version = "1.0.229", features = ["derive"] }
 # 开启 `serde` — serialport 用它给 DataBits/StopBits/Parity/FlowControl 派生
 # Serialize/Deserialize，这样端口参数可以直接随应用状态落盘，不必再写一层

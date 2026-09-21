@@ -6,6 +6,7 @@ use eframe::egui;
 use egui::{FontData, FontDefinitions, FontFamily};
 
 mod app;
+mod chart;
 mod communicationtrait;
 mod config;
 mod log_file;

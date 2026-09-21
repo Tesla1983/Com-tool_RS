@@ -10,6 +10,7 @@
 //! 接收链路的解码与裁剪在 [`crate::receive`]，右侧边栏在 [`crate::sidebar`]，
 //! 菜单栏与各类窗口在 [`crate::panels`]，实时文件日志在 [`crate::log_file`]。
 
+use crate::chart::ChartData;
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::log_file::LogSink;
 use crate::receive::{AnsiDecoder, AnsiStyle, ColoredSpan, show_plain_receive};
@@ -57,6 +58,17 @@ pub const DEFAULT_REPAINT_INTERVAL_MS: u64 = 30;
 
 /// 默认日志文件名模板（P4 实时文件日志使用，`chrono` 负责展开时间占位）。
 pub const DEFAULT_LOG_FILE_NAME: &str = "LogFile_%Y-%m-%d_%H-%M-%S.txt";
+
+/// 图表面板是否默认显示。
+///
+/// 默认不显示：它会在中央区占掉一块高度，而"有没有曲线"取决于设备是否发数值流，
+/// 让新用户一上来就对着一个空图表没有意义。从「视图 → 面板 → 实时图表」打开。
+pub const DEFAULT_SHOW_CHART_PANEL: bool = false;
+
+/// 图表每条曲线默认保留的样本数。
+///
+/// 2000 点足以看清一段趋势，单帧转换成本也在毫秒级；上限可在设置里调。
+pub const DEFAULT_CHART_MAX_SAMPLES: usize = 2_000;
 
 /// 应用状态。
 ///
@@ -149,12 +161,22 @@ pub struct ComTool {
     pub show_receive_panel: bool,
     /// 发送区是否显示
     pub show_send_panel: bool,
+    /// 实时图表面板是否显示
+    pub show_chart_panel: bool,
+    /// 实时图表每条曲线保留的样本数上限
+    pub chart_max_samples: usize,
+    /// 实时图表是否自动跟随数据缩放（关掉后保留用户拖动 / 缩放后的视图）
+    pub chart_auto_bounds: bool,
 
     // —— 运行时状态（不落盘，见 crate::config）——
     /// 正在运行的实时文件日志。`Some` 即表示「记录中」——不另设 bool 标志位，
     /// 两个字段表达同一件事迟早会不一致。
     #[serde(skip)]
     pub log: Option<LogSink>,
+    /// 实时图表的样本缓冲。每次收到数据都会推进，且与接收日志一样是纯运行时
+    /// 内容——落盘只会让退出时的保存变慢。
+    #[serde(skip)]
+    pub chart: ChartData,
 }
 
 impl ComTool {
@@ -333,13 +355,16 @@ impl ComTool {
 }
 
 impl ComTool {
-    /// 当前可见的面板数量（侧边栏 / 接收区 / 发送区）。
+    /// 当前可见的面板数量（侧边栏 / 接收区 / 图表面板 / 发送区）。
     ///
     /// 「至少保留一个可见」这条不变量在两个地方用到：视图菜单里决定勾选框是否可点，
     /// 以及 [`crate::config::restore_runtime_state`] 里修正被手改坏的存档。
+    /// **新增面板时必须同步这里、视图菜单、以及那处兜底修正**——三处缺一，
+    /// 不变量就有一个入口可以绕过。
     pub fn visible_panel_count(&self) -> usize {
         usize::from(self.sidebar_open)
             + usize::from(self.show_receive_panel)
+            + usize::from(self.show_chart_panel)
             + usize::from(self.show_send_panel)
     }
 
@@ -395,7 +420,11 @@ impl Default for ComTool {
             check_update_on_start: false,
             show_receive_panel: true,
             show_send_panel: true,
+            show_chart_panel: DEFAULT_SHOW_CHART_PANEL,
+            chart_max_samples: DEFAULT_CHART_MAX_SAMPLES,
+            chart_auto_bounds: true,
             log: None,
+            chart: ChartData::default(),
         }
     }
 }
@@ -506,7 +535,15 @@ impl eframe::App for ComTool {
                 }
             }
 
-            if self.show_receive_panel && self.show_send_panel {
+            // 中央区里这几块是纵向堆叠的，分隔线只在"上面有东西、下面也有东西"
+            // 时才有意义；图表夹在接收区与发送区之间。
+            if self.show_receive_panel && (self.show_chart_panel || self.show_send_panel) {
+                ui.separator();
+            }
+
+            self.render_chart_panel(ui);
+
+            if self.show_chart_panel && self.show_send_panel {
                 ui.separator();
             }
 
