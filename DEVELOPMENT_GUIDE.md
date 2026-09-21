@@ -23,10 +23,12 @@
 
 > 完整条文见 `AGENTS.md` 顶部「最高优先级红线」一节，两者冲突时以 `AGENTS.md` 为准。
 > `AGENTS.md` **已纳入版本控制**（原先被 `.gitignore` 排除，2026-09-21 起取消），
-> 因此三份文档现在都随仓库传播。但**机器级拦截的脚本本体不在仓库里**——
-> `comtool-run-guard.sh` / `comtool-approve.sh` 在用户级目录 `~/.workbuddy/hooks/`，
-> 其自测 `test_guard.py` 在 `.workbuddy/hooks/`（该目录仍被忽略）。
-> 换机器或重装后必须单独重建这套钩子，否则条文还在、拦截会静默失效。
+> 它记录的两条拦截规则因此随仓库传播；**守卫的行为自测也跟着走**——
+> `test_guard.py` 已在版本控制中（`.gitignore` 里为它开了例外，是 `.workbuddy/` 下唯一放行的文件）。
+> 但**被测试的那个脚本本体仍不在仓库里**：`comtool-run-guard.sh` 与批准脚本在用户级目录
+> `~/.workbuddy/hooks/`。所以新克隆的仓库能读到"规则是什么"、也能读到"该怎么自测"，
+> 却没有可测的对象——换机器或重装后必须单独重建这两个脚本，
+> 否则条文还在、机器级拦截会静默失效。
 
 ### 0.1 已配置机器级硬拦截（PreToolUse hook）
 
@@ -36,16 +38,26 @@
 |---|---|
 | 拦截逻辑 | `~/.workbuddy/hooks/comtool-run-guard.sh` |
 | 注册位置 | `~/.workbuddy/settings.json`、`~/.codebuddy/settings.json` → `hooks.PreToolUse`，`matcher = Bash/PowerShell/Write/Edit` |
-| 自测 | `python3 .workbuddy/hooks/test_guard.py`（39 条断言；不启动程序、不碰串口） |
+| 自测 | `python3 .workbuddy/hooks/test_guard.py`（39 条断言；不启动程序、不碰串口）。**已在版本控制中** |
 | 批准 | `bash ~/.workbuddy/hooks/comtool-approve.sh 30`（**用户本人在 agent 之外执行**；`0` 撤销） |
 
 - 批准文件 `<配置目录>/combot-run-approval` 第一行是过期 Unix 秒，不存在/过期/损坏 → 全部拒绝；
   **批准只放行"运行本项目"，COM3 操作永远拒绝**。
 - 批准文件与批准脚本 AI 无权触碰（会被守卫自己拦掉）。
 - 守卫 fail-closed：payload 解析失败或 stdin 为空一律拒绝。
-- 已知误拦（改用别的工具即可）：命令文本里出现 `cargo run` / `COM3` / `comtool-rs.exe` 字面量。
-  例如 `grep "cargo run" AGENTS.md` 会被拒，请用 Grep 工具；把该短语写进 commit message 也会被拒，
-  可先 Write 一个消息文件再 `git commit -F <file>`。
+- **已知误拦（改用别的工具即可）**：命令**文本**里出现 `cargo run` / `COM3` / `comtool-rs.exe`
+  字面量即被拦。例如 `grep "cargo run" AGENTS.md` 会被拒，请用 Grep 工具；把该短语写进
+  commit message 也会被拒，可先 Write 一个消息文件再 `git commit -F <file>`。
+  写日志/文档时若要提到批准脚本，**别写它的文件名**——那个名字本身在拦截名单上，
+  会让"记录这次改动"的命令自己被拦掉。
+- **`Write` / `Edit` 只检查 `file_path`，不看内容**（守卫脚本里 `CMD="${FPATH:-}"`）：
+  所以把 `cargo run` / `COM3` 这些字面量写进文档或源码是允许的，也正是本文件能存在的原因。
+  反过来说，**这条拦截拦不住"通过写文件去改守卫"以外的任何内容特征**——它防的是"动手"，
+  不是"写字"。当心的例外是 `file_path` 字段解析失败时会退化为扫描整段 payload（fail-closed）。
+- ⚠️ **跑自测脚本会临时创建一个真实的批准文件**：`test_guard.py` 在"批准文件有效"那一档
+  真的往 `<配置目录>` 写一个 +30 分钟的批准时刻，跑到最后才删掉。**若中途中断，会留下一个
+  约 30 分钟的预授权**，那段时间里守卫放行"运行本项目"。所以别在自测跑到一半时打断它；
+  跑完若不放心的，自己确认该文件已被删除。
 
 ---
 

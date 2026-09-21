@@ -53,7 +53,7 @@
 | 机制 | WorkBuddy/CodeBuddy **PreToolUse hook**（命中即 `permissionDecision: deny`） |
 | 配置 | `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json` 的 `hooks.PreToolUse`，`matcher = "Bash\|PowerShell\|Write\|Edit"` |
 | 脚本 | `~/.workbuddy/hooks/comtool-run-guard.sh`（拦截逻辑，可读可改） |
-| 测试 | `python3 .workbuddy/hooks/test_guard.py`（39 条断言：命中/放行/批准三态，不启动程序、不碰串口） |
+| 测试 | `python3 .workbuddy/hooks/test_guard.py`（39 条断言：命中/放行/批准三态，不启动程序、不碰串口）。**该脚本已在版本控制中**——它是仓库里唯一被 `.gitignore` 例外放行的 `.workbuddy/` 文件 |
 | 批准 | `bash ~/.workbuddy/hooks/comtool-approve.sh 30`（**只能由用户本人在 agent 之外执行**，签 30 分钟有效期；`0` 立即撤销） |
 | 批准文件 | `<配置目录>/combot-run-approval`（第一行 = 过期 Unix 秒；不存在/过期/损坏 → 全部拒绝） |
 
@@ -78,7 +78,11 @@ command or file path matches those patterns. It is fail-closed. The only escape 
 time-boxed grant file that the human must create outside the agent:
 `bash ~/.workbuddy/hooks/comtool-approve.sh 30`. Serial-port (COM3) operations are always
 denied regardless of any grant. Run the guard's own tests with
-`python3 .workbuddy/hooks/test_guard.py` (no program start, no port access).
+`python3 .workbuddy/hooks/test_guard.py` (no program start, no port access). That test script
+**is** version-controlled (the single `.workbuddy/` file allowed through by `.gitignore`), so a
+clone can read both the rule and how to test it — but the guard and grant scripts themselves
+live outside the repository in the user-level hooks directory and must be recreated on a new
+machine, or the rules stay on paper while the enforcement silently disappears.
 
 ---
 

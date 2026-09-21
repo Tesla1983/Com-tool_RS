@@ -2,7 +2,17 @@ SerialGUI-rs/
 opencode.json
 target/
 echo_raw.txt
-.workbuddy/
+# .workbuddy/ 整体忽略（里面是项目记忆，不进仓库），只放行守卫的行为自测。
+#
+# 注意这里为什么写成四行而不是一句 `!.workbuddy/hooks/test_guard.py`：
+# git 的规则是「父目录被排除时，无法重新包含它里面的文件」——`.workbuddy/` 一旦整目录
+# 排除，git 根本不会往下走，后面再否定具体的文件也没用。所以必须先否定父目录
+# （`!.workbuddy/hooks/`）让 git 愿意进去，再否定文件本身。第三行 `hooks/*` 把该目录
+# 重新收窄成"只放行名单"，将来有人往 hooks/ 里多丢一个文件时不会顺手一起进仓库。
+.workbuddy/*
+!.workbuddy/hooks/
+.workbuddy/hooks/*
+!.workbuddy/hooks/test_guard.py
 .opencode/agents/executor.md
 .opencode/agents/expert.md
 .opencode/agents/planner.md
