@@ -3,20 +3,14 @@
 use crate::app::ComTool;
 
 use eframe::egui;
-use egui::epaint::text;
-use egui::{FontData, FontDefinitions, FontFamily, Ui, output};
-use serialport::SerialPort;
-use std::io::{Read, Write};
-use std::iter::Filter;
-use std::str::Chars;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
-use std::time::Duration;
+use egui::{FontData, FontDefinitions, FontFamily};
 
 mod app;
 mod communicationtrait;
 mod config;
+mod receive;
 mod serial_impl;
+mod sidebar;
 
 /// 配置 egui 字体回退链。
 ///
@@ -85,7 +79,7 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             setup_fonts(&cc.egui_ctx);
 
-            Ok(Box::new(ComTool::default()))
+            Ok(Box::new(ComTool::new(cc)))
         }),
     )
 }
@@ -93,12 +87,9 @@ fn main() -> eframe::Result {
 /*
 to do list
 
-1. 完善串口刷新功能,单片机重启的时候能够持续输出日志（已完成）
 
-2. 完善串口发送功能,能够发送字符串和十六进制数据 （已完成）
 
-3. 完善串口设置功能,能够设置,数据字节,停止位,奇偶校验，流控
-
+4.
 */
 
 /*

@@ -7,7 +7,10 @@ edition = "2024"
 egui = "0.36.1"
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serialport = "4.7.2"
+# 开启 `serde` — serialport 用它给 DataBits/StopBits/Parity/FlowControl 派生
+# Serialize/Deserialize，这样端口参数可以直接随应用状态落盘，不必再写一层
+# 枚举与字符串之间的手写转换。
+serialport = { version = "4.7.2", features = ["serde"] }
 chrono = "0.4.45"
 egui-chinese-font = "0.2.0"
 rfd = "0.17.2"

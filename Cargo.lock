@@ -2620,6 +2620,7 @@ dependencies = [
  "mach2",
  "nix",
  "scopeguard",
+ "serde",
  "unescaper",
  "windows-sys 0.52.0",
 ]
