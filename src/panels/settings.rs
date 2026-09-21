@@ -12,11 +12,14 @@
 use crate::app::{ComTool, Language};
 use crate::chart::{MAX_SAMPLES, MIN_SAMPLES};
 use crate::log_file::render_log_file_name;
+use crate::send::{MAX_REPEAT_INTERVAL_MS, MAX_SEND_HISTORY, MIN_REPEAT_INTERVAL_MS};
 use chrono::Local;
 use eframe::egui;
 use egui::Ui;
 
-use super::menu_bar::{theme_radios, timestamp_radios};
+use super::menu_bar::{
+    send_format_radios, send_line_ending_radios, theme_radios, timestamp_radios,
+};
 
 /// 左侧标签列的宽度，让右侧控件纵向对齐。
 const LABEL_WIDTH: f32 = 104.0;
@@ -33,6 +36,7 @@ impl ComTool {
         let mut pick_dir = false;
         let mut reset_dir = false;
         let mut clear_chart = false;
+        let mut clear_send_history = false;
 
         // 用局部变量接收窗口开关再回写：与 sidebar.rs 同一套写法，避免在闭包里
         // 同时可变借用 self 与 self.show_settings。
@@ -95,7 +99,35 @@ impl ComTool {
 
                 ui.separator();
                 ui.heading("发送");
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("负载格式"));
+                    send_format_radios(ui, &mut self.send_format);
+                });
+                ui.weak("HEX 时输入按十六进制解析：允许空格 / 逗号分隔与 0x 前缀；解析失败不会发送，也不会清空输入框");
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("行尾"));
+                    send_line_ending_radios(ui, &mut self.send_line_ending);
+                });
+                ui.weak("追加在字节层：HEX 模式下发出的是 0x0A / 0x0D 0x0A 两个字节，不是字符");
                 ui.checkbox(&mut self.clear_send_after_send, "发送后清空输入框");
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("定时发送间隔"));
+                    ui.add(
+                        egui::DragValue::new(&mut self.repeat_interval_ms)
+                            .range(MIN_REPEAT_INTERVAL_MS..=MAX_REPEAT_INTERVAL_MS)
+                            .speed(10.0),
+                    );
+                    ui.label(format!("ms（{MIN_REPEAT_INTERVAL_MS}~{MAX_REPEAT_INTERVAL_MS}）"));
+                });
+                ui.weak("开关在发送区；断开连接会自动关掉，且不跨进程延续（重启后一定是关的）");
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("发送历史"));
+                    ui.label(format!("{} / {MAX_SEND_HISTORY} 条", self.send_history.len()));
+                    if ui.button("清空历史").clicked() {
+                        clear_send_history = true;
+                    }
+                });
+                ui.weak("↑ / ↓ 在输入框首行 / 末行时取历史（首行按 ↑、末行按 ↓）；连续发送相同内容只记一条");
 
                 ui.separator();
                 ui.heading("实时图表");
@@ -177,6 +209,12 @@ impl ComTool {
         }
         if clear_chart {
             self.clear_chart();
+        }
+        if clear_send_history {
+            self.send_history.clear();
+            // 历史没了，浏览位置也必须一起复位——否则 ↑ 会基于旧下标去取，
+            // 表现为"按了没反应"。
+            self.send_history_nav.reset();
         }
     }
 }

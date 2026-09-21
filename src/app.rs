@@ -13,12 +13,17 @@
 use crate::chart::ChartData;
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::log_file::LogSink;
+use crate::panels::{send_format_radios, send_line_ending_radios};
 use crate::receive::{AnsiDecoder, AnsiStyle, ColoredSpan, TimestampPrefix, show_plain_receive};
+use crate::send::{
+    DEFAULT_REPEAT_INTERVAL_MS, HistoryNav, SendFormat, SendHistory, SendLineEnding, build_payload,
+    clamp_repeat_interval, on_first_line, on_last_line,
+};
 use crate::serial_impl::{DEFAULT_BAUD_RATE, SerialChannel, SerialConfig, scan_ports};
 use eframe::egui;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 界面语言（方案 A：目前仅作为设置项占位，尚未接入文案切换）
 #[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
@@ -104,6 +109,16 @@ pub struct ComTool {
 
     // 发送区
     pub send_text: String,
+    /// 发送负载的解析方式（文本 / HEX）。注意它与接收侧的显示模式**无关**。
+    pub send_format: SendFormat,
+    /// 发送时追加的行尾（无 / LF / CRLF），在**字节层**追加。
+    pub send_line_ending: SendLineEnding,
+    /// 发送历史（最多 [`crate::send::MAX_SEND_HISTORY`] 条，落盘）
+    pub send_history: SendHistory,
+    /// 定时发送的间隔（毫秒，实际使用时夹到 10~600000）。
+    ///
+    /// 只存间隔不存"是否开启"：开关是 [`ComTool::repeat_send`]，它是运行时状态。
+    pub repeat_interval_ms: u64,
 
     // 串口通信管理器（基于 ByteChannel trait，句柄不可序列化）
     #[serde(skip)]
@@ -115,7 +130,29 @@ pub struct ComTool {
 
     // 上次自动重连尝试时间（用于节流，避免高频重试）
     #[serde(skip)]
-    pub last_reconnect_attempt: Option<std::time::Instant>,
+    pub last_reconnect_attempt: Option<Instant>,
+
+    // —— 发送侧的运行时状态（不落盘）——
+    /// 是否正在定时发送。
+    ///
+    /// **不落盘**，而且断开连接时会被自动关掉（见 [`ComTool::stop_repeat_send`]）：
+    /// "程序一启动就自动往外发数据"和"重连成功后突然开始喷数据"都不是用户要的行为，
+    /// 与「实时文件日志不自动开始」是同一条原则（见 `crate::config` 模块注释）。
+    #[serde(skip)]
+    pub repeat_send: bool,
+    /// 上一次定时发送的时刻。用 `Instant` 差值计时，**不是每帧累加**——后者在帧率
+    /// 波动时会漂移（`repaint_interval_ms` 是可配的，帧率本来就不固定）。
+    #[serde(skip)]
+    pub last_repeat_send: Option<Instant>,
+    /// ↑ / ↓ 在历史里停在哪儿（纯运行时状态，不落盘）
+    #[serde(skip)]
+    pub send_history_nav: HistoryNav,
+    /// 上一帧发送输入框的光标位置（**字符**下标），用于判断 ↑ / ↓ 是否在首行 / 末行。
+    ///
+    /// 必须用上一帧的值：本帧的光标可能已经被 ↑ 自己挪走，用它判断会让"在第二行按
+    /// ↑"立刻变成"取历史"。
+    #[serde(skip)]
+    pub send_cursor_index: Option<usize>,
 
     // 上次成功打开的串口（自动重连时优先用它，避免跳到 COM1）
     pub last_opened_port: Option<String>,
@@ -211,7 +248,7 @@ impl ComTool {
             return;
         }
 
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         let need_retry = self
             .last_reconnect_attempt
             .map_or(true, |t| now.duration_since(t).as_millis() >= 500);
@@ -326,6 +363,9 @@ impl ComTool {
         self.last_reconnect_attempt = None;
         self.connected = false;
 
+        // 主动关闭时也要停掉定时发送：否则重连之后它会自己接着发。
+        self.stop_repeat_send();
+
         // 一次性追加一条彩色提示到彩色日志（不随渲染每帧重复）
         self.display_spans.push(ColoredSpan {
             text: "串口已关闭\n".to_string(),
@@ -337,12 +377,35 @@ impl ComTool {
         self.push_receive_note("串口已关闭\n".to_string());
     }
 
-    pub fn send_data(&mut self) {
+    /// 发送一次。UI 的「发送」按钮、Enter 键、定时发送都走这里——**只有这一条路**。
+    ///
+    /// 返回是否真的把字节交给了通道。UI 的调用点**不需要**看返回值（失败原因已经
+    /// 写进接收区了），它存在的意义是让测试能断言"解析失败时确实什么都没发出去"。
+    pub fn send_data(&mut self) -> bool {
         if !self.connected {
-            return;
+            return false;
         }
 
-        let data = self.send_text.as_bytes().to_vec();
+        let data = match build_payload(&self.send_text, self.send_format, self.send_line_ending) {
+            Ok(bytes) => bytes,
+            Err(reason) => {
+                // 关键：**解析失败时不清空输入框**。这条提示的意思是"你输入的十六进制
+                // 文本有问题"，用户必须能接着改它；顺手清空等于把用户刚写的内容删掉。
+                // 与下面那条"发送失败"不同——那条是通道错误，输入本身是好的。
+                self.push_receive_note(format!("发送失败: {reason}\n"));
+                return false;
+            }
+        };
+
+        // 输入为空且没有行尾时确实无字节可发：不算失败，也不该进历史。
+        if data.is_empty() {
+            return false;
+        }
+
+        // 历史记的是"**你尝试发过什么**"，所以写失败也记——用户下一步多半是
+        // 连好线再发一遍，而不是重新敲一遍。
+        self.send_history.record(&self.send_text);
+        self.send_history_nav.reset();
 
         // 同 `open_port`：`serial` 的可变借用还活着时不能调 `push_receive_note`。
         let mut failure: Option<String> = None;
@@ -351,12 +414,61 @@ impl ComTool {
         {
             failure = Some(format!("发送失败: {e}\n"));
         }
+        let write_failed = failure.is_some();
         if let Some(msg) = failure {
             self.push_receive_note(msg);
         }
 
-        if self.clear_send_after_send {
+        // 「发送后清空」的语义是"**确实发出去了**才清空"。写失败（通道已断开、
+        // 设备长时间不接受数据）时数据根本没出去，清掉等于让用户重打一遍——
+        // 与上面 HEX 解析失败时不清空是同一条原则。
+        if self.clear_send_after_send && !write_failed {
             self.send_text.clear();
+        }
+
+        !write_failed
+    }
+
+    /// 停掉定时发送。
+    ///
+    /// 断开连接（正常关闭、对端断开、通道报错）时都会调用它。**"自动开始往外发数据"
+    /// 是必须避免的一类行为**：重连成功后突然开始喷数据，用户根本不知道谁在发。
+    pub fn stop_repeat_send(&mut self) {
+        self.repeat_send = false;
+        self.last_repeat_send = None;
+    }
+
+    /// 定时发送的节拍，每帧调用一次。
+    ///
+    /// 计时基准是 [`Instant`] 差值而不是"每帧累加一个间隔"——后者在帧率波动时会
+    /// 漂移，而重绘间隔本来就是可配的（16~1000ms）。
+    ///
+    /// 另外一条：**只在开启时才请求重绘**。若在这里无条件
+    /// `request_repaint_after(10ms)`，设置里的「重绘间隔」就被架空了——用户把它调到
+    /// 500ms 省电，界面却仍在 10ms 空转。
+    pub fn tick_repeat_send(&mut self, ctx: &egui::Context) {
+        if !self.repeat_send || !self.connected {
+            return;
+        }
+
+        let interval = Duration::from_millis(clamp_repeat_interval(self.repeat_interval_ms));
+        let now = Instant::now();
+
+        let Some(last) = self.last_repeat_send else {
+            // 刚勾上：这一帧只负责起步计时，**不立刻发一包**。用户在按下勾选框的
+            // 那一刻不该有任何数据出去。
+            self.last_repeat_send = Some(now);
+            ctx.request_repaint_after(interval);
+            return;
+        };
+
+        let elapsed = now.duration_since(last);
+        if elapsed >= interval {
+            self.last_repeat_send = Some(now);
+            self.send_data();
+            ctx.request_repaint_after(interval);
+        } else {
+            ctx.request_repaint_after(interval - elapsed);
         }
     }
 }
@@ -402,9 +514,17 @@ impl Default for ComTool {
             connected: false,
             receive_text: String::new(),
             send_text: String::new(),
+            send_format: SendFormat::default(),
+            send_line_ending: SendLineEnding::default(),
+            send_history: SendHistory::default(),
+            repeat_interval_ms: DEFAULT_REPEAT_INTERVAL_MS,
             serial: None,
             event_rx: None,
             last_reconnect_attempt: None,
+            repeat_send: false,
+            last_repeat_send: None,
+            send_history_nav: HistoryNav::default(),
+            send_cursor_index: None,
             last_opened_port: None,
             hex_view: false,
             display_spans: Vec::new(),
@@ -446,6 +566,9 @@ impl eframe::App for ComTool {
 
         // 串口意外断开时自动重连（节流 500ms）
         self.auto_reconnect();
+
+        // 定时发送的节拍（只在自己请求重绘的前提下工作，见该方法注释）
+        self.tick_repeat_send(ui.ctx());
 
         // 主题偏好只在与当前生效值不同时下发一次
         self.apply_theme(ui.ctx());
@@ -567,20 +690,136 @@ impl eframe::App for ComTool {
 
             if self.show_send_panel {
                 // 发送区
-                ui.label("发送区:");
+                ui.horizontal(|ui| {
+                    ui.label("发送区:");
+                    ui.separator();
+                    ui.label("格式");
+                    send_format_radios(ui, &mut self.send_format);
+                    ui.separator();
+                    ui.label("行尾");
+                    send_line_ending_radios(ui, &mut self.send_line_ending);
+                    ui.separator();
+                    if ui.checkbox(&mut self.repeat_send, "定时发送").changed() && self.repeat_send
+                    {
+                        // 勾上的那一刻只起步计时，不立刻发一包（见 `tick_repeat_send`）
+                        self.last_repeat_send = None;
+                    }
+                    if self.repeat_send {
+                        ui.add(
+                            egui::DragValue::new(&mut self.repeat_interval_ms)
+                                .range(
+                                    crate::send::MIN_REPEAT_INTERVAL_MS
+                                        ..=crate::send::MAX_REPEAT_INTERVAL_MS,
+                                )
+                                .speed(10.0)
+                                .suffix(" ms"),
+                        );
+                    }
+                    ui.separator();
+                    self.send_history_menu(ui);
+                });
 
-                let send_edit_response = ui.add(
-                    egui::TextEdit::multiline(&mut self.send_text)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(4)
-                        .font(egui::FontId::monospace(14.0))
-                        .return_key(egui::KeyboardShortcut::new(
-                            egui::Modifiers::SHIFT,
-                            egui::Key::Enter,
-                        )),
-                );
+                let send_edit_id = egui::Id::new("send_input");
 
-                let enter_to_send = send_edit_response.has_focus()
+                // 焦点与箭头键都必须在绘制 `TextEdit` **之前**读：TextEdit 会消费
+                // 导航键事件，等它画完再读 `key_pressed` 有可能已经拿不到了。
+                let had_focus = ui.ctx().memory(|m| m.has_focus(send_edit_id));
+                let (up_pressed, down_pressed) = ui.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::ArrowUp) && !i.modifiers.shift,
+                        i.key_pressed(egui::Key::ArrowDown) && !i.modifiers.shift,
+                    )
+                });
+
+                let out = egui::TextEdit::multiline(&mut self.send_text)
+                    .id(send_edit_id)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(4)
+                    .font(egui::FontId::monospace(14.0))
+                    .return_key(egui::KeyboardShortcut::new(
+                        egui::Modifiers::SHIFT,
+                        egui::Key::Enter,
+                    ))
+                    .show(ui);
+                let send_has_focus = out.response.response.has_focus();
+
+                // 用**上一帧**的光标位置判断首行 / 末行：本帧的位置可能已经被 ↑ 自己
+                // 挪走，用它判断会让"在第二行按 ↑"当场变成"取历史"。
+                let cursor = self.send_cursor_index.unwrap_or(0);
+                let mut recalled = false;
+                if had_focus {
+                    let next = if up_pressed && on_first_line(&self.send_text, cursor) {
+                        // 注意 `send_history_nav` 与 `send_history` / `send_text` 是三个
+                        // 互不重叠的字段，借用检查器允许这样同时借。
+                        self.send_history_nav
+                            .older(&self.send_history, &self.send_text)
+                    } else if down_pressed && on_last_line(&self.send_text, cursor) {
+                        self.send_history_nav.newer(&self.send_history)
+                    } else {
+                        None
+                    };
+
+                    if let Some(text) = next {
+                        self.send_text = text;
+                        recalled = true;
+                        // 光标移到末尾：否则下一次 ↑ 会因为光标还停在旧位置而重复命中
+                        // 同一条历史（shell 里的 ↑ 也是这个行为）。
+                        let mut state = out.state.clone();
+                        let end = egui::text::CCursor::new(self.send_text.chars().count());
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                        state.store(ui.ctx(), send_edit_id);
+                    }
+                }
+
+                // 用户自己改了内容 → 退出浏览态，否则下一次 ↑ 会接着半截历史往下走。
+                // `recalled` 那一帧例外：本次改动是我们自己写进去的。
+                if out.response.response.changed() && !recalled {
+                    self.send_history_nav.reset();
+                }
+
+                // 记录本帧光标位置供下一帧使用；刚取过历史就按"光标已到末尾"记，
+                // 免得下一帧拿一个越界下标去判断。
+                // `CCursor::index` 是 `CharIndex` 这个 newtype（不是裸 usize），
+                // 取 `.0` 拿字符下标；`send.rs` 里的首行/末行判定也是按字符算的。
+                self.send_cursor_index = if recalled {
+                    Some(self.send_text.chars().count())
+                } else {
+                    out.cursor_range.map(|r| r.primary.index.0)
+                };
+
+                // 实时校验：HEX 写错了要当场看见，而不是点了发送才发现。
+                // 超长输入跳过——发送框里正常不会有这么大的文本，而每帧解析一遍
+                // 几十 KB 的十六进制字符串是白费。
+                // 全部挤在同一行里：这一行的高度固定，浏览历史时不会让下面的按钮跳位。
+                const PREVIEW_MAX_LEN: usize = 16 * 1024;
+                ui.horizontal(|ui| {
+                    if self.send_text.len() > PREVIEW_MAX_LEN {
+                        ui.weak("输入过长，已停止实时校验");
+                    } else {
+                        match build_payload(
+                            &self.send_text,
+                            self.send_format,
+                            self.send_line_ending,
+                        ) {
+                            Ok(bytes) => {
+                                ui.weak(format!("将发送 {} 字节", bytes.len()));
+                            }
+                            Err(reason) => {
+                                let error_color = ui.visuals().error_fg_color;
+                                ui.colored_label(error_color, format!("HEX 解析失败: {reason}"));
+                            }
+                        }
+                    }
+                    // 让用户知道现在按 ↑ / ↓ 是在翻历史而不是在移光标
+                    if self.send_history_nav.is_active() {
+                        ui.separator();
+                        ui.weak("历史浏览中：↑ 更旧 / ↓ 更新");
+                    }
+                });
+
+                let enter_to_send = send_has_focus
                     && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
 
                 let mut do_send = false;
@@ -592,6 +831,9 @@ impl eframe::App for ComTool {
                     if ui.button("清空发送").clicked() {
                         do_clear = true;
                     }
+                    if self.repeat_send && !self.connected {
+                        ui.weak("未连接：连上之后才会开始定时发送");
+                    }
                 });
                 if enter_to_send {
                     do_send = true;
@@ -601,6 +843,7 @@ impl eframe::App for ComTool {
                 }
                 if do_clear {
                     self.send_text.clear();
+                    self.send_history_nav.reset();
                 }
             }
         });
@@ -609,5 +852,239 @@ impl eframe::App for ComTool {
     /// `eframe` 在退出前以及周期性自动保存时调用。
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         crate::config::save(storage, self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::communicationtrait::fake::{FakeChannel, FakeHandle};
+
+    /// 一台"已连接、通道是替身"的应用。
+    ///
+    /// 走 `open_port()` 而不是手工拼状态：这样 `configure` → `open` → 建立事件通道
+    /// 这一段真实路径也被覆盖，而它是不需要串口硬件就能跑的。
+    fn connected_app() -> (ComTool, FakeHandle) {
+        let (channel, handle) = FakeChannel::new();
+        let mut app = ComTool {
+            serial: Some(Box::new(channel)),
+            selected_port: "COM_TEST".to_string(),
+            ..ComTool::default()
+        };
+        app.open_port();
+        assert!(app.connected, "替身通道应当能打开成功");
+        assert!(app.event_rx.is_some(), "打开后必须有事件通道");
+        (app, handle)
+    }
+
+    #[test]
+    fn text_send_writes_utf8_and_appends_line_ending() {
+        let (mut app, handle) = connected_app();
+        app.send_text = "你好".to_string();
+        app.send_line_ending = SendLineEnding::Crlf;
+
+        assert!(app.send_data());
+
+        assert_eq!(handle.written_bytes(), "你好\r\n".as_bytes());
+    }
+
+    #[test]
+    fn hex_send_parses_input_before_writing() {
+        let (mut app, handle) = connected_app();
+        app.send_format = SendFormat::Hex;
+        app.send_text = "41 42,43".to_string();
+
+        assert!(app.send_data());
+
+        assert_eq!(handle.written(), vec![vec![0x41, 0x42, 0x43]]);
+    }
+
+    /// 这条是 F1 的核心约定：HEX 写错时**不发、也不清空输入框**。
+    ///
+    /// 静默丢弃半个字节会让用户去怀疑设备；顺手清空则等于把用户刚敲的内容删掉。
+    #[test]
+    fn invalid_hex_neither_writes_nor_clears_the_input() {
+        let (mut app, handle) = connected_app();
+        app.send_format = SendFormat::Hex;
+        app.send_text = "4".to_string();
+        app.clear_send_after_send = true;
+
+        assert!(!app.send_data(), "解析失败不能报告为已发送");
+
+        assert_eq!(handle.write_count(), 0, "解析失败时一个字节都不该出去");
+        assert_eq!(app.send_text, "4", "输入框必须原样保留，用户还要改它");
+        assert!(
+            app.receive_text.contains("发送失败"),
+            "必须给出可见的原因，而不是静默无反应：{}",
+            app.receive_text
+        );
+        assert!(app.send_history.is_empty(), "没发出去的东西不该进历史");
+    }
+
+    #[test]
+    fn empty_input_without_line_ending_sends_nothing() {
+        let (mut app, handle) = connected_app();
+        app.send_text = String::new();
+
+        assert!(!app.send_data());
+        assert_eq!(handle.write_count(), 0);
+
+        // 但"只发一个换行"是合法用法
+        app.send_line_ending = SendLineEnding::Lf;
+        assert!(app.send_data());
+        assert_eq!(handle.written_bytes(), b"\n");
+    }
+
+    #[test]
+    fn disconnected_app_writes_nothing() {
+        let (mut app, handle) = connected_app();
+        app.send_text = "ping".to_string();
+        app.connected = false;
+
+        assert!(!app.send_data());
+        assert_eq!(handle.write_count(), 0);
+    }
+
+    #[test]
+    fn successful_send_is_recorded_in_history() {
+        let (mut app, _handle) = connected_app();
+        app.send_text = "AT+RST".to_string();
+        app.send_data();
+
+        assert_eq!(app.send_history.entries(), ["AT+RST"]);
+
+        // 定时发送同一句不会把历史塞满（连续重复只记一条）
+        app.send_data();
+        app.send_data();
+        assert_eq!(app.send_history.len(), 1);
+    }
+
+    #[test]
+    fn clear_after_send_is_honoured_and_resets_history_browsing() {
+        let (mut app, _handle) = connected_app();
+        app.send_text = "AT".to_string();
+        app.send_history.record("旧的");
+        app.send_history_nav.older(&app.send_history, "");
+        assert!(app.send_history_nav.is_active());
+
+        app.clear_send_after_send = true;
+        app.send_data();
+
+        assert!(app.send_text.is_empty());
+        assert!(
+            !app.send_history_nav.is_active(),
+            "发出去之后历史浏览位置必须复位"
+        );
+    }
+
+    #[test]
+    fn write_failure_is_reported_and_does_not_clear_input() {
+        let (mut app, handle) = connected_app();
+        handle.reject_writes(true);
+        app.send_text = "AT".to_string();
+        app.clear_send_after_send = true;
+
+        app.send_data();
+
+        assert!(
+            app.receive_text.contains("发送失败"),
+            "通道错误也要有可见提示：{}",
+            app.receive_text
+        );
+        assert_eq!(app.send_text, "AT", "写失败时不该把输入清掉");
+    }
+
+    // ---------- 定时发送 ----------
+
+    /// 勾上定时发送的那一刻**不能立刻发包**；到点之后每过一个间隔发一次。
+    #[test]
+    fn repeat_send_waits_one_interval_before_the_first_send() {
+        let (mut app, handle) = connected_app();
+        app.send_text = "tick".to_string();
+        app.repeat_interval_ms = 10;
+        app.repeat_send = true;
+
+        let ctx = egui::Context::default();
+
+        // 第一帧只起步计时
+        app.tick_repeat_send(&ctx);
+        assert_eq!(handle.write_count(), 0, "勾上的瞬间不该有数据出去");
+
+        // 还没到点
+        app.tick_repeat_send(&ctx);
+        assert_eq!(handle.write_count(), 0);
+
+        std::thread::sleep(Duration::from_millis(15));
+        app.tick_repeat_send(&ctx);
+        assert_eq!(handle.write_count(), 1, "到点之后应当发一条");
+        assert_eq!(handle.written_bytes(), b"tick");
+    }
+
+    #[test]
+    fn repeat_send_does_nothing_when_disconnected_or_disabled() {
+        let (mut app, handle) = connected_app();
+        app.send_text = "tick".to_string();
+        app.repeat_interval_ms = 10;
+        let ctx = egui::Context::default();
+
+        // 没勾：一帧都不该有动作
+        app.tick_repeat_send(&ctx);
+        assert_eq!(handle.write_count(), 0);
+
+        // 勾了但断开：同样不动
+        app.repeat_send = true;
+        app.connected = false;
+        std::thread::sleep(Duration::from_millis(15));
+        app.tick_repeat_send(&ctx);
+        app.tick_repeat_send(&ctx);
+        assert_eq!(handle.write_count(), 0);
+    }
+
+    /// 通道报错 → 自动停掉定时发送。
+    ///
+    /// "重连成功后突然开始往外喷数据"是必须避免的一类行为：用户根本不知道是谁在发。
+    #[test]
+    fn channel_failure_stops_repeat_send() {
+        let (mut app, handle) = connected_app();
+        app.send_text = "tick".to_string();
+        app.repeat_send = true;
+        app.last_repeat_send = Some(Instant::now());
+
+        handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
+        app.receive_data();
+
+        assert!(!app.connected, "报错后必须回到未连接");
+        assert!(!app.repeat_send, "定时发送必须一起停掉");
+        assert!(app.last_repeat_send.is_none(), "计时基准也要清掉");
+        assert!(
+            app.receive_text.contains("设备已拔出"),
+            "错误原因要能被看见：{}",
+            app.receive_text
+        );
+    }
+
+    #[test]
+    fn closed_event_stops_repeat_send_too() {
+        let (mut app, handle) = connected_app();
+        app.repeat_send = true;
+
+        handle.emit(ChannelEvent::Closed);
+        app.receive_data();
+
+        assert!(!app.connected);
+        assert!(!app.repeat_send);
+        assert!(app.receive_text.contains("连接已关闭"));
+    }
+
+    /// 主动关闭同样要停掉，否则重连之后它会自己接着发。
+    #[test]
+    fn closing_the_port_stops_repeat_send() {
+        let (mut app, _handle) = connected_app();
+        app.repeat_send = true;
+
+        app.close_port();
+
+        assert!(!app.connected);
+        assert!(!app.repeat_send);
     }
 }

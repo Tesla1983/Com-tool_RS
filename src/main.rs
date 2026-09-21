@@ -14,6 +14,7 @@ mod config;
 mod log_file;
 mod panels;
 mod receive;
+mod send;
 mod serial_impl;
 mod sidebar;
 

@@ -731,8 +731,10 @@ impl ComTool {
     pub fn receive_data(&mut self) {
         let mut received = Vec::new();
         // 一次性提示先攒着再落笔：`&self.event_rx` 的借用还活着时不能调用需要
-        // `&mut self` 的 `push_receive_note`。
+        // `&mut self` 的 `push_receive_note`。`channel_down` 同理——停定时发送也要
+        // `&mut self`，只能在借用结束之后再办。
         let mut notes: Vec<String> = Vec::new();
+        let mut channel_down = false;
 
         if let Some(rx) = &self.event_rx {
             while let Ok(event) = rx.try_recv() {
@@ -743,10 +745,12 @@ impl ComTool {
                     ChannelEvent::Failed(msg) => {
                         notes.push(format!("串口错误: {msg}\n"));
                         self.connected = false;
+                        channel_down = true;
                     }
                     ChannelEvent::Closed => {
                         notes.push("串口连接已关闭\n".to_string());
                         self.connected = false;
+                        channel_down = true;
                     }
                 }
             }
@@ -755,6 +759,12 @@ impl ComTool {
         // 提示先落笔，保持与旧实现相同的顺序：本次的错误提示显示在本批数据之前。
         for note in notes {
             self.push_receive_note(note);
+        }
+
+        // 通道已经没了，定时发送必须一起停：否则重连成功后会自己接着往外发数据，
+        // 而用户并不知道是谁在发。
+        if channel_down {
+            self.stop_repeat_send();
         }
 
         if !received.is_empty() {

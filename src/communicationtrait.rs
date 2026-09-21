@@ -66,3 +66,116 @@ pub trait ByteChannel: Send {
         ))
     }
 }
+
+/// 测试用的通道替身。
+///
+/// 存在的理由：**发送链路与连接生命周期可以在 `cargo test` 里被完整验证**，
+/// 不需要串口硬件、不需要打开窗口。它记下每一次 `write` 的字节，并允许测试
+/// 主动往事件通道里灌 `Failed` / `Closed`——否则"通道报错时要自动停掉定时发送"
+/// 这类约定只能靠人工拔线去验。
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::{ByteChannel, ChannelEvent};
+    use std::io;
+    use std::sync::mpsc::Sender;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Shared {
+        written: Vec<Vec<u8>>,
+        active: bool,
+        reject_writes: bool,
+        sink: Option<Sender<ChannelEvent>>,
+    }
+
+    /// 交给被测代码的通道本体。
+    pub(crate) struct FakeChannel {
+        shared: Arc<Mutex<Shared>>,
+    }
+
+    /// 留在测试手里的观察窗。
+    #[derive(Clone)]
+    pub(crate) struct FakeHandle {
+        shared: Arc<Mutex<Shared>>,
+    }
+
+    impl FakeChannel {
+        /// 返回「交给被测代码的通道」与「测试自己留着的观察窗」。
+        pub(crate) fn new() -> (Self, FakeHandle) {
+            let shared = Arc::new(Mutex::new(Shared::default()));
+            (
+                Self {
+                    shared: Arc::clone(&shared),
+                },
+                FakeHandle { shared },
+            )
+        }
+    }
+
+    impl FakeHandle {
+        /// 到目前为止每一次写入的字节，按发生顺序。
+        pub(crate) fn written(&self) -> Vec<Vec<u8>> {
+            self.shared.lock().expect("锁未被毒化").written.clone()
+        }
+
+        /// 所有写入拼起来的一份字节流——断言"到底发出去了什么"时比逐次比对好用。
+        pub(crate) fn written_bytes(&self) -> Vec<u8> {
+            self.written().concat()
+        }
+
+        pub(crate) fn write_count(&self) -> usize {
+            self.shared.lock().expect("锁未被毒化").written.len()
+        }
+
+        /// 让后续 `write` 一律失败，用来验证"发送失败"分支。
+        pub(crate) fn reject_writes(&self, reject: bool) {
+            self.shared.lock().expect("锁未被毒化").reject_writes = reject;
+        }
+
+        /// 往被测代码的事件通道里灌一个事件（通道未打开时什么也不做）。
+        pub(crate) fn emit(&self, event: ChannelEvent) {
+            let sink = self.shared.lock().expect("锁未被毒化").sink.clone();
+            if let Some(sink) = sink {
+                let _ = sink.send(event);
+            }
+        }
+    }
+
+    impl ByteChannel for FakeChannel {
+        fn open(&mut self, sink: Sender<ChannelEvent>) -> io::Result<()> {
+            let mut shared = self.shared.lock().expect("锁未被毒化");
+            if shared.active {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "通道已在运行"));
+            }
+            shared.active = true;
+            shared.sink = Some(sink);
+            Ok(())
+        }
+
+        fn close(&mut self) -> io::Result<()> {
+            let mut shared = self.shared.lock().expect("锁未被毒化");
+            shared.active = false;
+            shared.sink = None;
+            Ok(())
+        }
+
+        fn is_active(&self) -> bool {
+            self.shared.lock().expect("锁未被毒化").active
+        }
+
+        fn write(&mut self, bytes: Vec<u8>) -> io::Result<()> {
+            let mut shared = self.shared.lock().expect("锁未被毒化");
+            if shared.reject_writes {
+                return Err(io::Error::other("替身通道被要求拒绝写入"));
+            }
+            shared.written.push(bytes);
+            Ok(())
+        }
+
+        /// 替身接受任何配置：被测代码传进来的是串口参数，而替身不关心内容——
+        /// 拒绝配置会让 `open_port` 走失败分支，测不到后面的链路。
+        fn configure(&mut self, _settings: &dyn std::any::Any) -> io::Result<()> {
+            Ok(())
+        }
+    }
+}

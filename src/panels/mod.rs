@@ -13,6 +13,10 @@ mod info;
 mod menu_bar;
 mod settings;
 
+// 菜单栏里定义的**共享控件**要能被中央区（`app.rs` 的发送区）复用。模块内其余
+// 内容都是 `impl ComTool` 的固有方法，随类型可见，不需要在这里再引出一次。
+pub(crate) use menu_bar::{send_format_radios, send_line_ending_radios};
+
 #[cfg(test)]
 mod tests {
     use crate::app::ComTool;

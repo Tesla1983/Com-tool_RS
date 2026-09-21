@@ -15,7 +15,11 @@
 //! - 实时文件日志 `log`：它持有文件句柄与写盘线程，活不过进程边界；而且「启动
 //!   即自动开始写文件」不是用户要的行为——上一次会话的记录必须由用户显式停止；
 //! - 实时图表 `chart`：样本缓冲由数据速率决定大小，把上一次会话的曲线带回来没有
-//!   意义（跨会话的曲线会接在序号 0 上，看起来像同一段时间的数据）。
+//!   意义（跨会话的曲线会接在序号 0 上，看起来像同一段时间的数据）；
+//! - 定时发送开关 `repeat_send` 与历史浏览位置 `send_history_nav`：都是运行时状态。
+//!   「启动就开始往外发数据」比「启动就开始写文件」更需要避免——后者只是多一个
+//!   文件，前者会往设备上喷数据，而用户根本不知道是谁在发。`repeat_interval_ms`
+//!   是用户偏好，照常落盘。
 //!
 //! 除了"存什么"，本模块还负责**启动时的不变量修复**：手改过的存档可能包含越界的
 //! 重绘间隔、或者一个面板都不显示的界面配置，这些都在 [`restore_runtime_state`]
@@ -84,9 +88,21 @@ pub fn restore_runtime_state(app: &mut ComTool) {
     // **非空**视图——不然字节视图渲染的 `ascii_spans` 自始至终没人写过，接收区一片空白。
     app.resolve_display_mode(false, false);
 
+    // 定时发送的开关是纯运行时状态：**启动时一律关闭**。同一趟把计时基准也清掉，
+    // 免得留下一个上次会话的时间戳让第一次发送立刻触发。
+    app.stop_repeat_send();
+
+    // 发送历史的浏览位置同样活不过进程边界：下次启动不该停在半截历史里。
+    app.send_history_nav.reset();
+    app.send_cursor_index = None;
+
     // 重绘间隔越界会让界面要么卡顿、要么 CPU 空转；越界值在这里夹回合法区间，
     // 使用处 `app.rs` 也会再夹一次，双保险。
     app.repaint_interval_ms = app.repaint_interval_ms.clamp(16, 1000);
+
+    // 定时发送间隔：0 会让每帧都发（把 UI 与串口一起打满），超大值又等于关掉，
+    // 越界值在这里夹回合法区间；`clamp_repeat_interval` 在使用处还会再夹一次。
+    app.repeat_interval_ms = crate::send::clamp_repeat_interval(app.repeat_interval_ms);
 
     // 图表样本上限同时决定内存与每帧绘制成本，越界值（手改存档）同样夹回去；
     // 解析入口 `ChartData::push_bytes` 还会再夹一次，双保险。
@@ -110,6 +126,7 @@ mod tests {
     use super::*;
     use crate::app::{Language, ThemeChoice};
     use crate::receive::{AnsiStyle, ColoredSpan, TimestampPrefix};
+    use crate::send::{SendFormat, SendHistory, SendLineEnding};
     // 调用 `get_string`/`set_string` 需要 trait 本身在作用域内
     use eframe::Storage as _;
     use serialport::{DataBits, FlowControl, Parity, StopBits};
@@ -168,6 +185,15 @@ mod tests {
             default_log_file_name: "MyLog_%Y.txt".to_string(),
             log_dir: "E:/serial-logs".to_string(),
             timestamp_prefix: TimestampPrefix::PerLine,
+            send_format: SendFormat::Hex,
+            send_line_ending: SendLineEnding::Crlf,
+            send_history: {
+                let mut h = SendHistory::default();
+                h.record("AT+RST");
+                h.record("01 02 03");
+                h
+            },
+            repeat_interval_ms: 250,
             show_receive_panel: true,
             show_send_panel: false,
             show_chart_panel: true,
@@ -220,6 +246,12 @@ mod tests {
         );
         assert_eq!(restored.log_dir, original.log_dir);
         assert_eq!(restored.timestamp_prefix, original.timestamp_prefix);
+        // 发送侧的偏好同样要能往返（历史是用户偏好，间隔也是）
+        assert_eq!(restored.send_format, original.send_format);
+        assert_eq!(restored.send_line_ending, original.send_line_ending);
+        assert_eq!(restored.send_history, original.send_history);
+        assert_eq!(restored.send_history.entries(), ["AT+RST", "01 02 03"]);
+        assert_eq!(restored.repeat_interval_ms, original.repeat_interval_ms);
         assert_eq!(restored.show_receive_panel, original.show_receive_panel);
         assert_eq!(restored.show_send_panel, original.show_send_panel);
         // P5 新增的图表偏好同样要能往返
@@ -235,6 +267,7 @@ mod tests {
         saved.connected = true;
         saved.show_settings = true;
         saved.show_info = true;
+        saved.repeat_send = true;
         saved.receive_text = "上一次会话的日志".to_string();
         saved.display_spans.push(ColoredSpan {
             text: "x".to_string(),
@@ -251,6 +284,12 @@ mod tests {
         assert!(!restored.show_settings, "设置窗口不该自动弹出");
         assert!(!restored.show_info, "信息窗口不该自动弹出");
         assert!(restored.log.is_none(), "实时文件日志必须重建");
+        assert!(
+            !restored.repeat_send,
+            "定时发送不得跨进程延续：启动就开始往外发数据比自动写文件更严重"
+        );
+        assert!(restored.last_repeat_send.is_none(), "计时基准也要清掉");
+        assert!(!restored.send_history_nav.is_active(), "历史浏览位置不落盘");
         assert!(restored.receive_text.is_empty(), "接收日志不参与持久化");
         assert!(restored.display_spans.is_empty());
         assert!(restored.ascii_text.is_empty());
@@ -346,6 +385,38 @@ mod tests {
             app.timestamp_prefix,
             TimestampPrefix::Off,
             "默认不加时间戳前缀：开启前的接收内容必须逐字节保持不变"
+        );
+        assert_eq!(app.send_format, SendFormat::Text, "默认按文本发送");
+        assert_eq!(
+            app.send_line_ending,
+            SendLineEnding::None,
+            "默认不追加行尾：升级前的发送行为必须逐字节保持不变"
+        );
+        assert!(app.send_history.is_empty(), "默认没有发送历史");
+        assert!(!app.repeat_send, "默认不定时发送");
+        assert_eq!(
+            app.repeat_interval_ms,
+            crate::send::DEFAULT_REPEAT_INTERVAL_MS
+        );
+    }
+
+    /// 定时发送间隔越界（手改存档）时夹回 10~600000。
+    ///
+    /// 0 尤其危险：它会让定时发送在**每一帧**都发一次，把 UI 线程与串口一起打满。
+    #[test]
+    fn repeat_interval_is_clamped_on_load() {
+        let mut too_fast = customized();
+        too_fast.repeat_interval_ms = 0;
+        assert_eq!(
+            round_trip(&too_fast).repeat_interval_ms,
+            crate::send::MIN_REPEAT_INTERVAL_MS
+        );
+
+        let mut too_slow = customized();
+        too_slow.repeat_interval_ms = u64::MAX;
+        assert_eq!(
+            round_trip(&too_slow).repeat_interval_ms,
+            crate::send::MAX_REPEAT_INTERVAL_MS
         );
     }
 
