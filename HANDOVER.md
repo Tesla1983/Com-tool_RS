@@ -11,7 +11,7 @@
 
 | 目录 | 角色 | 当前分支 | 当前提交 | `.git` 体积 |
 |---|---|---|---|---|
-| `E:\Downloads\Zed\AI_comtool-rs` | **AI 重构版**（本目录，主要工作对象） | `ai-refactor` | `cfbff52`（P3 时间戳前缀 + P6 第 2 批：决定不做版本检查并移除假开关） | 243 KB |
+| `E:\Downloads\Zed\AI_comtool-rs` | **AI 重构版**（本目录，主要工作对象） | `ai-refactor` | `2be28d9`（显示模式互斥修复；其上为 P3 时间戳前缀 + P6 第 2 批：决定不做版本检查并移除假开关） | 243 KB |
 | `E:\Downloads\Zed\comtool-rs` | **原版保留**（已回滚为干净状态） | `master` | `04dc007` | 785 MB |
 
 > 本文件的提交号以撰写时的 `git log --oneline` 为准；要精确核对请自己跑一遍。
