@@ -13,6 +13,9 @@
 use crate::chart::ChartData;
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::log_file::LogSink;
+use crate::net_impl::{
+    DEFAULT_REMOTE_HOST, DEFAULT_REMOTE_PORT, NetConfig, TcpChannel, UdpChannel,
+};
 use crate::panels::{send_format_radios, send_line_ending_radios};
 use crate::receive::{
     AnsiDecoder, AnsiStyle, ColoredSpan, TextEncoding, TimestampPrefix, show_plain_receive,
@@ -36,6 +39,42 @@ use std::time::{Duration, Instant};
 pub enum Language {
     Zh,
     En,
+}
+
+/// 连接类型（F4 起）。
+///
+/// 它决定三件事，缺一不可：
+///
+/// 1. **建哪种通道**——见 [`ComTool::open_connection`]；
+/// 2. **界面上显示哪些参数控件**——串口是「端口 / 波特率 / 数据位 / 停止位 / 校验 /
+///    流控」，网络是「地址 / 端口」；串口的那些字段在网络模式下**必须整段隐藏**，
+///    否则用户会对着一个"波特率 115200"去连 TCP，然后问为什么没生效；
+/// 3. **状态词**——串口与 TCP 说「已连接」，UDP 只能说「**已绑定**」（它没有连接，
+///    说"已连接"会让用户以为对端在线、以为掉线会被发现）。
+///
+/// `#[default]` 落在 `Serial`：既有用户的存档里没有这个字段，
+/// 反序列化时走默认值必须是"和以前一样"。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum ConnectionKind {
+    #[default]
+    Serial,
+    TcpClient,
+    Udp,
+}
+
+impl ConnectionKind {
+    /// 需要串口那些参数（端口名 / 波特率 / 数据位 / 停止位 / 校验 / 流控）吗。
+    ///
+    /// 抽成一个方法而不是各处写 `kind == ConnectionKind::Serial`：将来加一种
+    /// "也是串口类"的传输（比如串口转网络）时，判定规则只改这一处。
+    pub fn uses_serial_settings(self) -> bool {
+        matches!(self, Self::Serial)
+    }
+
+    /// 需要网络参数（地址 / 端口）吗。
+    pub fn uses_net_settings(self) -> bool {
+        !self.uses_serial_settings()
+    }
 }
 
 /// 主题偏好。
@@ -105,6 +144,16 @@ pub struct ComTool {
     pub parity: Parity,
     pub flow_control: FlowControl,
 
+    // —— 连接类型与网络参数（F4 起；全部落盘）——
+    /// 用哪种传输：串口 / TCP 客户端 / UDP。
+    pub connection_kind: ConnectionKind,
+    /// 网络目标地址（IP 字面量或域名）
+    pub net_remote_host: String,
+    /// 网络目标端口
+    pub net_remote_port: u16,
+    /// UDP 本地绑定端口（0 = 系统分配；TCP 不用）
+    pub net_local_port: u16,
+
     // 是否已经打开串口（活不过进程边界）
     #[serde(skip)]
     pub connected: bool,
@@ -131,9 +180,27 @@ pub struct ComTool {
     /// 只存间隔不存"是否开启"：开关是 [`ComTool::repeat_send`]，它是运行时状态。
     pub repeat_interval_ms: u64,
 
-    // 串口通信管理器（基于 ByteChannel trait，句柄不可序列化）
+    // 通信通道（F4 起可能是串口 / TCP / UDP；基于 ByteChannel trait，句柄不可序列化）
+    //
+    // 字段名是 `channel` 而不是 `serial`：它从 F4 起真的可能装一个 TCP 或 UDP
+    // 通道，叫 `serial` 会让读代码的人以为这里只可能是串口。
     #[serde(skip)]
-    pub serial: Option<Box<dyn ByteChannel>>,
+    pub channel: Option<Box<dyn ByteChannel>>,
+
+    /// [`ComTool::channel`] 里那个对象是**为哪种连接类型造的**。
+    ///
+    /// 它存在的原因只有一个：[`ComTool::open_connection`] 要判断"能不能就地复用现成的
+    /// 通道对象"。两种情况必须区分开——
+    ///
+    /// * **类型没变**（串口断线重连、测试注入的替身通道）→ 复用：前者是"同一个句柄
+    ///   再 `open` 一次"，后者若不复用就会当场造一个真串口，测试也就测不到替身了；
+    /// * **类型变了**（用户把「串口」切成「TCP」）→ 必须拆掉重建：旧对象是另一种传输，
+    ///   它身上的连接先得断掉，否则会留下一个没人管的后台线程。
+    ///
+    /// 与 `channel` 同生共死：[`ComTool::teardown_channel`] 会把两者一起清空，
+    /// 所以"`channel` 是 `Some` 而 `channel_kind` 是 `None`"这种半截状态不存在。
+    #[serde(skip)]
+    pub channel_kind: Option<ConnectionKind>,
 
     // 串口事件通道（Bytes / Failed / Closed）
     #[serde(skip)]
@@ -253,9 +320,18 @@ impl ComTool {
         }
     }
 
+    /// 断线后自动重连。**只对串口生效**（F4 起）。
+    ///
+    /// 不用于 TCP / UDP 的理由写在 `FUTURE_ROADMAP.md` §5：这个函数依赖
+    /// `last_opened_port`（"上次那个端口"），那是串口语义；对 TCP 而言，
+    /// 对端没启动时反复重试只会产生一批半死不活的 socket，而用户完全看不出
+    /// 它在重试（界面已经是"未连接"）。
     pub fn auto_reconnect(&mut self) {
         // 只有串口曾经打开过、现在断开时才尝试自动重连
-        if self.connected || self.serial.is_none() {
+        if self.connection_kind != ConnectionKind::Serial {
+            return;
+        }
+        if self.connected || self.channel.is_none() {
             return;
         }
 
@@ -281,7 +357,7 @@ impl ComTool {
         // 只刷新端口列表供 UI 显示，不改变所选端口
         self.ports = scan_ports();
 
-        self.open_port();
+        self.open_connection();
     }
 
     pub fn export_receive_text(&mut self) {
@@ -307,52 +383,79 @@ impl ComTool {
         }
     }
 
-    pub fn open_port(&mut self) {
-        if self.selected_port.is_empty() {
+    /// 建立连接。UI 的「连接」按钮与自动重连都走这里——**只有这一条路**。
+    ///
+    /// 按 [`ComTool::connection_kind`] 决定建哪种通道（串口 / TCP 客户端 / UDP）。
+    /// 三者都实现 [`ByteChannel`]，所以之后的接收链路、发送链路、图表、实时日志
+    /// 全部共用，不因为换了传输而分叉。
+    ///
+    /// # 失败时不会置 `connected`
+    ///
+    /// `open()` 返回 `Err` 就直接报错退出，界面保持"未连接"。这一点对网络通道
+    /// 是**硬要求**：`TcpChannel` / `UdpChannel` 的 `open()` 会当场把 connect /
+    /// bind 做完再返回，所以这里的 `Ok` 就是"确实连上了"。
+    ///
+    /// 串口通道的 `open()` 只负责拉起后台线程，真正的打开失败要等 `Failed` 事件
+    /// 回来才知道——那是既有的 `connected` 假阳性缺陷（见 `FEATURE_GAP_AND_PLAN.md`
+    /// §4），本次未动：修它要引入"正在打开"这个中间状态，属独立课题。
+    pub fn open_connection(&mut self) {
+        // 前置条件不满足（没选端口 / 没填目标地址）时**什么都不做**——尤其不能
+        // 乐观置位 `connected`。
+        if !self.connection_ready() {
             return;
         }
 
-        // 首次打开时创建串口通信管理器
-        if self.serial.is_none() {
-            self.serial = Some(Box::new(SerialChannel::new()));
+        // 通道对象：类型没变就**就地复用**，类型变了才拆掉重建。复用不是省一次
+        // 分配，而是两条硬需求：断线重连是"同一个句柄再 `open` 一次"，而测试里
+        // 注入的替身通道一旦被拆掉就会换成真串口。理由详见 `channel_kind` 的注释。
+        if self.channel.is_none() || self.channel_kind != Some(self.connection_kind) {
+            self.teardown_channel();
+        }
+        if self.channel.is_none() {
+            let channel = self.new_channel();
+            self.channel = Some(channel);
+            self.channel_kind = Some(self.connection_kind);
         }
 
-        // 失败原因先攒在局部变量里：下面 `serial` 持有 `self.serial` 的可变借用，
+        // 配置对象与提示措辞都随类型变化，但"配置 → 打开 → 接管事件通道"这三步
+        // 只有下面这一处实现。若按传输类型各写一遍，抄漏任何一步都是一整类难查的
+        // 故障（漏了事件通道 = "连上了收不到数据"；漏了 configure = "参数怎么改都没用"）。
+        let (settings, action, noun, target) = self.channel_descriptor();
+
+        // 事件通道必须在 `open` **之前**建好：`open` 一旦返回，后台线程就可能
+        // 开始投事件，而事件的接收端只能建立一次（漏了这一步表现为"连上了但
+        // 收不到数据"，很难查）。
+        let (event_tx, event_rx) = mpsc::channel::<ChannelEvent>();
+
+        // 失败原因先攒在局部变量里：下面 `channel` 持有 `self.channel` 的可变借用，
         // 而落笔用的 `push_receive_note` 需要 `&mut self`，两个借用不能重叠。
         let mut failure: Option<String> = None;
-
         {
-            let serial = self.serial.as_mut().unwrap();
-
-            // 把当前 UI 选择的参数应用到串口
-            let settings = SerialConfig {
-                port: self.selected_port.clone(),
-                baud_rate: self.baud_rate,
-                data_bits: self.data_bits,
-                stop_bits: self.stop_bits,
-                parity: self.parity,
-                flow_control: self.flow_control,
-            };
-            if let Err(e) = serial.configure(&settings) {
-                failure = Some(format!("设置串口参数失败: {e}\n"));
-            } else {
-                let (event_tx, event_rx) = mpsc::channel::<ChannelEvent>();
-                match serial.open(event_tx) {
-                    Ok(()) => self.event_rx = Some(event_rx),
-                    Err(e) => failure = Some(format!("打开串口失败: {e}\n")),
-                }
+            let channel = self.channel.as_mut().expect("上一段已保证通道存在");
+            if let Err(e) = channel.configure(&*settings) {
+                failure = Some(format!("设置{noun}参数失败: {e}\n"));
+            } else if let Err(e) = channel.open(event_tx) {
+                failure = Some(format!("{action}失败: {e}\n"));
             }
         }
-
         if let Some(msg) = failure {
             self.push_receive_note(msg);
             return;
         }
 
+        self.event_rx = Some(event_rx);
         self.connected = true;
-        self.last_opened_port = Some(self.selected_port.clone());
+        if self.connection_kind.uses_serial_settings() {
+            // `last_opened_port` 只对串口有意义（自动重连的"回到哪个端口"）
+            self.last_opened_port = Some(self.selected_port.clone());
+        }
 
-        let open_msg = format!("已打开 {}\n", self.selected_port);
+        // 成功的措辞按传输类型分叉：UDP 说"绑定"而不是"连接"——它没有连接。
+        let open_msg = match self.connection_kind {
+            ConnectionKind::Serial => format!("已打开 {target}\n"),
+            ConnectionKind::TcpClient => format!("已连接 {target}\n"),
+            ConnectionKind::Udp => format!("UDP 已绑定，目标 {target}\n"),
+        };
         self.display_spans.push(ColoredSpan {
             text: open_msg.clone(),
             style: AnsiStyle {
@@ -363,29 +466,151 @@ impl ComTool {
         self.push_receive_note(open_msg);
     }
 
-    pub fn close_port(&mut self) {
-        if let Some(serial) = &mut self.serial {
-            let _ = serial.close();
+    /// 建连接的前置条件是否满足。
+    ///
+    /// 唯一的判定入口：`open_connection` 与侧边栏的「连接」按钮都靠它决定"这一下
+    /// 点下去有没有意义"，两处各写一遍必然出现"按钮亮着但点了没反应"。
+    pub fn connection_ready(&self) -> bool {
+        if self.connection_kind.uses_net_settings() {
+            !self.net_peer_label().is_empty()
+        } else {
+            !self.selected_port.is_empty()
+        }
+    }
+
+    /// 造一个**崭新**的、还没打开的通道对象。
+    fn new_channel(&self) -> Box<dyn ByteChannel> {
+        match self.connection_kind {
+            ConnectionKind::Serial => Box::new(SerialChannel::new()),
+            ConnectionKind::TcpClient => Box::new(TcpChannel::new()),
+            ConnectionKind::Udp => Box::new(UdpChannel::new()),
+        }
+    }
+
+    /// 当前连接类型的配置对象，外加提示行要用的措辞。
+    ///
+    /// 返回 `(配置, 动作名, 名词, 目标名)`：
+    ///
+    /// * 动作名用于"打开串口失败" / "连接失败" / "绑定失败"；
+    /// * 名词用于"设置串口参数失败" / "设置TCP参数失败"；
+    /// * 目标名用于失败信息与成功提示（`COM3` / `192.168.1.10:1234`）。
+    ///
+    /// 调用前必须先过 [`ComTool::connection_ready`]，因此这里不再校验前置条件——
+    /// 两个地方各判一次，迟早出现"这里放过了、那里拦住了"。
+    fn channel_descriptor(&self) -> (Box<dyn std::any::Any>, &'static str, &'static str, String) {
+        match self.connection_kind {
+            ConnectionKind::Serial => (
+                Box::new(SerialConfig {
+                    port: self.selected_port.clone(),
+                    baud_rate: self.baud_rate,
+                    data_bits: self.data_bits,
+                    stop_bits: self.stop_bits,
+                    parity: self.parity,
+                    flow_control: self.flow_control,
+                }),
+                "打开串口",
+                self.transport_noun(),
+                self.selected_port.clone(),
+            ),
+            ConnectionKind::TcpClient => (
+                Box::new(self.net_config()),
+                "连接",
+                self.transport_noun(),
+                self.net_peer_label(),
+            ),
+            ConnectionKind::Udp => (
+                Box::new(self.net_config()),
+                "绑定",
+                self.transport_noun(),
+                self.net_peer_label(),
+            ),
+        }
+    }
+
+    /// 当前传输类型在提示行里的名词（`串口` / `TCP` / `UDP`）。
+    ///
+    /// 提示行本身**不翻译**（它们会写进实时日志与导出文件，见 [`crate::strings`]
+    /// 的模块文档），但名词必须跟着传输类型走——否则 TCP 掉线会写一句"串口连接已关闭"，
+    /// 日志一旦发给别人看就是误导。
+    pub fn transport_noun(&self) -> &'static str {
+        match self.connection_kind {
+            ConnectionKind::Serial => "串口",
+            ConnectionKind::TcpClient => "TCP",
+            ConnectionKind::Udp => "UDP",
+        }
+    }
+
+    /// 当前 UI 上的网络参数。
+    pub fn net_config(&self) -> NetConfig {
+        NetConfig {
+            remote_host: self.net_remote_host.clone(),
+            remote_port: self.net_remote_port,
+            local_port: self.net_local_port,
+        }
+    }
+
+    /// 网络对端的显示名（`host:port`），用于提示行与状态回显。
+    ///
+    /// 单独抽出来是因为它出现在三处（连接成功的提示、侧边栏状态、UDP 的绑定
+    /// 说明），三处各拼一遍迟早会出现"一处带端口一处不带"。
+    pub fn net_peer_label(&self) -> String {
+        let host = self.net_remote_host.trim();
+        if host.is_empty() || self.net_remote_port == 0 {
+            return String::new();
+        }
+        format!("{}:{}", host, self.net_remote_port)
+    }
+
+    /// 拆掉当前通道：关掉后台线程、清掉句柄与连接标志、停掉定时发送。
+    ///
+    /// **不写任何提示行**，也不动 `last_opened_port`。这两个"不做"都是刻意的：
+    ///
+    /// * 提示行由调用方决定——[`ComTool::open_connection`] 开头也要拆（换传输类型
+    ///   时），那里写一句"连接已关闭"会让人以为刚才的连接断了；
+    /// * `last_opened_port` 是"用户主动关闭过就不要再自动重连"的依据，
+    ///   只有 [`ComTool::close_connection`] 才该清它。
+    fn teardown_channel(&mut self) {
+        if let Some(mut channel) = self.channel.take() {
+            let _ = channel.close();
         }
 
-        self.serial = None;
+        // 与 `channel` 一起清空：`channel_kind` 描述的是"那个对象是为哪种类型造的"，
+        // 对象没了它就没有意义。留着它还会让下一次 `open_connection` 误判成"可复用"。
+        self.channel_kind = None;
         self.event_rx = None;
-        self.last_opened_port = None;
-        self.last_reconnect_attempt = None;
         self.connected = false;
 
-        // 主动关闭时也要停掉定时发送：否则重连之后它会自己接着发。
+        // 通道没了，定时发送必须一起停：否则重连之后它会自己接着发，
+        // 而用户并不知道是谁在发。
         self.stop_repeat_send();
+    }
+
+    /// 用户主动断开：拆掉通道、清掉"上次连接"的记忆，并在接收区留一条提示。
+    pub fn close_connection(&mut self) {
+        let had_channel = self.channel.is_some() || self.connected;
+        self.teardown_channel();
+
+        // 主动关闭后不该再自动重连，所以把"上次打开的端口"也清掉
+        // （断线走的是另一条路：`receive_data` 只置 `connected = false`）。
+        self.last_opened_port = None;
+        self.last_reconnect_attempt = None;
+
+        if !had_channel {
+            return;
+        }
+
+        // 提示行按传输类型换名词；串口那两个字的原文保持不变（F4 之前就是"串口已关闭"）。
+        let note = format!("{}已关闭\n", self.transport_noun());
 
         // 一次性追加一条彩色提示到彩色日志（不随渲染每帧重复）
         self.display_spans.push(ColoredSpan {
-            text: "串口已关闭\n".to_string(),
+            text: note.clone(),
             style: AnsiStyle {
                 fg: Some(egui::Color32::from_rgb(205, 49, 49)), // 红
                 bold: false,
             },
         });
-        self.push_receive_note("串口已关闭\n".to_string());
+        self.push_receive_note(note);
     }
 
     /// 发送一次。UI 的「发送」按钮、Enter 键、定时发送都走这里——**只有这一条路**。
@@ -433,10 +658,10 @@ impl ComTool {
         self.send_history.record(&self.send_text);
         self.send_history_nav.reset();
 
-        // 同 `open_port`：`serial` 的可变借用还活着时不能调 `push_receive_note`。
+        // 同 `open_connection`：`channel` 的可变借用还活着时不能调 `push_receive_note`。
         let mut failure: Option<String> = None;
-        if let Some(serial) = &mut self.serial
-            && let Err(e) = serial.write(data)
+        if let Some(channel) = &mut self.channel
+            && let Err(e) = channel.write(data)
         {
             failure = Some(format!("发送失败: {e}\n"));
         }
@@ -537,6 +762,10 @@ impl Default for ComTool {
             stop_bits: StopBits::One,
             parity: Parity::None,
             flow_control: FlowControl::None,
+            connection_kind: ConnectionKind::default(),
+            net_remote_host: DEFAULT_REMOTE_HOST.to_string(),
+            net_remote_port: DEFAULT_REMOTE_PORT,
+            net_local_port: 0,
             connected: false,
             receive_text: String::new(),
             send_text: String::new(),
@@ -545,7 +774,8 @@ impl Default for ComTool {
             text_encoding: TextEncoding::default(),
             send_history: SendHistory::default(),
             repeat_interval_ms: DEFAULT_REPEAT_INTERVAL_MS,
-            serial: None,
+            channel: None,
+            channel_kind: None,
             event_rx: None,
             last_reconnect_attempt: None,
             repeat_send: false,
@@ -902,16 +1132,32 @@ mod tests {
 
     /// 一台"已连接、通道是替身"的应用。
     ///
-    /// 走 `open_port()` 而不是手工拼状态：这样 `configure` → `open` → 建立事件通道
-    /// 这一段真实路径也被覆盖，而它是不需要串口硬件就能跑的。
+    /// 走 [`ComTool::open_connection`] 而不是手工拼状态：这样 `configure` → `open` →
+    /// 建立事件通道这一段真实路径也被覆盖，而它是不需要串口硬件就能跑的。
+    ///
+    /// 替身能被复用的前提是 `channel_kind` 与 `connection_kind` 对得上——两个字段
+    /// 一起写，正是 `open_connection` 里那条复用规则的显式表达（见 `channel_kind`
+    /// 的注释：类型一致才复用，否则会当场造一个真串口）。
     fn connected_app() -> (ComTool, FakeHandle) {
+        connected_app_as(ConnectionKind::Serial)
+    }
+
+    /// 同上，但连接类型可指定（F4）。
+    ///
+    /// 替身通道对任何 `configure` 都点头，所以同一个替身可以扮串口、TCP 或 UDP——
+    /// 这正是"换了传输而接收/发送链路不变"的可测形式。
+    fn connected_app_as(kind: ConnectionKind) -> (ComTool, FakeHandle) {
         let (channel, handle) = FakeChannel::new();
         let mut app = ComTool {
-            serial: Some(Box::new(channel)),
+            channel: Some(Box::new(channel)),
+            channel_kind: Some(kind),
+            connection_kind: kind,
             selected_port: "COM_TEST".to_string(),
+            net_remote_host: "127.0.0.1".to_string(),
+            net_remote_port: 1234,
             ..ComTool::default()
         };
-        app.open_port();
+        app.open_connection();
         assert!(app.connected, "替身通道应当能打开成功");
         assert!(app.event_rx.is_some(), "打开后必须有事件通道");
         (app, handle)
@@ -1150,13 +1396,203 @@ mod tests {
 
     /// 主动关闭同样要停掉，否则重连之后它会自己接着发。
     #[test]
-    fn closing_the_port_stops_repeat_send() {
+    fn closing_the_connection_stops_repeat_send() {
         let (mut app, _handle) = connected_app();
         app.repeat_send = true;
 
-        app.close_port();
+        app.close_connection();
 
         assert!(!app.connected);
         assert!(!app.repeat_send);
+    }
+
+    // ---------- 连接类型分叉（F4） ----------
+
+    #[test]
+    fn only_serial_uses_the_serial_settings() {
+        assert!(ConnectionKind::Serial.uses_serial_settings());
+        assert!(!ConnectionKind::Serial.uses_net_settings());
+        for kind in [ConnectionKind::TcpClient, ConnectionKind::Udp] {
+            assert!(!kind.uses_serial_settings(), "{kind:?} 不该显示串口参数");
+            assert!(kind.uses_net_settings());
+        }
+    }
+
+    /// 提示行里的名词必须跟着传输类型走。
+    ///
+    /// 这些提示会写进实时日志与导出文件，TCP 掉线却写一句"串口连接已关闭"
+    /// 是把日志发给别人看时的误导。
+    #[test]
+    fn transport_noun_follows_the_connection_kind() {
+        let mut app = ComTool {
+            connection_kind: ConnectionKind::Serial,
+            ..ComTool::default()
+        };
+
+        assert_eq!(app.transport_noun(), "串口");
+        app.connection_kind = ConnectionKind::TcpClient;
+        assert_eq!(app.transport_noun(), "TCP");
+        app.connection_kind = ConnectionKind::Udp;
+        assert_eq!(app.transport_noun(), "UDP");
+    }
+
+    #[test]
+    fn connection_ready_tracks_the_selected_transport() {
+        let mut app = ComTool {
+            selected_port: String::new(),
+            ..ComTool::default()
+        };
+
+        // 串口语义：没选端口就不该允许连接
+        app.connection_kind = ConnectionKind::Serial;
+        assert!(!app.connection_ready());
+        app.selected_port = "COM7".to_string();
+        assert!(app.connection_ready());
+
+        // 网络语义：默认的 127.0.0.1:1234 就是完整目标
+        app.connection_kind = ConnectionKind::Udp;
+        assert!(app.connection_ready());
+        app.net_remote_host = "   ".to_string();
+        assert!(!app.connection_ready(), "地址只有空白等于没填");
+        app.net_remote_host = "127.0.0.1".to_string();
+        app.net_remote_port = 0;
+        assert!(!app.connection_ready(), "端口 0 不是合法目标");
+    }
+
+    /// 前置条件不满足时**什么都不做**——不建通道、不置 `connected`、也不留提示。
+    ///
+    /// 这条比"能连上"更要紧：乐观置位会让界面显示"已连接"，而实际上一个字节
+    /// 都发不出去，用户只会去怀疑设备。
+    #[test]
+    fn net_connection_without_a_target_does_nothing() {
+        let mut app = ComTool {
+            connection_kind: ConnectionKind::TcpClient,
+            net_remote_host: String::new(),
+            ..ComTool::default()
+        };
+
+        app.open_connection();
+
+        assert!(!app.connected);
+        assert!(app.channel.is_none(), "参数不全时连通道对象都不该造");
+        assert!(app.receive_text.is_empty(), "什么都没发生，就不该留下提示");
+    }
+
+    /// 通道对象**同类型复用**：串口掉线后重新连接走的就是这条路。
+    #[test]
+    fn a_dropped_connection_reuses_the_same_channel_object() {
+        let (mut app, handle) = connected_app();
+
+        handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
+        app.receive_data();
+
+        assert!(!app.connected);
+        assert!(
+            app.channel.is_some(),
+            "掉线不拆通道对象：重连要在同一个句柄上再 open 一次"
+        );
+        assert_eq!(app.channel_kind, Some(ConnectionKind::Serial));
+
+        app.open_connection();
+
+        assert!(app.connected, "复用同一条通道应当能重新打开");
+        assert_eq!(handle.write_count(), 0, "重新打开不该顺手发数据");
+    }
+
+    /// 换传输类型必须**拆掉重建**：旧对象是另一种传输，留着它就会留下一个
+    /// 没人管的后台线程。
+    ///
+    /// 这里让 TCP 去连一个必然没人监听的端口，顺带验证"连接失败不置 `connected`"。
+    #[test]
+    fn switching_connection_kind_rebuilds_the_channel() {
+        let (mut app, handle) = connected_app();
+        app.close_connection();
+        assert!(app.channel_kind.is_none(), "拆掉通道后类型标记必须一起清空");
+
+        app.connection_kind = ConnectionKind::TcpClient;
+        app.net_remote_host = "127.0.0.1".to_string();
+        app.net_remote_port = 1; // 保留端口，不会有服务在听
+
+        app.open_connection();
+
+        assert!(!app.connected, "连不上就不能报告为已连接");
+        assert_eq!(app.channel_kind, Some(ConnectionKind::TcpClient));
+        assert!(
+            app.receive_text.contains("连接失败"),
+            "失败原因要能被看见：{}",
+            app.receive_text
+        );
+        assert_eq!(
+            handle.write_count(),
+            0,
+            "替身通道已被换掉，一个字节都不该经过它"
+        );
+    }
+
+    /// 用户主动关闭的提示词按类型分叉，但**串口的原文不能被改动**。
+    #[test]
+    fn user_close_note_uses_the_transport_noun() {
+        let (mut app, _handle) = connected_app();
+        app.close_connection();
+        assert!(
+            app.receive_text.contains("串口已关闭"),
+            "{}",
+            app.receive_text
+        );
+        assert!(app.channel_kind.is_none());
+
+        let (mut app, _handle) = connected_app_as(ConnectionKind::TcpClient);
+        app.close_connection();
+        assert!(
+            app.receive_text.contains("TCP已关闭"),
+            "{}",
+            app.receive_text
+        );
+    }
+
+    /// 对端主动关闭时，提示行说的是**当前传输**在关闭，而不是串口。
+    #[test]
+    fn closed_event_names_the_transport() {
+        let (mut app, handle) = connected_app_as(ConnectionKind::TcpClient);
+
+        handle.emit(ChannelEvent::Closed);
+        app.receive_data();
+
+        assert!(!app.connected);
+        assert!(
+            app.receive_text.contains("TCP连接已关闭"),
+            "{}",
+            app.receive_text
+        );
+    }
+
+    /// UDP 的措辞是"绑定"而不是"连接"：它没有连接，也不会发现对端掉线。
+    #[test]
+    fn udp_open_reports_bound_and_never_claims_connected() {
+        let (app, _handle) = connected_app_as(ConnectionKind::Udp);
+
+        assert!(app.connected);
+        assert!(
+            app.receive_text.contains("UDP 已绑定"),
+            "UDP 只能用「绑定」这个词：{}",
+            app.receive_text
+        );
+    }
+
+    /// 自动重连依赖 `last_opened_port`，是串口语义——TCP / UDP 必须原样返回。
+    ///
+    /// 若哪天有人把这个判断去掉，对端没启动时会攒出一批半死不活的 socket，
+    /// 而界面上完全看不出来它在重试。
+    #[test]
+    fn auto_reconnect_is_serial_only() {
+        let (mut app, handle) = connected_app_as(ConnectionKind::TcpClient);
+
+        handle.emit(ChannelEvent::Closed);
+        app.receive_data();
+        assert!(!app.connected);
+
+        app.auto_reconnect();
+
+        assert!(!app.connected, "TCP 不该自动重连");
     }
 }

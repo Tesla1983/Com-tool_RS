@@ -136,6 +136,30 @@ strings! {
     parity: "校验", "Parity";
     flow_control: "流控", "Flow control";
 
+    // —— sidebar.rs：连接类型与网络参数（F4）——
+    connection_type: "连接类型", "Connection";
+    conn_serial: "串口", "Serial";
+    conn_tcp: "TCP 客户端", "TCP client";
+    conn_udp: "UDP", "UDP";
+    connection_info: "连接信息", "Connection info";
+    target_label: "目标: {}", "Target: {}";
+    remote_host_field: "远端地址", "Remote host";
+    remote_host_hint: "IP 或域名", "IP or hostname";
+    remote_port_field: "远端端口", "Remote port";
+    local_port_field: "本地端口", "Local port";
+    local_port_line: "本地端口: {}", "Local port: {}";
+    local_port_hint: "0 = 由系统分配", "0 = assigned by the system";
+    connect_button: "连接", "Connect";
+    disconnect_button: "断开", "Disconnect";
+    bind_button: "绑定", "Bind";
+    status_bound: "状态: 已绑定", "Status: bound";
+    status_unbound: "状态: 未绑定", "Status: not bound";
+    switch_kind_needs_disconnect:
+        "连接中不能切换连接类型：请先断开，否则界面显示的参数与实际打开的通道会对不上",
+        "Cannot switch the connection type while connected — disconnect first, or the shown parameters will not match the open channel";
+    need_port_to_connect: "请先选择端口", "Select a port first";
+    need_target_to_connect: "请先填写目标地址与端口", "Enter a target host and port first";
+
     // —— sidebar.rs：日志操作 ——
     clear_log: "清空日志", "Clear log";
     export_log: "导出日志", "Export log";
@@ -483,6 +507,8 @@ mod tests {
             (s.version_label, e.version_label, 1),
             (s.settings_dir, e.settings_dir, 1),
             (s.port_label, e.port_label, 1),
+            (s.target_label, e.target_label, 1),
+            (s.local_port_line, e.local_port_line, 1),
             (s.baud_label, e.baud_label, 1),
             (s.rx_bytes_label, e.rx_bytes_label, 1),
             (s.display_mode_line, e.display_mode_line, 1),

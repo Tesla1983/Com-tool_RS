@@ -55,7 +55,7 @@ pub fn save(storage: &mut dyn eframe::Storage, app: &ComTool) {
 /// 最需要被固定下来的不变量。
 pub fn restore_runtime_state(app: &mut ComTool) {
     // 串口句柄与事件通道都活不过进程边界；启动时一律处于未连接状态。
-    app.serial = None;
+    app.channel = None;
     app.event_rx = None;
     app.connected = false;
     app.last_reconnect_attempt = None;
@@ -124,7 +124,7 @@ fn normalize_panel_visibility(app: &mut ComTool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Language, ThemeChoice};
+    use crate::app::{ConnectionKind, Language, ThemeChoice};
     use crate::receive::{AnsiStyle, ColoredSpan, TextEncoding, TimestampPrefix};
     use crate::send::{SendFormat, SendHistory, SendLineEnding};
     // 调用 `get_string`/`set_string` 需要 trait 本身在作用域内
@@ -167,6 +167,13 @@ mod tests {
             stop_bits: StopBits::Two,
             parity: Parity::Even,
             flow_control: FlowControl::Hardware,
+            // F4 新增的连接类型与网络参数同样是"用户偏好"，必须能往返。
+            // 这里刻意选**非默认**的组合（默认是 Serial / 127.0.0.1 / 1234 / 0），
+            // 否则"字段根本没写进存档"这个缺陷会被默认值掩盖过去。
+            connection_kind: ConnectionKind::Udp,
+            net_remote_host: "192.168.1.50".to_string(),
+            net_remote_port: 8888,
+            net_local_port: 12345,
             send_text: "AT+RST\n".to_string(),
             hex_view: true,
             color_view: true,
@@ -225,6 +232,11 @@ mod tests {
         assert_eq!(restored.stop_bits, original.stop_bits);
         assert_eq!(restored.parity, original.parity);
         assert_eq!(restored.flow_control, original.flow_control);
+        // F4 新增的连接类型与网络参数
+        assert_eq!(restored.connection_kind, original.connection_kind);
+        assert_eq!(restored.net_remote_host, original.net_remote_host);
+        assert_eq!(restored.net_remote_port, original.net_remote_port);
+        assert_eq!(restored.net_local_port, original.net_local_port);
         assert_eq!(restored.send_text, original.send_text);
         assert_eq!(restored.hex_view, original.hex_view);
         assert_eq!(restored.color_view, original.color_view);
@@ -281,7 +293,7 @@ mod tests {
         let restored = round_trip(&saved);
 
         assert!(!restored.connected, "连接状态不得跨进程延续");
-        assert!(restored.serial.is_none(), "串口句柄必须重建");
+        assert!(restored.channel.is_none(), "通道句柄必须重建");
         assert!(restored.event_rx.is_none(), "事件通道必须重建");
         assert!(!restored.show_settings, "设置窗口不该自动弹出");
         assert!(!restored.show_info, "信息窗口不该自动弹出");
@@ -323,7 +335,11 @@ mod tests {
         assert_eq!(restored.data_bits, DataBits::Eight);
         assert_eq!(restored.parity, Parity::None);
         assert!(!restored.hex_view);
-        assert!(restored.serial.is_none());
+        assert!(restored.channel.is_none());
+        assert!(
+            restored.channel_kind.is_none(),
+            "通道不存在时类型标记也必须清空"
+        );
     }
 
     /// P6 删掉了字段 `check_update_on_start`（版本检查被整体取消），而**旧存档里
@@ -353,7 +369,11 @@ mod tests {
         let restored = load(Some(&storage));
 
         assert!(!restored.connected);
-        assert!(restored.serial.is_none());
+        assert!(restored.channel.is_none());
+        assert!(
+            restored.channel_kind.is_none(),
+            "通道不存在时类型标记也必须清空"
+        );
         assert_eq!(restored.baud_rate, crate::serial_impl::DEFAULT_BAUD_RATE);
     }
 
@@ -371,7 +391,7 @@ mod tests {
     fn default_state_is_usable() {
         let mut app = ComTool::default();
         restore_runtime_state(&mut app);
-        assert!(app.serial.is_none());
+        assert!(app.channel.is_none());
         assert!(!app.connected);
         assert!(app.visible_panel_count() > 0);
         assert_eq!(app.max_log_chars, crate::app::DEFAULT_MAX_LOG_CHARS);

@@ -12,6 +12,7 @@ mod chart;
 mod communicationtrait;
 mod config;
 mod log_file;
+mod net_impl;
 mod panels;
 mod receive;
 mod send;

@@ -930,6 +930,12 @@ impl ComTool {
         let mut notes: Vec<String> = Vec::new();
         let mut channel_down = false;
 
+        // 名词先取好：`if let Some(rx) = &self.event_rx` 那段里 `self` 正被借走，
+        // 在循环体内再调方法要跟 `self.connected = false` 的字段写操作抢借用。
+        // 提示行本身不翻译（见 `crate::strings` 的模块文档），但名词必须跟着
+        // 传输类型走——否则 TCP 掉线会写一句"串口连接已关闭"。
+        let noun = self.transport_noun();
+
         if let Some(rx) = &self.event_rx {
             while let Ok(event) = rx.try_recv() {
                 match event {
@@ -937,12 +943,12 @@ impl ComTool {
                         received.extend_from_slice(&data);
                     }
                     ChannelEvent::Failed(msg) => {
-                        notes.push(format!("串口错误: {msg}\n"));
+                        notes.push(format!("{noun}错误: {msg}\n"));
                         self.connected = false;
                         channel_down = true;
                     }
                     ChannelEvent::Closed => {
-                        notes.push("串口连接已关闭\n".to_string());
+                        notes.push(format!("{noun}连接已关闭\n"));
                         self.connected = false;
                         channel_down = true;
                     }

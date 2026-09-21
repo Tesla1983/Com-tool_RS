@@ -25,8 +25,8 @@ pub enum ChannelEvent {
     /// 连接正常终止（对端主动关闭）。
     ///
     /// 串口通道不会产生该事件——USB 拔出、设备断电在驱动层表现为读错误，
-    /// 统一走 `Failed`。该分支保留给对端能够主动握手下线的传输（如 TCP）。
-    #[allow(dead_code)]
+    /// 统一走 `Failed`。该事件由**对端能够主动握手/优雅下线**的传输发出
+    /// （TCP 的 `read` 返回 0 就是它）。UDP 无连接，同样不会产生。
     Closed,
 
     /// 通道发生错误。字符串用于向用户展示，不保证机器可解析。
@@ -51,6 +51,16 @@ pub trait ByteChannel: Send {
     /// 显式驱动，不依赖这个标志位。
     fn is_active(&self) -> bool;
 
+    /// 通道实际绑定到的本地地址；这类概念对它不成立、或实现方拿不到时返回 `None`。
+    ///
+    /// 目前只有 UDP 会实现：UDP 的本地端口允许配 0（由系统分配），而用户**必须**
+    /// 知道最终分到了哪个端口，否则不知道该让设备往哪回包。串口没有"本地地址"，
+    /// TCP 的本地端口由内核在 `connect` 时挑、对调试也少有用处——默认实现返回
+    /// `None`，免得每个实现都要编一个假值出来。
+    fn local_addr(&self) -> Option<std::net::SocketAddr> {
+        None
+    }
+
     /// 把一段字节交给后台线程发出。调用方不必等待写入完成。
     fn write(&mut self, bytes: Vec<u8>) -> io::Result<()>;
 
@@ -64,6 +74,56 @@ pub trait ByteChannel: Send {
             io::ErrorKind::Unsupported,
             "该通道类型不接受运行时配置",
         ))
+    }
+}
+
+/// 后台线程实现方共用的脚手架。
+///
+/// 三个实现（串口 / TCP / UDP）的后台线程结构是同一个：独占一个 IO 句柄，
+/// 每轮「读一次 → 推进一次写 → 排空指令队列」，用 [`WorkerCommand`] 停机、
+/// 用 [`StateGuard`] 保证状态归位。这些**不是"看起来像"就该复制的样板**——
+/// 「线程退出后状态必须归位」「`Halt` 在任何时刻都要能被看到」是三条实现共有的
+/// 硬约定（见本模块文档第 3、4 条），复制三份迟早有一份走偏。
+pub(crate) mod worker {
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    /// UI 侧投给后台线程的指令。
+    pub(crate) enum WorkerCommand {
+        /// 把这段字节发给对端。
+        Transmit(Vec<u8>),
+        /// 结束工作循环并返回。
+        Halt,
+    }
+
+    /// `is_active` 的取值。用 `u8` 而不是 `bool`，是为了给将来可能出现的中间态
+    /// （例如「正在打开」）留位置，同时保持无锁读取。
+    pub(crate) const IDLE: u8 = 0;
+    pub(crate) const ACTIVE: u8 = 1;
+
+    /// 后台线程退出时统一把状态归位。
+    ///
+    /// 用 Drop 守卫而不是在每个 `return` 前手写一次 `store`：新增退出分支时
+    /// 不会漏掉置位，`is_active` 也就不可能停留在「线程已死但仍报活动」。
+    pub(crate) struct StateGuard(pub(crate) Arc<AtomicU8>);
+
+    impl Drop for StateGuard {
+        fn drop(&mut self) {
+            self.0.store(IDLE, Ordering::Release);
+        }
+    }
+
+    /// 驱动在「暂时无数据 / 暂时无法收发」时返回的错误种类。这些不是故障。
+    ///
+    /// 只列**所有传输共有**的三种。某个传输特有的可忽略错误（例如 Windows 上
+    /// connected UDP socket 把 ICMP port unreachable 报成 `ConnectionReset`）
+    /// 由该实现自己补充，不要把特例塞进来——否则串口那边也会跟着忽略一个真故障。
+    pub(crate) fn is_transient(err: &io::Error) -> bool {
+        matches!(
+            err.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        )
     }
 }
 
@@ -133,9 +193,16 @@ pub(crate) mod fake {
         }
 
         /// 往被测代码的事件通道里灌一个事件（通道未打开时什么也不做）。
+        ///
+        /// `Failed` / `Closed` 会顺带把替身置回**非活动**：真实的实现里后台线程退出
+        /// 时 `StateGuard` 必然把 `is_active` 归位（见本模块文档第 3 条），替身不跟着
+        /// 做就会在"掉线后重新 `open`"这条路径上给出假的 `AlreadyExists` 错误。
         pub(crate) fn emit(&self, event: ChannelEvent) {
-            let sink = self.shared.lock().expect("锁未被毒化").sink.clone();
-            if let Some(sink) = sink {
+            let mut shared = self.shared.lock().expect("锁未被毒化");
+            if matches!(event, ChannelEvent::Failed(_) | ChannelEvent::Closed) {
+                shared.active = false;
+            }
+            if let Some(sink) = shared.sink.clone() {
                 let _ = sink.send(event);
             }
         }
@@ -173,7 +240,7 @@ pub(crate) mod fake {
         }
 
         /// 替身接受任何配置：被测代码传进来的是串口参数，而替身不关心内容——
-        /// 拒绝配置会让 `open_port` 走失败分支，测不到后面的链路。
+        /// 拒绝配置会让 `open_connection` 走失败分支，测不到后面的链路。
         fn configure(&mut self, _settings: &dyn std::any::Any) -> io::Result<()> {
             Ok(())
         }

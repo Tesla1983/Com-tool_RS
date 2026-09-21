@@ -16,7 +16,7 @@
   默认值、配置、测试或脚本；不得停止/杀掉/禁用任何可能占用 COM3 的进程、服务或驱动。
   对 COM3 只能"看"（不打开端口的只读枚举，且需先说明理由），不能"碰"。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。179 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。207 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
 - 一次批准只对当次生效，不构成对后续轮次的授权。
@@ -53,7 +53,7 @@
 |---|---|---|---|
 | **状态层** | `struct ComTool`（`src/app.rs`） | 定义功能所需的跨帧/跨调用状态字段 | `connected`、`display_spans`、`color_view` |
 | **初始化层** | `impl Default for ComTool`（`src/app.rs`） | 给所有状态字段设默认值（漏了会编译报错） | `color_view: false`、`baud_rate: DEFAULT_BAUD_RATE` |
-| **业务逻辑层** | `impl ComTool`（`src/app.rs` / `src/receive.rs` / `src/log_file.rs` / `src/chart.rs`） | 串口生命周期、数据解析、布局构建、日志写盘、数值流解析 | `open_port()`、`receive_data()`、`build_layout()`、`start_logging()` |
+| **业务逻辑层** | `impl ComTool`（`src/app.rs` / `src/receive.rs` / `src/log_file.rs` / `src/chart.rs`） | 连接生命周期（串口 / TCP / UDP）、数据解析、布局构建、日志写盘、数值流解析 | `open_connection()`、`receive_data()`、`build_layout()`、`start_logging()` |
 | **UI 层** | `impl eframe::App for ComTool`（`src/app.rs`）+ `show_sidebar()`（`src/sidebar.rs`） | 绘制控件并把 UI 事件接到业务方法上 | `ui.button("发送").clicked()` |
 | **持久化层** | `src/config.rs` | 决定哪些字段落盘、哪些在启动时重建 | `load()`、`save()`、`restore_runtime_state()` |
 
@@ -63,22 +63,25 @@
 |---|---|
 | `src/main.rs` | 入口；`APP_TITLE` 常量；字体回退链配置；`eframe::run_native`；把 `app_icon::generate()` 挂进 `ViewportBuilder` |
 | `src/app_icon.rs` | 应用图标：256×256 圆角方波图标，代码绘制、零资源文件、11 条单元测试，不依赖 GUI |
-| `src/app.rs` | `ComTool` 状态、`Default`、`Language` / `ThemeChoice`、串口生命周期、视图级辅助方法、`eframe::App` 顶层编排 |
+| `src/app.rs` | `ComTool` 状态、`Default`、`Language` / `ThemeChoice` / `ConnectionKind`、连接生命周期（`open_connection()` 按类型分叉）、视图级辅助方法、`eframe::App` 顶层编排 |
 | `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`（含 `TextEncoding` 增量解码）、字节级可视化、可选时间戳前缀（`TimestampPrefix`）、三种视图渲染、`max_log_chars` FIFO 淘汰 |
 | `src/send.rs` | 发送侧纯逻辑：`parse_hex()`、`encode_text()` / `build_payload()`、`SendHistory` / `HistoryNav`、定时发送间隔钳制；**不依赖 `egui` 与串口**，因此可直接单测 |
 | `src/strings.rs` | 界面文案表：`Strings` + `ZH` / `EN` + `Language::strings()`；`fill()` 填充 `{}` 模板；源码级守卫测试（UI 源码不许硬编码中文） |
 | `src/log_file.rs` | 实时文件日志：后台写盘线程（`LogSink`）、文件名模板渲染、同名防截断、待写队列上限 |
 | `src/chart.rs` | 实时图表数据层：原始字节 → 多通道数值序列（`ChartData`）、跨包分片、样本 FIFO、非数值计数；不依赖 `egui` |
-| `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态 |
+| `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态；连接类型单选 + 「串口参数 / 网络参数」双分支（F4） |
 | `src/panels/mod.rs` | 面板模块声明 + 无头 UI 冒烟测试（含英文界面） |
 | `src/panels/menu_bar.rs` | 顶部菜单栏（文件 / 设置 / 视图 / 文本 / 发送）；返回 `MenuAction`；各档单选（主题 / 时间戳 / 编码 / 发送格式与行尾）共用一处定义 |
 | `src/panels/settings.rs` | 设置窗口：把用户偏好接到真正的控件上 |
 | `src/panels/info.rs` | 信息窗口：版本、技术栈、存档路径、快捷键 |
 | `src/panels/chart.rs` | 实时图表面板：`egui_plot` 绘制、图例、绘制点抽样（`points_for_drawing`） |
 | `src/config.rs` | 持久化策略 + 启动时不变量修复 |
-| `src/communicationtrait.rs` | `ByteChannel` trait 与 `ChannelEvent`；附 `#[cfg(test)] mod fake` 通道替身 |
+| `src/communicationtrait.rs` | `ByteChannel` trait（`open` / `close` / `is_active` / `write` / `configure` / `local_addr`）与 `ChannelEvent`；三者共用的后台线程脚手架 `worker`（`WorkerCommand` / `StateGuard` / `is_transient`）；附 `#[cfg(test)] mod fake` 通道替身 |
 | `src/serial_impl/channel.rs` | 串口实现：后台线程 + 命令/事件双通道 |
 | `src/serial_impl/config.rs` | `SerialConfig` 与波特率档位 |
+| `src/net_impl/config.rs` | `NetConfig`：远端地址 / 端口 / UDP 本地端口 + `validate()` / `remote_addr()` |
+| `src/net_impl/tcp.rs` | `TcpChannel`：**同步 connect**、`set_nodelay`、对端关闭发 `ChannelEvent::Closed` |
+| `src/net_impl/udp.rs` | `UdpChannel`：绑 `0.0.0.0:local_port` 后 `connect` 固化对端；零长度数据报不是 EOF |
 
 ---
 
@@ -313,8 +316,10 @@ impl eframe::App for ComTool {
 
 | 功能 | 状态字段 | 业务方法 | UI 入口 |
 |---|---|---|---|
-| 打开/关闭串口 | `connected`、`serial`、`event_rx`、`last_opened_port` | `open_port()` / `close_port()`（`app.rs`） | 侧边栏「打开串口」/「关闭串口」按钮 |
-| 自动重连 | `last_reconnect_attempt` | `auto_reconnect()`（`app.rs`） | 无（每帧自动尝试，500 ms 节流） |
+| 建立/断开连接 | `connected`、`channel`、`channel_kind`、`event_rx`、`last_opened_port` | `open_connection()` / `close_connection()` / `teardown_channel()`（`app.rs`） | 侧边栏「打开串口 / 连接 / 绑定」→「关闭串口 / 断开」按钮 |
+| 连接类型（串口 / TCP / UDP） | `connection_kind` | `ConnectionKind`（`app.rs`）；参数控件分叉在 `sidebar.rs` | 侧边栏「连接类型」单选（**连接中锁定**） |
+| 网络目标与本地端口 | `net_remote_host`、`net_remote_port`、`net_local_port` | `net_config()` / `net_peer_label()`（`app.rs`） | 侧边栏「远端地址 / 远端端口」；UDP 另加「本地端口」 |
+| 自动重连 | `last_reconnect_attempt` | `auto_reconnect()`（`app.rs`，**只对串口生效**） | 无（每帧自动尝试，500 ms 节流） |
 | 接收数据显示 | `display_spans`、`receive_text`、`decoder` | `receive_data()`、`build_layout()`（`receive.rs`） | 接收区滚动区 + 「颜色」勾选框 |
 | 字节查看视图 | `ascii_text`、`ascii_spans` | `render_ascii_receive()`（`receive.rs`） | 「字节查看」勾选框（与「HEX 接收」互斥，见 §6 第 28 条） |
 | HEX 模式 | `hex_view` | `receive_data()` 的 HEX 分支 | 「HEX / 文本」勾选框；与「字节查看」互斥，规则在 `resolve_display_mode()` |
@@ -367,7 +372,7 @@ impl eframe::App for ComTool {
 
 5. **渲染用即时数据更新**：`ui()` 开头调用 `self.receive_data()` 拉取最新数据（或由 `render_color_receive` 内部调用），配合 `request_repaint_after` 实现持续刷新。
 
-6. **一次性提示不要每帧追加**：类似"串口已打开/已关闭"这类提示，应在事件发生（如 `open_port`/`close_port`）时追加到 `display_spans`，而不是在渲染函数里按 `self.connected` 每帧写入，避免日志里不断重复。
+6. **一次性提示不要每帧追加**：类似"串口已打开/已关闭"这类提示，应在事件发生（如 `open_connection`/`close_connection`）时追加到 `display_spans`，而不是在渲染函数里按 `self.connected` 每帧写入，避免日志里不断重复。
 
 7. **三种接收视图共用 `SCROLL_AREA_ID`**：普通文本、彩色、字节查看的 `ScrollArea` 使用同一个 `id_salt`，切换模式时滚动位置保持延续；`clear_receive()` 也用它重置滚动状态。
 
@@ -391,7 +396,7 @@ impl eframe::App for ComTool {
 
 16. **UI 冒烟测试用 `egui::__run_test_ui`**：`src/panels/mod.rs` 底部已有先例（菜单栏、设置/信息窗口、三种接收视图、侧边栏、图表面板）。它不需要窗口、不需要串口，能覆盖"面板嵌套顺序、控件 ID 冲突、布局调用"这类只有运行期才暴露的问题，但也**只能**证明"画得出来不 panic"，外观仍需人工确认。
 
-17. **实时文件日志的写盘只能在后台线程**（`log_file.rs::worker_main`）：UI 线程不许对日志文件做任何 `write`。停机靠投 `Halt`，且 `Drop` 里必须用 **`try_send`**——队列满时 `send` 会阻塞，一个卡住的磁盘就能让"停止记录"把 UI 线程永久挂住。文件由 UI 线程 `File::create` 打开后再交给线程：这是刻意不同于 `open_port()`「先乐观置位、失败再回滚」的写法（那个假阳性缺陷还没修），不要改回去。
+17. **实时文件日志的写盘只能在后台线程**（`log_file.rs::worker_main`）：UI 线程不许对日志文件做任何 `write`。停机靠投 `Halt`，且 `Drop` 里必须用 **`try_send`**——队列满时 `send` 会阻塞，一个卡住的磁盘就能让"停止记录"把 UI 线程永久挂住。文件由 UI 线程 `File::create` 打开后再交给线程：这是刻意不同于 `open_connection()` 那种**乐观置位**写法的（串口那条「先乐观置位、失败再回滚」的假阳性缺陷还没修；网络侧靠同步 connect 绕开了它），不要改回去。
 
 18. **接收镜像是"双写"的**：每次追加要么走 `push_receive_note()`（`receive_text` + 日志），要么 `push_str` 之后紧跟 `log_append()`（只进日志）。在 `receive_data` 里直接 `self.receive_text.push_str(...)` 会让日志文件悄悄少一段数据。另外 `&self.event_rx` 的借用活着时不能调用 `&mut self` 方法，所以提示类消息要先攒进 `Vec<String>` 再落笔。
 
@@ -444,3 +449,26 @@ impl eframe::App for ComTool {
     - **GBK 与 GB18030 在 `encoding_rs` 里共用解码器、编码器不同**，所以两档"接收结果相同"，差别只在发送时的可表示字符范围——界面文案必须讲清，否则用户看到两档"好像一样"会犯嘀咕。
     - **UTF-16LE 在 `encoding_rs` 里只支持解码**（它的 `encode()` 会把 UTF-8 字节原样退回），所以小端字节由 `encode_utf16()` + `to_le_bytes()` 手写，且**不加 BOM**。另外 UTF-16LE 不做 ANSI 转义解析（`ESC` 是 `1B 00` 两个字节，按字节找 `0x1B` 会把数据吃掉）。
     - 切换编码时要丢弃上一批残留的半个字符：`AnsiDecoder::sync_encoding()` 与 `config::restore_runtime_state()` 两处都做。
+
+33. **建连接只有一条路**（F4 起）：UI 按钮与自动重连都走 `ComTool::open_connection()`，它按 `connection_kind` 建串口 / TCP / UDP。**但 `configure` → `open` → 接管事件通道这三步只有一处实现**——不要为某种传输另写一遍，漏了事件通道就是"连上了收不到数据"，漏了 `configure` 就是"参数怎么改都没用"。
+    - 前置条件统一由 `connection_ready()` 判定（串口要选了端口，网络要填了目标），提示措辞由 `channel_descriptor()` 给。**前置条件不满足时什么都不做**，尤其不能乐观置位 `connected`。
+    - 串口的 `open()` 只拉起后台线程，失败要等 `Failed` 事件——那是既有的 `connected` 假阳性缺陷（见 `HANDOVER.md` §5）。网络侧刻意反过来：`open()` 返回 `Ok` 就**确实连上了**（TCP 同步 `connect_timeout`，UDP 当场 bind）。
+
+34. **`channel` 与 `channel_kind` 同生共死**（F4 起）：通道对象的复用规则是「**同类型就地复用、换类型拆掉重建**」，判据只有一处：`open_connection()` 开头那句 `channel.is_none() || channel_kind != Some(connection_kind)`；`teardown_channel()` 把两者一起清空。
+    - 这条规则同时服务两件事：串口断线重连是"同一个句柄再 `open` 一次"；`app.rs` 里 20 多条发送链路测试靠的是"注入的替身通道不被拆掉"（`connected_app_as()` 同时写 `channel` 与 `channel_kind`，就是这条规则的显式表达）。
+    - 把复用改回"每次新建"，那些测试会**静默地**从"对着替身"变成"对着一个真串口跑"——不会编译失败，只会开始连真设备。改这里务必重跑 `cargo test`。
+
+35. **串口专属控件必须随连接类型分叉**（F4 起）：端口 / 波特率 / 数据位 / 停止位 / 校验 / 流控在 TCP / UDP 模式下**整段不画**（不是置灰——留着会让人以为对 TCP 也有影响）；「可用串口」栏同样隐藏，只读信息区换成「目标 + 本地端口」。
+    - 连接类型单选在**连接中锁定**：切了之后界面显示的参数就与真正打开的那条通道对不上，而按钮此时是「断开」——点下去断的是**另一种**传输。悬停要给出一句解释。
+    - 按钮文案与动作**必须同向**，并按类型分叉：串口「打开串口 / 关闭串口」、TCP「连接 / 断开」、UDP「绑定 / 断开」。（F4 修掉了一个从上游继承的缺陷：原来已连接时显示「打开串口」却执行关闭。）
+
+36. **UDP 不许说"已连接"**（F4 起）：UDP 没有连接，说"已连接"会让用户以为对端在线、以为掉线会被发现。状态词用「已绑定 / 未绑定」（`status_bound` / `status_unbound`）。
+    - `UdpChannel::is_active()` 的含义只是「本地 socket 已绑定」，注释里写明了这点。
+    - **UDP 的 `Ok(0)` 不是 EOF**（零长度数据报是合法数据报）；**TCP 的 `Ok(0)` 才是对端关闭**，要发 `ChannelEvent::Closed`。两者语义相反，改任一侧时别看错另一侧。
+    - UDP 绑的是 `0.0.0.0:local_port`（不是回环）。`local_port` 允许为 0、由系统分配，因此 `ByteChannel::local_addr()`（**带默认实现**的 trait 方法，只有 UDP 覆盖）把这个实际端口暴露给界面——用户必须知道设备该往哪回包。
+
+37. **提示行里的名词要跟着传输类型走**（F4 起）：`ComTool::transport_noun()` 给出「串口 / TCP / UDP」。提示文本本身**不翻译**（见第 31 条），但 TCP 掉线写一句"串口连接已关闭"是把日志发给别人看时的误导。
+    - `receive_data()` 的 `Closed` / `Failed` 两条分支都用它，取名词要在借用 `self.event_rx` 之前先算好。
+
+38. **网络侧的可忽略错误不要塞进公共函数**（F4 起）：`communicationtrait::worker::is_transient` 只放三种**所有传输共有**的（`TimedOut` / `WouldBlock` / `Interrupted`）。某个传输特有的（Windows 上 connected UDP socket 把 ICMP port unreachable 报成 `ConnectionReset`）由该实现自己补——塞进公共函数会让串口那边也跟着忽略一个真故障。
+    - 共用脚手架（`WorkerCommand` / `StateGuard` / `IDLE` / `ACTIVE`）同理：三条实现共有的硬约定只有一处，不要复制三份。

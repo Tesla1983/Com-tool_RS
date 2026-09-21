@@ -69,32 +69,41 @@ src/
 ├── main.rs                 入口；字体回退链；eframe::run_native；APP_TITLE 常量；挂 `app_icon` 到窗口图标
 ├── app_icon.rs   (540)     256×256 圆角方波图标，代码绘制、零资源文件、11 条单元测试
 │                           （外加 1 条默认跳过的 ASCII 预览测试）
-├── app.rs        (613)     ComTool 状态 + Default + 串口生命周期 + eframe::App 编排
-├── receive.rs   (1465)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
+├── app.rs       (1598)     ComTool 状态 + Default + 连接生命周期（串口 / TCP / UDP 三选一）
+│                           + eframe::App 编排（含 F4 连接类型分叉与发送链路测试）
+├── receive.rs   (1808)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
 │                           + 可选时间戳前缀（TimestampPrefix）+ 三种渲染
 │                           + 显示模式互斥（resolve_display_mode）+ FIFO 淘汰（39 测试）
 ├── chart.rs      (485)     实时图表数据层：多通道数值流解析 + 跨包分片
 │                           + 样本 FIFO 淘汰 + 通道上限（20 测试）
-├── log_file.rs   (801)     实时文件日志：后台写盘线程 + 文件名模板渲染
+├── log_file.rs   (802)     实时文件日志：后台写盘线程 + 文件名模板渲染
 │                           + 同名防截断 + 待写队列上限（14 测试）
-├── sidebar.rs    (298)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
+├── sidebar.rs    (433)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
+│                           + 连接类型单选与「串口参数 / 网络参数」双分支（F4）
 ├── send.rs       (654)     发送侧纯逻辑：HEX 解析 / 行尾 / 编码 / 历史浏览（27 测试）
-├── strings.rs    (664)     界面文案表（中英同宏臂）+ fill（9 测试，含源码级守卫）
-├── config.rs     (497)     持久化策略 + 启动不变量修复（15 测试）
+├── strings.rs    (690)     界面文案表（中英同宏臂）+ fill（9 测试，含源码级守卫）
+├── config.rs     (595)     持久化策略 + 启动不变量修复（15 测试）
 ├── panels/
 │   ├── mod.rs     (208)    面板模块出口（6 条无头 UI 冒烟测试，含英文界面）
 │   ├── menu_bar.rs(257)    顶部菜单栏；返回 MenuAction；主题/时间戳/编码/发送格式单选共用入口
 │   ├── settings.rs(244)    设置窗口（含实时图表与文件日志区块）
 │   ├── chart.rs   (224)    实时图表面板：egui_plot 绘制 + 绘制点抽样（5 测试）
 │   └── info.rs    (52)     信息窗口
-├── communicationtrait.rs (181)  ByteChannel trait + ChannelEvent + `#[cfg(test)] mod fake` 替身
+├── communicationtrait.rs (248)  ByteChannel trait（open/close/is_active/write/configure/local_addr）
+│                           + ChannelEvent + 三者共用的后台线程脚手架 `worker`
+│                           + `#[cfg(test)] mod fake` 替身
 ├── serial_impl/
-│   ├── channel.rs (368)    串口后台线程实现（6 测试）
+│   ├── channel.rs (336)    串口后台线程实现（6 测试）
 │   ├── config.rs  (46)     SerialConfig + 波特率档位
 │   └── mod.rs     (13)     出口
+└── net_impl/               F4 新增：网络通道（与 serial_impl 平级，同一套 ByteChannel 契约）
+    ├── config.rs  (145)    NetConfig（远端地址 / 端口 / UDP 本地端口）+ 自检（3 测试）
+    ├── tcp.rs     (441)    TcpChannel：**同步 connect**、对端关闭走 ChannelEvent::Closed（8 测试）
+    ├── udp.rs     (410)    UdpChannel：只绑定不连接、零长度数据报不是 EOF（7 测试）
+    └── mod.rs      (41)    出口
 ```
 
-测试函数合计 **180**（`cargo test` 报 179 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
+测试函数合计 **208**（`cargo test` 报 207 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
 需要目视时用 `cargo test app_icon::tests::ascii_preview -- --ignored --nocapture`）。
 
 **权威约定文档**（改代码前先读）：
@@ -120,12 +129,12 @@ src/
 
 ### 质量门禁（P0/P1 改动前 → 改动后）
 
-| 命令 | 前 | P0/P1 后 | P4 后 | P5 后 | P6 第 1 批后 | P6 第 2 批 / P3 后 | 本轮（显示模式互斥修复）后 | F1~F3 后 |
-|---|---|---|---|---|---|---|---|---|
-| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
-| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed** | **109 passed**（1 ignored，为图标 ASCII 预览） | **115 passed**（1 ignored） | **179 passed**（1 ignored） |
-| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** |
-| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（逐条同上） | **8 warning**（逐条同上） | **8 warning**（逐条同上；本次改动 0 新增） | **8 warning**（逐条同上；F1~F3 共 0 新增） |
+| 命令 | 前 | P0/P1 后 | P4 后 | P5 后 | P6 第 1 批后 | P6 第 2 批 / P3 后 | 本轮（显示模式互斥修复）后 | F1~F3 后 | F4 后 |
+|---|---|---|---|---|---|---|---|---|---|
+| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
+| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed** | **109 passed**（1 ignored，为图标 ASCII 预览） | **115 passed**（1 ignored） | **179 passed**（1 ignored） | **207 passed**（1 ignored） |
+| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** |
+| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（逐条同上） | **8 warning**（逐条同上） | **8 warning**（逐条同上；本次改动 0 新增） | **8 warning**（逐条同上；F1~F3 共 0 新增） | **8 warning**（逐条同上；F4 期间新增过 1 条 `field_reassign_with_default`，改掉后回到 8 条） |
 
 跑法：
 
@@ -134,14 +143,17 @@ cd E:/Downloads/Zed/AI_comtool-rs
 cargo fmt && cargo check --all-targets && cargo test
 ```
 
-179 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
+207 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
 一条把字节经事件通道注入后核对日志文件内容的集成测试、六条用
 `egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图、
 侧边栏、图表面板、英文界面），11 条对应用图标做纯断言的单元测试（尺寸、透明度、渐变、
 前景笔画、越界检查、确定性），17 条 P3 时间戳前缀测试（格式、三种模式下
 的插入位置、跨批次不重复、程序提示不加前缀、清空后重新标注、不进图表），
-以及 F1~F3 带来的 64 条（`send.rs` 发送侧、`app.rs` 用 `FakeChannel` 驱动的发送链路、
-`receive.rs` 的编码矩阵、`strings.rs` 的文案表不变量与源码守卫）。
+F1~F3 带来的 64 条（`send.rs` 发送侧、`app.rs` 用 `FakeChannel` 驱动的发送链路、
+`receive.rs` 的编码矩阵、`strings.rs` 的文案表不变量与源码守卫），
+以及 F4 带来的 28 条（`net_impl` 的 18 条：配置自检、TCP 的"连上 → 收发 → 对端关闭 →
+状态复位"集成测试、UDP 的绑定与零长度数据报语义；`app.rs` 的 10 条：连接类型分叉、
+通道复用与重建、提示行名词、UDP 不许说"已连接"、TCP 不自动重连）。
 显示模式的互斥规则另有 6 条测试（两个点击方向、启动修复方向、合法组合不被改动、
 冲突存档往返后被修好）。
 
@@ -437,6 +449,81 @@ lossy。三个坑：
 "切到 English 后界面全是英文"只由文案表不变量 + 无头渲染冒烟测试保证，
 **外观与英文文案的通顺度仍需人工过一遍**——§4② 的手工验证清单已加入这一项。
 
+### 3.8 增量（2026-09-21：F4 — TCP / UDP 客户端）
+
+计划本体见 `FUTURE_ROADMAP.md` §5。这是 F 线最后一项，也是唯一一项**能在门禁内被自动
+验完**的网络功能（用 `std::net::TcpListener` 起本地回环，不需要任何硬件）。
+
+**新增 `src/net_impl/`**（与 `serial_impl` 平级，零新增依赖，只用 `std::net`）：
+
+| 文件 | 内容 |
+|---|---|
+| `config.rs` | `NetConfig`（远端地址 / 端口 / UDP 本地端口）+ `validate()` 与 `remote_addr()`（同步 DNS） |
+| `tcp.rs` | `TcpChannel`：**同步 `connect_timeout`**、`set_nodelay(true)`、`read` 返回 `Ok(0)` 发 `ChannelEvent::Closed` |
+| `udp.rs` | `UdpChannel`：绑 `0.0.0.0:local_port` 后 `connect` 固化对端；`Ok(0)` 是零长度数据报**不是** EOF |
+
+四个设计取舍（都不是随手写的）：
+
+1. **TCP 用同步 connect，不照抄串口的"乐观打开"**。串口的 `open()` 只拉起后台线程，
+   真正的失败要等 `Failed` 事件——那是既有的 `connected` 假阳性缺陷。网络侧反过来：
+   `open()` 返回 `Ok` 就**确实连上了**，界面不会先亮"已连接"再变回去。
+   代价是 DNS + connect 在 UI 线程上做（最多 3 秒超时），这个取舍写在 `tcp.rs` 模块文档里。
+2. **`Connected` UDP socket 在 Windows 上会把 ICMP port unreachable 报成
+   `ConnectionReset`**，它必须当作可忽略错误——否则对端没监听时发一次就判死刑。
+   `worker::is_transient` 只放三种**所有传输共有**的可忽略错误，UDP 自己补这个特例，
+   不往公共函数里塞（否则串口也会跟着忽略一个真故障）。
+3. **三者共有的后台线程脚手架抽到 `communicationtrait::worker`**
+   （`WorkerCommand` / `StateGuard` / `IDLE` / `ACTIVE` / `is_transient`）。
+   "线程退出后状态必须归位""`Halt` 在任何时刻都要能被看到"是三条实现共有的硬约定，
+   复制三份迟早有一份走偏。
+4. **第一版不给 TCP 自动重连**：`auto_reconnect` 依赖 `last_opened_port`（串口语义），
+   对端没启动时反复重试只会攒出一批半死不活的 socket，而界面上完全看不出来。
+
+**`app.rs` 的连接生命周期改造**（`open_port` / `close_port` → `open_connection` /
+`close_connection`）：
+
+- 字段 `serial: Option<Box<dyn ByteChannel>>` **改名 `channel`**——它从 F4 起真的可能装
+  TCP / UDP，叫 `serial` 会让读代码的人以为这里只可能是串口。
+- 新增 `ConnectionKind`（`Serial` / `TcpClient` / `Udp`，`#[default]` 落在 `Serial`，
+  旧存档反序列化后行为与以前一致），以及 `net_remote_host` / `net_remote_port` /
+  `net_local_port` 三个**落盘偏好**。
+- 新增运行时字段 `channel_kind`，引出**"同类型复用、换类型重建"**这条通道复用规则。
+  这不是优化：断线重连是"同一个句柄再 `open` 一次"，而测试注入的替身通道一旦被拆掉，
+  `app.rs` 里那 20 多条发送链路测试就全部变成对着一个真串口跑。`teardown_channel()`
+  把 `channel` 与 `channel_kind` 一起清空，不留半截状态。
+- 拆成 `connection_ready()`（唯一的前置条件判定）/ `new_channel()` / `channel_descriptor()`
+  （配置 + 提示措辞）三小块，而 **`configure` → `open` → 接管事件通道这三步仍然只有一处实现**。
+- 提示行的名词由 `transport_noun()` 给出（`串口` / `TCP` / `UDP`）。提示文本本身**不翻译**
+  （理由同 §3.7），但名词必须跟着传输类型走——否则 TCP 掉线会写一句"串口连接已关闭"。
+
+**`sidebar.rs` 的四处界面分叉**：连接类型单选（**连接中锁定**）、参数区
+（串口六项 vs 地址 / 端口，另一组整段不画）、只读信息区（端口 + 波特率 vs 目标 +
+本地端口）、状态词与按钮文案。锁定单选的第一次出现：切了之后界面显示的参数就与真正
+打开的那条通道对不上，而按钮此时是「断开」——点下去断的是**另一种**传输。
+
+**顺带修掉的既有缺陷**：侧边栏连接按钮的文案与动作一直是**反的**（已连接时显示
+「打开串口」、点下去却执行关闭）。它从上游继承而来，F3 之前就在
+（`e2039ff:src/sidebar.rs:157`），F4 重写这段时一并修正。
+
+**新增 `ByteChannel::local_addr()`**（带默认实现的 trait 方法，只有 UDP 覆盖）：
+UDP 的 `local_port` 允许配 0（系统分配），用户**必须**能看见最终分到哪个端口，
+否则不知道该让设备往哪回包。侧边栏把它显示在信息区的「本地端口」一行。
+
+**F4 的一个平台坑（已写进测试注释）**：Windows 的 UDP 允许"特定地址"与"通配地址"
+占用**同一端口号**共存——先绑 `127.0.0.1:P`、再绑 `0.0.0.0:P` 会成功。
+所以"端口被占用要当场报错"那条测试里的占位 socket 必须也绑 `0.0.0.0`，
+否则永远测不到冲突。
+
+**门禁**：`cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** ·
+`cargo test` **207 passed / 1 ignored** · clippy **8 条**（与之前逐条相同；期间新增过
+1 条 `field_reassign_with_default`，改掉后回到既有 8 条）。
+
+**未做 / 未验证**：F4 同样**没有实机运行过**。`net_impl` 的 18 条测试里有两条会真的
+走本机回环（`std::net::TcpListener` / `UdpSocket` 对发），`app.rs` 里那条"换类型要重建"
+的测试会去连 `127.0.0.1:1`（必然被拒）——这些都不碰串口、不启动 GUI。
+但"用 `nc -l 1234` 手工收一遍"这条验收标准**只能由所有者亲手做**：§4② 的手工验证
+清单已加入 TCP / UDP 两项。TCP Server（多客户端）、命名管道、TLS/SSH 均不在本项内。
+
 ---
 
 ## 4. 未决事项
@@ -533,6 +620,31 @@ lossy。三个坑：
     应**仍然是中文**（这是决策：这些行会进日志文件与导出文件，不能随界面语言变）
 34. English 下重开程序 → 语言选择应被记住（`language` 已落盘）
 
+**同一趟也可以把 F4 验掉**（见 §3.8）。先在本机开一个 `nc -l 1234`（或任意 TCP 监听），
+再开一个 `nc -u -l 1234` 给 UDP 用——两者不能同时占 1234，按下面顺序分两次做：
+
+35. **F4 连接类型分叉**：侧边栏「连接类型」选「TCP 客户端」→ 端口列表 / 波特率 /
+    数据位 / 停止位 / 校验 / 流控**整段消失**，换成「远端地址 + 远端端口」；
+    「可用串口」栏也一并隐藏；状态那一行的标题从「串口信息」变成「连接信息」
+36. **F4 TCP 收发**：远端地址 `127.0.0.1`、端口 `1234` → 点「连接」→ 接收区出现
+    「已连接 127.0.0.1:1234」，状态变「已连接」；双方互发文本（含中文，切 GBK 试一次）
+    与 HEX；**对端 `nc` 退出** → 接收区应出现「TCP连接已关闭」且状态回到「未连接」
+    （不能卡在「已连接」）
+37. **F4 TCP 连不上**：把端口改成没人监听的（例如 `1`）→ 点「连接」→ 应立即失败并显示
+    「连接失败: …」，**状态不能先变「已连接」再变回来**（网络侧是同步 connect）
+38. **F4 UDP 绑定**：切到「UDP」，远端端口填监听端口 → 点「绑定」→ 接收区出现
+    「UDP 已绑定，目标 …」；状态显示「**已绑定**」而不是「已连接」；「本地端口」留 0 时，
+    连接后信息区那一行应显示**系统实际分配**的端口号（不是 0）
+39. **F4 UDP 收发**：向 `nc -u -l` 那一端发一条文本 → 对端应收到；对端回一条 → 接收区应显示
+40. **F4 连接中锁定类型**：连接状态下点「连接类型」的另一档 → 应点不动，悬停给出一句
+    解释；先「断开」再切 → 切得动，且参数区跟着换
+41. **F4 按钮文案**：未连接时按钮是「打开串口 / 连接 / 绑定」（按类型变），
+    已连接时是「关闭串口 / 断开」——**文案与动作必须一致**（这条是 §3.8 修的既有缺陷）
+42. **F4 落盘**：选 TCP、填好地址端口、退出程序再打开 → 连接类型与地址端口都应被记住
+    （连接本身不会自动恢复，这是刻意的）
+43. **F4 不碰串口**：全程不打开任何串口；把「连接类型」切回「串口」后，
+    串口那六项参数应原样回来，行为与 F4 之前一致
+
 ### ③ 仓库状态
 
 `AI_comtool-rs` 的 `ai-refactor` 分支工作区是干净的。
@@ -545,11 +657,12 @@ lossy。三个坑：
 | 严重度 | 问题 | 位置 | 说明 |
 |---|---|---|---|
 | ~~**高**~~ **已修** | ~~**接收缓冲无上限**~~ | `receive.rs` 的 `trim_receive_logs` | 已于 2026-09-21 修复：新增 `max_log_chars`（默认 30000，0 = 不限）FIFO 淘汰，四份镜像各自按同一字符预算裁剪，支持从句中切开 `ColoredSpan`。接收日志仍不参与持久化（退出时保存大日志只会变慢，无明确需求） |
-| **高** | **`connected` 假阳性** | `app.rs::open_port` | `open()` 只要线程成功 spawn 就返回 `Ok`，随即 `connected = true`；真正打开失败要等 `Failed` 事件回来才置 false。UI 会闪一下「已连接」 |
-| 中 | 自动重连无退避 | `app.rs::auto_reconnect` | 每 500 ms 失败一次就新建线程，串口被占用时会持续重试 |
+| **高** | **`connected` 假阳性**（**只剩串口**） | `app.rs::open_connection` | 串口通道的 `open()` 只要把后台线程 spawn 起来就返回 `Ok`，随即 `connected = true`；真正打开失败要等 `Failed` 事件回来才置 false，UI 会闪一下「已连接」。网络侧（F4）**没有这个问题**：`TcpChannel` / `UdpChannel` 的 `open()` 会当场做完 connect / bind 再返回。修串口那一份要引入"正在打开"这个中间状态，属独立课题 |
+| 中 | 自动重连无退避 | `app.rs::auto_reconnect` | 每 500 ms 失败一次就新建线程，串口被占用时会持续重试。**只对串口生效**（F4 起对 TCP / UDP 直接返回，见约定 19 附近） |
 | 中 | 待发队列无上限 | `channel.rs::worker_main` 的 `outgoing` | 设备长期不可写 + 用户持续点发送时队列增长。原实现用 unbounded mpsc 同样无上限，未引入新问题，但应加背压 |
 | 中 | 写路径瞬态错误静默重试 | `channel.rs::worker_main` | `WouldBlock` / `Interrupted` 直接重试是合理的，但设备长期不接受数据时用户得不到提示。建议侧边栏显示「待发字节数」 |
 | ~~低~~ **已清理** | ~~2 个未使用依赖~~ | `Cargo.toml` | 已于 P6 第 1 批移除：`tokio`（features = `["full"]`，零调用，明显拖慢编译）与 `egui-chinese-font`（零调用，中文字体已由 `main.rs::setup_fonts` 读系统字体实现）。`chrono` / `egui_plot` / `rfd` / `serde` / `serialport` 仍是活跃依赖 |
+| ~~低~~ **已修** | ~~侧边栏连接按钮的**文案与动作是反的**~~ | `sidebar.rs` | **已于 2026-09-21（F4）修复**：原来「已连接」时按钮显示「打开串口」、点下去却执行关闭，从上游继承而来（`e2039ff:src/sidebar.rs:157` 即在）。F4 重写这段时一并改成同向，并按传输类型分叉文案。见 §3.8 |
 | 低 | 8 条 clippy 风格警告 | `app.rs` / `receive.rs` | `derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`。全部位于**本任务未触及**的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写）。`cargo clippy --fix` 可一键清掉，但那会改动范围之外的代码，因此留作一次专门的"清警告"提交（P6 收尾不再处理） |
 | 低 | 记录中途改配置不切换文件 | `log_file.rs` | 记录过程中改「文件名模板」或「输出目录」不会切到新文件，下次开始记录才生效；界面上没有特别提示 |
 | 低 | **图表不支持无换行的连续逗号流** | `chart.rs::push_bytes` | 通道语义（第 k 个字段 = 第 k 条曲线）要求「一行一组」；无换行时通道数只能靠猜，猜错就画错位。因此这类数据在超过 4096 字节后被**整行丢弃**并在界面计数。属于明确的设计取舍，不是待修 bug |
@@ -609,12 +722,14 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
 | **F1** | 发送侧补齐（HEX 发送 / 行尾 / 定时发送 / 发送历史） | 1~2 天 | ✅ **已完成**（`2e28994`）。新增 `src/send.rs`（纯逻辑可单测）+ `FakeChannel` 测试替身；「发送文件」仍未做（需先有待发队列背压） |
 | **F2** | 编码选择（GBK / GB18030） | 2~3 天 | ✅ **已完成**（`e2039ff`）。新增依赖 `encoding_rs`；走增量解码，未退化成 lossy |
 | **F3** | 多语言真接线 | 2~3 天 | ✅ **已完成**。新增 `src/strings.rs`（中英同宏臂，漏翻译写不出来）+ 源码级守卫测试；接收区/日志内的提示行**不翻译** |
-| **F4** | TCP / UDP 客户端 | 3~5 天 | ⬜ **待做**。零新依赖（`std::net`）；`app.rs:110` 已是 `Box<dyn ByteChannel>`，口子现成；`ChannelEvent::Closed` 目前是 `#[allow(dead_code)]`，F4 正好把它消掉 |
+| **F4** | TCP / UDP 客户端 | 3~5 天 | ✅ **已完成**。新增 `src/net_impl/{config,tcp,udp}.rs`（零新依赖，只用 `std::net`）+ `communicationtrait::worker` 共用脚手架；`ChannelEvent::Closed` 的 `#[allow(dead_code)]` 已消掉（TCP 真的会发）；`app.rs` 的 `serial` 字段改名 `channel`，连接生命周期改为三类型分叉 |
 | ~~⑤~~ | ~~插件架构（**扩展机制本身**）~~ | — | **明确不做**：与"单 binary、全部行为可单测"的形态互斥 |
 | **D1~D3** | SSH / terminal 插件 / 协议脚本 | — | ⏸️ **待定开发（未排期）**：不是被否决而是时机未到，各自有明确的触发条件。SSH 复用 F4 的连接类型分叉框架；协议脚本建议先试"配置化协议预设表" |
 
-**剩余工期 3~5 个工作日（只剩 F4）**。另有 3 条**既有缺陷与 F1/F4 同路径**：
-`connected` 假阳性（→ F4）、自动重连无退避（→ F4）、待发队列无上限（→ F1 的「发送文件」前置条件）。
+**F 线已全部落地（F1~F4）**。另有 2 条**既有缺陷**仍留着（不在任何阶段内）：
+`connected` 假阳性（只影响串口：`open()` 只拉起线程，真正的失败要等 `Failed` 事件；
+网络侧已通过同步 connect 绕开）、自动重连无退避（与 F4 同路径，F4 未动它）。
+F1 的「发送文件」仍未做，前置条件是**待发队列上限**（背压）。
 
 本文件未列出的新功能（例如图表按通道显示/隐藏、x 轴改成真实时间基准）仍不在任何计划内。
 
@@ -659,7 +774,7 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
 11. **实时文件日志的写盘只能在后台线程**（`log_file.rs` 的 `worker_main`），UI 线程不许
     出现对日志文件的 `write`。停机靠投 `Halt`，且 `Drop` 里必须用 **`try_send`**：队列
     满时 `send` 会阻塞，「停止记录」会把 UI 线程永久挂住。文件由 UI 线程 `File::create`
-    打开后交给线程——这是刻意与 `open_port` 的「乐观置位」不同的写法，别改回去。
+    打开后交给线程——这是刻意与 `open_connection` 的「乐观置位」不同的写法，别改回去。
 12. **接收镜像的每一次追加都要同步投给日志**：走 `push_receive_note()`（同时写镜像与日志）
     或 `log_append()`（只写日志），不要在 `receive_data` 里直接 `self.receive_text.push_str()`
     绕开日志——那会让日志文件悄悄少一段数据。
@@ -691,6 +806,31 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
     增量解码，不能"收到一批就 lossy 解一次"。GBK 与 GB18030 **共用解码器**（只有编码器不同）；
     UTF-16LE 在 `encoding_rs` 里**只支持解码**，小端字节要手写且不加 BOM。切档时丢弃上一批
     残留的半个字符（`AnsiDecoder::sync_encoding()` + `restore_runtime_state()` 两处）。
+19. **建连接只有一条路**：UI 按钮与自动重连都走 `ComTool::open_connection()`（F4 起）。
+    它按 `connection_kind` 建串口 / TCP / UDP，但 **`configure` → `open` → 接管事件通道
+    这三步只有一处实现**——不要为某一种传输另写一遍（漏了事件通道 = "连上了收不到数据"，
+    漏了 configure = "参数怎么改都没用"）。前置条件统一由 `connection_ready()` 判定，
+    提示措辞由 `channel_descriptor()` 给；**前置条件不满足时什么都不做**，
+    尤其不能乐观置位 `connected`。
+20. **`channel` 与 `channel_kind` 同生共死**（F4 起）：通道对象的复用规则是
+    "**同类型就地复用、换类型拆掉重建**"（`open_connection()`），两者必须一起清空
+    （`teardown_channel()`）。这条规则同时服务两件事——串口断线重连是"同一个句柄再 `open`
+    一次"，而 `app.rs` 里 20 多条发送链路测试靠的就是"注入的替身通道不被拆掉"。
+    把复用改回"每次新建"，那些测试会静默地改成对着一个真串口跑。
+21. **串口专属控件必须随连接类型分叉**（F4 起）：端口 / 波特率 / 数据位 / 停止位 / 校验 /
+    流控在 TCP / UDP 模式下**整段不画**；连接类型单选在**连接中锁定**（否则界面显示的参数
+    与真正打开的通道对不上，而按钮是「断开」，点下去断的是另一种传输）。
+    **UDP 不许说"已连接"**——它没有连接，说"已连接"会让用户以为对端在线、以为掉线会被发现；
+    状态词用「已绑定 / 未绑定」，按钮用「绑定 / 断开」。
+22. **提示行里的名词要跟着传输类型走**：`ComTool::transport_noun()`（`串口` / `TCP` / `UDP`）。
+    提示文本本身**不翻译**（见约定 16），但 TCP 掉线写一句"串口连接已关闭"是把日志发给别人
+    看时的误导。
+23. **网络侧的可忽略错误不要塞进公共函数**：`worker::is_transient` 只放三种所有传输共有的
+    （`TimedOut` / `WouldBlock` / `Interrupted`）。某个传输特有的（Windows 上 connected UDP
+    socket 把 ICMP port unreachable 报成 `ConnectionReset`）由该实现自己补——塞进公共函数
+    会让串口那边也跟着忽略一个真故障。
+24. **UDP 的 `Ok(0)` 不是 EOF**：零长度数据报是合法数据报。TCP 的 `Ok(0)` 才是对端关闭
+    （发 `ChannelEvent::Closed`）。两者语义相反，改任一侧时别看错另一侧。
 
 ---
 
@@ -731,7 +871,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 179 passed / 1 ignored / fmt 干净）
+# 3. 建立门禁基线（应为 0 warning / 207 passed / 1 ignored / fmt 干净）
 cargo fmt && cargo check --all-targets && cargo test
 
 # 4. 看清两个版本的差异
@@ -740,8 +880,9 @@ git diff master ai-refactor --stat
 # 5. 读这三份文档再动手
 #    AGENTS.md / DEVELOPMENT_GUIDE.md / REFACTOR_REPORT.md
 
-# 6. 计划内的功能项已全部落地（P0~P6）。下一件活从 §4② 的磁盘持久化实机验证（需所有者亲手跑）
-#    或 §5 里那 8 条既有 clippy 警告的清理开始；GPLv3 合规已降为最低优先级（§4①）
+# 6. 计划内的功能项已全部落地（P0~P6 与 F1~F4）。下一件活从 §4② 的实机验证清单
+#    （磁盘持久化 + F2 的 GBK 回显 + F4 的 nc 收发，都需所有者亲手跑）或 §5 里那 8 条
+#    既有 clippy 警告的清理开始；GPLv3 合规已降为最低优先级（§4①）
 ```
 
 如果你要对照原版行为：`git -C E:\Downloads\Zed\comtool-rs log -1`（原版停在 `04dc007`），

@@ -18,21 +18,9 @@ use std::time::Duration;
 
 use serialport::SerialPort;
 
+use crate::communicationtrait::worker::{ACTIVE, IDLE, StateGuard, WorkerCommand, is_transient};
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::serial_impl::config::SerialConfig;
-
-/// UI 侧投给后台线程的指令。
-enum WorkerCommand {
-    /// 把这段字节写进端口。
-    Transmit(Vec<u8>),
-    /// 结束工作循环并返回。
-    Halt,
-}
-
-/// `is_active` 的取值。用 `u8` 而不是 `bool`，是为了给将来可能出现的中间态
-/// （例如「正在打开」）留位置，同时保持无锁读取。
-const IDLE: u8 = 0;
-const ACTIVE: u8 = 1;
 
 /// 单次 `read` 的最长等待。
 ///
@@ -47,14 +35,6 @@ const READ_TIMEOUT: Duration = Duration::from_millis(10);
 /// 能搬走的数据越多。3 Mbaud 下每毫秒约 300 字节，4 KiB 留有十倍以上余量。
 const READ_CHUNK: usize = 4 * 1024;
 
-/// 驱动在「暂时无数据/暂时无法接收」时返回的错误种类。这些不是故障。
-fn is_transient(err: &io::Error) -> bool {
-    matches!(
-        err.kind(),
-        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-    )
-}
-
 /// 按配置打开端口。
 fn open_port(cfg: &SerialConfig) -> io::Result<Box<dyn SerialPort>> {
     serialport::new(cfg.port.clone(), cfg.baud_rate)
@@ -65,18 +45,6 @@ fn open_port(cfg: &SerialConfig) -> io::Result<Box<dyn SerialPort>> {
         .timeout(READ_TIMEOUT)
         .open()
         .map_err(|e| io::Error::other(e.to_string()))
-}
-
-/// 后台线程退出时统一把状态归位。
-///
-/// 用 Drop 守卫而不是在每个 `return` 前手写一次 `store`：新增退出分支时
-/// 不会漏掉置位，`is_active` 也就不可能停留在「线程已死但仍报活动」。
-struct StateGuard(Arc<AtomicU8>);
-
-impl Drop for StateGuard {
-    fn drop(&mut self) {
-        self.0.store(IDLE, Ordering::Release);
-    }
 }
 
 /// 后台线程主体：独占端口句柄，搬运两个方向的数据。

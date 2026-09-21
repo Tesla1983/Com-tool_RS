@@ -5,7 +5,7 @@
 | 制定日期 | 2026-09-21 |
 | 对比基线 | `Neutree/COMTool`（Python 3 + PyQt5，约 2600 stars） |
 | 本文件性质 | **新开的一条计划线**，与已收口的 P0~P6 无重叠 |
-| 当前状态 | `ai-refactor` 分支；**F1 / F2 / F3 已实施**（见 §0 状态列），F4 待做；门禁 0 warning / 179 通过 + 1 忽略 / fmt 干净 |
+| 当前状态 | `ai-refactor` 分支；**F1 / F2 / F3 / F4 均已实施**（见 §0 状态列）；门禁 0 warning / 207 通过 + 1 忽略 / fmt 干净 |
 | 未执行 | 未运行本项目、未触碰任何串口（遵守 `AGENTS.md` 顶部红线） |
 
 ---
@@ -22,7 +22,7 @@
 | **F1** | 发送侧补齐（HEX 发送 / 行尾 / 定时发送 / 发送历史） | **高**（每天用） | **低**（纯 UI + 纯函数，零新依赖） | ✅ **第一优先** · **已实施**（`2e28994`） |
 | **F2** | 编码选择（GBK / GB18030） | 中高（国内设备常发 GBK） | 中（解码层改造 + 1 个新依赖） | ✅ 纳入 · **已实施**（`e2039ff`） |
 | **F3** | 多语言真接线（`Language` 枚举已在位） | 低（单用户内网场景） | 中（横向扫全库文案） | ✅ 纳入 · **已实施** |
-| **F4** | TCP / UDP 客户端 | 中（换调试对象时才用） | 中高（界面分叉 + 连接生命周期） | ✅ 纳入，排最后 · ⬜ **待做** |
+| **F4** | TCP / UDP 客户端 | 中（换调试对象时才用） | 中高（界面分叉 + 连接生命周期） | ✅ 纳入，排最后 · **已实施** |
 | ~~⑤~~ | 插件架构（**扩展机制本身**） | 未知 | **极高**（要改掉单 binary 的形态） | ❌ **明确不做**，见 §8 |
 | **D1~D3** | SSH / terminal 插件 / 协议脚本 | 未知 | 高（各自独立立项） | ⏸️ **待定开发**（未排期），见 §7 |
 
@@ -34,6 +34,10 @@
 2. **F2 的验收标准里"GBK 发出去仍能被自己的接收端正确解回"这条没有实测**（不启动 GUI、
    不碰串口是硬规则）。GBK / GB18030 / UTF-16LE 的收→发往返由 `send.rs` 与 `receive.rs`
    的单元测试用固定字节序列钉住，**但实机设备上的表现仍需人工确认**。
+3. **F4 没有照抄"三个文件"**：多了一个 `src/net_impl/config.rs`（与 `serial_impl` 的
+   `{mod, channel, config}` 划分保持一致）；另有两处做法与原方案不同——UDP 的"已绑定"
+   与本地端口分成两行显示（而非塞进状态行一处），以及**通道对象"同类型复用、换类型重建"**
+   这条新规则（原方案默认每次新建）。详见 §5 开头。
 
 外加 3 个**既有缺陷**顺带处理（不另开阶段，见 §10）：`connected` 假阳性、自动重连无退避、
 待发队列无上限——它们与 F1/F4 改的是同一条路径，一起做比单独做便宜。
@@ -273,14 +277,37 @@ COMTool 支持 ASCII / UTF-8 / UTF-16 / GBK / GB2312 / GB18030 六档。
 
 ## 5. F4 · TCP / UDP 客户端
 
+> **状态：已实施。** 下面「架构口子」「语义陷阱」两节描述的是**动手前的判断**，保留下来
+> 是为了让后来人看懂每一项改动为什么必要。落地后的实际形态与三处偏离：
+>
+> 1. **文件划分多了一个 `config.rs`**：实际是 `src/net_impl/{mod, config, tcp, udp}.rs`。
+>    串口那边就是 `serial_impl/{mod, channel, config}`，保持一致比严格照抄文件清单值钱。
+> 2. **新增一条"通道对象复用"规则**：`ComTool::channel` 旁边多了 `channel_kind`
+>    （`Option<ConnectionKind>`，运行时字段）。`open_connection()` 的规则是
+>    **同类型就地复用、换类型拆掉重建**。这不是优化而是两条硬需求：断线重连是
+>    "同一个句柄再 `open` 一次"；测试注入的替身通道一旦被拆掉就会换成真串口。
+>    原方案默认"每次新建"，那么 `app.rs` 里那 20 多条发送链路测试立刻全废。
+> 3. **界面分叉落在四处**，不只是"参数区"：连接类型单选（**连接中锁定**）、
+>    参数区（串口六项 vs 地址/端口）、只读信息区（端口+波特率 vs 目标 + 本地端口）、
+>    以及状态词与按钮文案。锁定单选的规则第一次出现：切了之后界面显示的参数就与
+>    真正打开的那条通道对不上，而按钮此时是「断开」——点下去断的是**另一种**传输。
+>
+> 另外顺带修掉一个**既有缺陷**：侧边栏连接按钮的文案与动作一直是**反的**
+> （已连接时显示「打开串口」、点下去却执行关闭）。它从上游继承而来，在 F3 之前就在
+> （见 `e2039ff:src/sidebar.rs:157`），F4 重写这段时一并修正。
+>
+> 实现的收尾：`transport_noun()` 让提示行的名词跟着传输类型走（`串口` / `TCP` / `UDP`），
+> `ByteChannel::local_addr()` 新增为**带默认实现的** trait 方法（只有 UDP 覆盖），
+> 用于把「`local_port` 配 0 时系统实际分到哪个端口」显示出来。
+
 ### 架构口子已确认存在（不是"应该能扩展"，是"已经留好了"）
 
 | 证据 | 位置 |
 |---|---|
-| 字段类型已经是 trait 对象，**不是** `Option<SerialChannel>` | `src/app.rs:110` `pub serial: Option<Box<dyn ByteChannel>>` |
-| 抽象只有 5 个方法：`open` / `close` / `is_active` / `write` / `configure` | `src/communicationtrait.rs:39` |
-| `ChannelEvent::Closed` 分支已存在，注释写明"保留给对端能够主动握手下线的传输（**如 TCP**）" | `src/communicationtrait.rs:25-30`（当前是 `#[allow(dead_code)]`） |
-| 后台线程 + `mpsc` 事件的实现模板 | `src/serial_impl/channel.rs`（368 行） |
+| 字段类型已经是 trait 对象，**不是** `Option<SerialChannel>` | `src/app.rs` 的 `pub channel: Option<Box<dyn ByteChannel>>`（F4 起由 `serial` 改名而来——它真的可能装 TCP / UDP 了） |
+| 抽象只有 5 + 1 个方法：`open` / `close` / `is_active` / `write` / `configure` / `local_addr`（默认实现） | `src/communicationtrait.rs` |
+| `ChannelEvent::Closed` 分支已存在，注释写明"保留给对端能够主动握手下线的传输（**如 TCP**）" | `src/communicationtrait.rs`（F4 之前是 `#[allow(dead_code)]`） |
+| 后台线程 + `mpsc` 事件的实现模板 | `src/serial_impl/channel.rs`；F4 把三者共有的部分抽成了 `communicationtrait::worker` |
 
 **实现 TCP 正好把这个 `dead_code` 消掉**——`Closed` 从"为将来预留"变成"真的有人发"。
 
@@ -303,6 +330,14 @@ COMTool 支持 ASCII / UTF-8 / UTF-16 / GBK / GB2312 / GB18030 六档。
 3. **串口专属控件必须随连接类型分叉**：端口列表 / 波特率 / 数据位 / 校验位 / 流控，
    在 TCP / UDP 模式下要整段隐藏或替换成"地址 + 端口"。这是本项**主要的成本来源**——
    不是因为难，而是因为要检查每一处 `self.baud_rate` / `self.selected_port` 的使用点。
+
+> **三条陷阱的实现落点**（照着验收时核对）：
+>
+> | 陷阱 | 落点 | 锁住它的测试 |
+> |---|---|---|
+> | ① UDP 不能叫"已连接" | `sidebar.rs` 的 `status_text`（`已绑定`/`未绑定`）、按钮文案（`绑定`/`断开`）、`app.rs` 的 `ConnectionKind` 文档与打开提示 | `udp_open_reports_bound_and_never_claims_connected` |
+> | ② `Failed` 与 `Closed` 分别处理 | `receive.rs::receive_data` 两条分支（`{名词}错误: …` / `{名词}连接已关闭`），名词来自 `ComTool::transport_noun()` | `closed_event_names_the_transport`、`net_impl::tcp::tests::connects_exchanges_bytes_and_resets_on_peer_close` |
+> | ③ 串口控件整段分叉 | `sidebar.rs`：连接类型单选 + `if kind.uses_serial_settings()` 双分支（参数区、信息区、可用串口列表） | `only_serial_uses_the_serial_settings`、`connection_ready_tracks_the_selected_transport` |
 
 另外一条决策：**第一版不给 TCP 自动重连**。现有 `auto_reconnect` 依赖"记住上次端口"
 （`last_opened_port`），是串口语义；给 TCP 加上会在对端未启动时产生半死不活的 socket 状态，
