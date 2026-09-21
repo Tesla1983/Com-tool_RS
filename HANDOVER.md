@@ -932,8 +932,15 @@ F1 的「发送文件」仍未做，前置条件是**待发队列上限**（背�
   `opencode.json` 配了三套角色：`executor`（改代码，默认）/ `planner`（只规划）/
   `expert`（攻难题），默认走 DeepSeek-V4-Flash。
 - **`.gitignore` 忽略**：`SerialGUI-rs/`、`opencode.json`、`target/`、`echo_raw.txt`、
-  `AGENTS.md`、`.opencode/agents/*.md`、`.opencode/prompts/*.md`。
-  ⚠️ 注意 `AGENTS.md` 本身被忽略——**它不会随 git 传播**，所以它是"本机文档"，改动只在本地生效。
+  `.workbuddy/`、`.opencode/agents/*.md`、`.opencode/prompts/*.md`。
+  - `AGENTS.md` **原先也在此列，现已被移出**（2026-09-21）：它随仓库传播，不再只是本机文档。
+    取消排除的原因很简单——它记的是"怎么改这个项目"的硬约定，而不是本机环境，放在仓库外
+    等于换台机器就没人看得见。**同一批条文在 `DEVELOPMENT_GUIDE.md` §0/§6 与本文 §7 各有一份，
+    三处仍需同步。**
+  - ⚠️ 但**机器级拦截的脚本本体仍不进仓库**：`comtool-run-guard.sh` / `comtool-approve.sh` 在
+    `~/.workbuddy/hooks/`（用户级），自测 `test_guard.py` 在 `.workbuddy/hooks/`（该目录仍被忽略）。
+    所以 `AGENTS.md` §5 里那句"跑 `test_guard.py` 自测"在**新克隆的仓库里是悬空的**——
+    要复现拦截必须另行取得这两个脚本。文档随仓库走，并不等于保护随仓库走。
 - **`echo_raw.txt` / `test_out.txt`**：根目录下的零散调试文件，已随搬迁复制，内容无关紧要。
 - **持久化存档位置**：`%APPDATA%\ComTool-RS\data\`（eframe 按 `run_native` 的标题自动创建，
   由 `persistence` feature 启用）。

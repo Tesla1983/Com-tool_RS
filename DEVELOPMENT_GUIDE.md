@@ -22,7 +22,11 @@
 - 一次批准只对当次生效，不构成对后续轮次的授权。
 
 > 完整条文见 `AGENTS.md` 顶部「最高优先级红线」一节，两者冲突时以 `AGENTS.md` 为准。
-> 注意 `AGENTS.md` 在 `.gitignore` 中，属本机文档，不会随 git 传播。
+> `AGENTS.md` **已纳入版本控制**（原先被 `.gitignore` 排除，2026-09-21 起取消），
+> 因此三份文档现在都随仓库传播。但**机器级拦截的脚本本体不在仓库里**——
+> `comtool-run-guard.sh` / `comtool-approve.sh` 在用户级目录 `~/.workbuddy/hooks/`，
+> 其自测 `test_guard.py` 在 `.workbuddy/hooks/`（该目录仍被忽略）。
+> 换机器或重装后必须单独重建这套钩子，否则条文还在、拦截会静默失效。
 
 ### 0.1 已配置机器级硬拦截（PreToolUse hook）
 

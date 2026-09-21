@@ -2,7 +2,6 @@ SerialGUI-rs/
 opencode.json
 target/
 echo_raw.txt
-AGENTS.md
 .workbuddy/
 .opencode/agents/executor.md
 .opencode/agents/expert.md
