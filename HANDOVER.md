@@ -11,7 +11,7 @@
 
 | 目录 | 角色 | 当前分支 | 当前提交 | `.git` 体积 |
 |---|---|---|---|---|
-| `E:\Downloads\Zed\AI_comtool-rs` | **AI 重构版**（本目录，主要工作对象） | `ai-refactor` | `a21d75e`（P2/P3）→ 其后是 P4 提交（见 §3.2） | 243 KB |
+| `E:\Downloads\Zed\AI_comtool-rs` | **AI 重构版**（本目录，主要工作对象） | `ai-refactor` | `e61dbb1`（P6 收尾第 1 批：清理死依赖 / release profile / 应用图标） | 243 KB |
 | `E:\Downloads\Zed\comtool-rs` | **原版保留**（已回滚为干净状态） | `master` | `04dc007` | 785 MB |
 
 > 本文件的提交号以撰写时的 `git log --oneline` 为准；要精确核对请自己跑一遍。
