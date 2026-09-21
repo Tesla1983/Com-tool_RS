@@ -7,6 +7,7 @@ use crate::app::{ComTool, ThemeChoice};
 use crate::receive::TextEncoding;
 use crate::receive::TimestampPrefix;
 use crate::send::{MAX_SEND_HISTORY, SendFormat, SendLineEnding};
+use crate::strings::{Strings, fill};
 use eframe::egui;
 use egui::Ui;
 
@@ -31,62 +32,64 @@ impl ComTool {
     /// 绘制顶部菜单栏并返回本轮的操作请求。
     pub(crate) fn show_menu_bar(&mut self, ui: &mut Ui) -> MenuAction {
         let mut action = MenuAction::default();
+        let s = self.language.strings();
 
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("文件", |ui| {
-                    if ui.button("信息").clicked() {
+                ui.menu_button(s.menu_file, |ui| {
+                    if ui.button(s.menu_info).clicked() {
                         action.info_requested = true;
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("退出").clicked() {
+                    if ui.button(s.menu_quit).clicked() {
                         action.quit_requested = true;
                         ui.close();
                     }
                 });
 
-                ui.menu_button("设置", |ui| {
-                    if ui.button("打开设置窗口").clicked() {
+                ui.menu_button(s.settings_title, |ui| {
+                    if ui.button(s.menu_open_settings).clicked() {
                         action.settings_requested = true;
                         ui.close();
                     }
                     ui.separator();
-                    ui.label("主题");
-                    theme_radios(ui, &mut self.theme);
+                    ui.label(s.theme_label);
+                    theme_radios(ui, &mut self.theme, s);
                 });
 
-                ui.menu_button("视图", |ui| {
-                    ui.label("面板");
+                ui.menu_button(s.menu_view, |ui| {
+                    ui.label(s.panel_label);
                     self.show_panel_checkboxes(ui);
                     ui.separator();
-                    ui.label("显示模式");
-                    ui.checkbox(&mut self.color_view, "颜色");
+                    ui.label(s.display_mode_heading);
+                    ui.checkbox(&mut self.color_view, s.color);
                     self.display_mode_checkboxes(ui);
                     ui.separator();
-                    ui.checkbox(&mut self.auto_scroll, "自动滚动");
+                    ui.checkbox(&mut self.auto_scroll, s.auto_scroll);
                     ui.separator();
-                    ui.label("时间戳前缀");
-                    timestamp_radios(ui, &mut self.timestamp_prefix);
+                    ui.label(s.timestamp_prefix_field);
+                    timestamp_radios(ui, &mut self.timestamp_prefix, s);
                 });
 
-                ui.menu_button("文本", |ui| {
-                    ui.label("编码（接收与发送共用）");
+                ui.menu_button(s.text, |ui| {
+                    ui.label(s.encoding_shared_label);
                     text_encoding_radios(ui, &mut self.text_encoding);
                     ui.separator();
                     // GBK 与 GB18030 的**解码器相同**、编码器不同。这句说明放在
                     // 界面上而不是只写进文档：用户看到两档"好像一样"时会犯嘀咕。
-                    ui.weak("GBK / GB18030 接收结果相同，仅发送时的可表示字符范围不同");
+                    ui.weak(s.encoding_gbk_note_menu);
                 });
 
-                ui.menu_button("发送", |ui| {
-                    ui.label("格式");
-                    send_format_radios(ui, &mut self.send_format);
+                ui.menu_button(s.send_title, |ui| {
+                    ui.label(s.format);
+                    send_format_radios(ui, &mut self.send_format, s);
                     ui.separator();
-                    ui.label("行尾");
-                    send_line_ending_radios(ui, &mut self.send_line_ending);
+                    ui.label(s.line_ending);
+                    send_line_ending_radios(ui, &mut self.send_line_ending, s);
                     ui.separator();
-                    if ui.checkbox(&mut self.repeat_send, "定时发送").changed() && self.repeat_send
+                    if ui.checkbox(&mut self.repeat_send, s.repeat_send).changed()
+                        && self.repeat_send
                     {
                         // 勾上的那一刻只起步计时，不立刻发一包（见 `ComTool::tick_repeat_send`）
                         self.last_repeat_send = None;
@@ -119,10 +122,11 @@ impl ComTool {
     /// "本轮哪个刚被勾上"传给它。用局部变量而不是直接绑定字段，是因为本轮改动前后的
     /// 值都要参与判断，且必须一次性写回——边画边改字段会让两个勾选框在同一帧里互相覆盖。
     fn display_mode_checkboxes(&mut self, ui: &mut Ui) {
+        let s = self.language.strings();
         let mut hex_view = self.hex_view;
         let mut ascii_view = self.ascii_view;
-        let hex_just_enabled = ui.checkbox(&mut hex_view, "HEX 接收").changed() && hex_view;
-        let ascii_just_enabled = ui.checkbox(&mut ascii_view, "字节查看").changed() && ascii_view;
+        let hex_just_enabled = ui.checkbox(&mut hex_view, s.hex_receive).changed() && hex_view;
+        let ascii_just_enabled = ui.checkbox(&mut ascii_view, s.byte_view).changed() && ascii_view;
         self.hex_view = hex_view;
         self.ascii_view = ascii_view;
         self.resolve_display_mode(hex_just_enabled, ascii_just_enabled);
@@ -133,48 +137,52 @@ impl ComTool {
     /// 规则：当只剩一个面板可见时，禁止把它取消掉（该项置灰）；已经隐藏的面板
     /// 始终允许重新勾上。这样用户永远不可能把界面点成一整片空白。
     fn show_panel_checkboxes(&mut self, ui: &mut Ui) {
+        let s = self.language.strings();
         let can_hide = self.visible_panel_count() > 1;
         ui.add_enabled(
             can_hide || !self.sidebar_open,
-            egui::Checkbox::new(&mut self.sidebar_open, "侧边栏"),
+            egui::Checkbox::new(&mut self.sidebar_open, s.nav_sidebar),
         );
         ui.add_enabled(
             can_hide || !self.show_receive_panel,
-            egui::Checkbox::new(&mut self.show_receive_panel, "接收区"),
+            egui::Checkbox::new(&mut self.show_receive_panel, s.nav_receive),
         );
         ui.add_enabled(
             can_hide || !self.show_chart_panel,
-            egui::Checkbox::new(&mut self.show_chart_panel, "实时图表"),
+            egui::Checkbox::new(&mut self.show_chart_panel, s.nav_chart),
         );
         ui.add_enabled(
             can_hide || !self.show_send_panel,
-            egui::Checkbox::new(&mut self.show_send_panel, "发送区"),
+            egui::Checkbox::new(&mut self.show_send_panel, s.nav_send),
         );
         if !can_hide {
-            ui.weak("至少保留一个面板");
+            ui.weak(s.at_least_one_panel);
         }
     }
 }
 
 /// 主题三选一。菜单与设置窗口共用同一套写法，避免两处出现不同的选项集合。
-pub(crate) fn theme_radios(ui: &mut Ui, theme: &mut ThemeChoice) {
-    ui.radio_value(theme, ThemeChoice::System, "跟随系统");
-    ui.radio_value(theme, ThemeChoice::Light, "浅色");
-    ui.radio_value(theme, ThemeChoice::Dark, "深色");
+pub(crate) fn theme_radios(ui: &mut Ui, theme: &mut ThemeChoice, s: &Strings) {
+    ui.radio_value(theme, ThemeChoice::System, s.theme_system);
+    ui.radio_value(theme, ThemeChoice::Light, s.theme_light);
+    ui.radio_value(theme, ThemeChoice::Dark, s.theme_dark);
 }
 
 /// 时间戳前缀三选一。同样由菜单与设置窗口共用——选项集合只有一处定义，
 /// 就不会出现"菜单里能选每批、设置里只能选到每行"这种不一致。
-pub(crate) fn timestamp_radios(ui: &mut Ui, prefix: &mut TimestampPrefix) {
-    ui.radio_value(prefix, TimestampPrefix::Off, "关闭");
-    ui.radio_value(prefix, TimestampPrefix::PerLine, "每行");
-    ui.radio_value(prefix, TimestampPrefix::PerBatch, "每批");
+pub(crate) fn timestamp_radios(ui: &mut Ui, prefix: &mut TimestampPrefix, s: &Strings) {
+    ui.radio_value(prefix, TimestampPrefix::Off, s.ts_off);
+    ui.radio_value(prefix, TimestampPrefix::PerLine, s.ts_per_line);
+    ui.radio_value(prefix, TimestampPrefix::PerBatch, s.ts_per_batch);
 }
 
 /// 文本编码单选（接收解码与发送编码共用同一个偏好）。
 ///
 /// 选项集合由 [`TextEncoding::ALL`] 定义、这里只负责画：加一档编码时不会出现
 /// "设置窗口里有、菜单里没有"这种不一致。
+///
+/// 不需要文案表：`UTF-8` / `GBK` / `GB18030` / `UTF-16LE` 是**编码的正式名字**，
+/// 中英文界面下都写同一个词，翻译反而会让人对不上厂商文档。
 pub(crate) fn text_encoding_radios(ui: &mut Ui, encoding: &mut TextEncoding) {
     for option in TextEncoding::ALL {
         ui.radio_value(encoding, option, option.label());
@@ -182,17 +190,20 @@ pub(crate) fn text_encoding_radios(ui: &mut Ui, encoding: &mut TextEncoding) {
 }
 
 /// 发送格式二选一（菜单 / 设置窗口 / 发送区三处共用一处定义）。
-pub(crate) fn send_format_radios(ui: &mut Ui, format: &mut SendFormat) {
-    ui.radio_value(format, SendFormat::Text, "文本");
-    ui.radio_value(format, SendFormat::Hex, "HEX");
+///
+/// `HEX` 是专有名词，中英两列取值相同——这是事实，不是漏翻译
+/// （`strings.rs` 的 `identical_entries_are_language_neutral_only` 认这一点）。
+pub(crate) fn send_format_radios(ui: &mut Ui, format: &mut SendFormat, s: &Strings) {
+    ui.radio_value(format, SendFormat::Text, s.text);
+    ui.radio_value(format, SendFormat::Hex, s.hex);
 }
 
 /// 发送行尾三选一。三值枚举而不是"追加 CR / 追加 LF"两个勾选框：那四个组合里
 /// 只有三个有意义，用勾选框表达会让"只加 CR"这种状态无法描述也无法校验。
-pub(crate) fn send_line_ending_radios(ui: &mut Ui, ending: &mut SendLineEnding) {
-    ui.radio_value(ending, SendLineEnding::None, "无");
-    ui.radio_value(ending, SendLineEnding::Lf, "LF");
-    ui.radio_value(ending, SendLineEnding::Crlf, "CRLF");
+pub(crate) fn send_line_ending_radios(ui: &mut Ui, ending: &mut SendLineEnding, s: &Strings) {
+    ui.radio_value(ending, SendLineEnding::None, s.ending_none);
+    ui.radio_value(ending, SendLineEnding::Lf, s.ending_lf);
+    ui.radio_value(ending, SendLineEnding::Crlf, s.ending_crlf);
 }
 
 impl ComTool {
@@ -201,16 +212,17 @@ impl ComTool {
     /// 给鼠标用户用；键盘走 ↑ / ↓（判定规则见 [`crate::send::HistoryNav`]）。
     /// 两个入口改的是同一份 `send_history`，不存在"两个历史"。
     pub(crate) fn send_history_menu(&mut self, ui: &mut Ui) {
+        let s = self.language.strings();
         if self.send_history.is_empty() {
-            ui.add_enabled(false, egui::Button::new("发送历史"));
-            ui.weak("还没有发送记录");
+            ui.add_enabled(false, egui::Button::new(s.send_history_label));
+            ui.weak(s.no_send_history);
             return;
         }
 
         ui.menu_button(
-            format!(
-                "发送历史（{} / {MAX_SEND_HISTORY}）",
-                self.send_history.len()
+            fill(
+                s.send_history_count,
+                &[&self.send_history.len(), &MAX_SEND_HISTORY],
             ),
             |ui| {
                 // 从最新往旧列，符合"想找回刚发过的那条"的实际用法。
@@ -219,7 +231,7 @@ impl ComTool {
                     // 多行内容在菜单里只显示第一行，否则会把菜单撑爆
                     let label = text.lines().next().unwrap_or("").to_string();
                     let label = if label.is_empty() {
-                        "<空行>".to_string()
+                        s.empty_line.to_string()
                     } else {
                         label
                     };
@@ -229,7 +241,7 @@ impl ComTool {
                     }
                 }
                 ui.separator();
-                if ui.button("清空历史").clicked() {
+                if ui.button(s.clear_history).clicked() {
                     self.send_history.clear();
                     self.send_history_nav.reset();
                     ui.close();

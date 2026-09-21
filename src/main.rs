@@ -17,6 +17,7 @@ mod receive;
 mod send;
 mod serial_impl;
 mod sidebar;
+mod strings;
 
 /// 应用标题，同时也是 `eframe` 用来定位存档目录的 app id。
 ///

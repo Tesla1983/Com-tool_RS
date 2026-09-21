@@ -13,6 +13,7 @@ use crate::app::{ComTool, Language};
 use crate::chart::{MAX_SAMPLES, MIN_SAMPLES};
 use crate::log_file::render_log_file_name;
 use crate::send::{MAX_REPEAT_INTERVAL_MS, MAX_SEND_HISTORY, MIN_REPEAT_INTERVAL_MS};
+use crate::strings::fill;
 use chrono::Local;
 use eframe::egui;
 use egui::Ui;
@@ -39,10 +40,12 @@ impl ComTool {
         let mut clear_chart = false;
         let mut clear_send_history = false;
 
+        let s = self.language.strings();
+
         // 用局部变量接收窗口开关再回写：与 sidebar.rs 同一套写法，避免在闭包里
         // 同时可变借用 self 与 self.show_settings。
         let mut open = self.show_settings;
-        egui::Window::new("设置")
+        egui::Window::new(s.settings_title)
             .collapsible(false)
             .resizable(true)
             .open(&mut open)
@@ -50,13 +53,15 @@ impl ComTool {
             .show(ui.ctx(), |ui| {
                 ui.set_min_width(400.0);
 
-                ui.heading("界面");
+                ui.heading(s.sec_interface);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("主题"));
-                    theme_radios(ui, &mut self.theme);
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.theme_label));
+                    theme_radios(ui, &mut self.theme, s);
                 });
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("语言"));
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.language_label));
+                    // 「中文」/「English」两档**各自写自己的名字**，不随界面语言变：
+                    // 界面已经切成英文时，找中文那一档的人要认得出"中文"两个字。
                     egui::ComboBox::from_id_salt("language")
                         .selected_text(match self.language {
                             Language::Zh => "中文",
@@ -67,116 +72,121 @@ impl ComTool {
                             ui.selectable_value(&mut self.language, Language::En, "English");
                         });
                 });
-                ui.weak("语言选项尚未接入界面文案，仅作占位");
+                ui.weak(s.language_applies_immediately);
 
                 ui.separator();
-                ui.heading("文本编码");
+                ui.heading(s.sec_text_encoding);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("编码"));
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.encoding_label));
                     text_encoding_radios(ui, &mut self.text_encoding);
                 });
-                ui.weak("接收解码与发送编码共用这一档：不会出现「收到的中文按 GBK 解出来、发出去的却是 UTF-8」");
-                ui.weak("GBK 与 GB18030 的接收结果相同（共用解码器），仅发送时的可表示字符范围不同");
-                ui.weak("切换到别的编码会丢弃上一批残留的半个字符，已经显示的内容不受影响");
+                ui.weak(s.encoding_shared_note);
+                ui.weak(s.encoding_gbk_note);
+                ui.weak(s.encoding_switch_note);
 
                 ui.separator();
-                ui.heading("接收");
+                ui.heading(s.sec_receive);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("时间戳前缀"));
-                    timestamp_radios(ui, &mut self.timestamp_prefix);
+                    ui.add_sized(
+                        [LABEL_WIDTH, 20.0],
+                        egui::Label::new(s.timestamp_prefix_field),
+                    );
+                    timestamp_radios(ui, &mut self.timestamp_prefix, s);
                 });
-                ui.weak("形如 [12:00:00.123] 的本地时间前缀；每行 = 每个换行后重新标注，每批 = 每次收到数据标注一次");
-                ui.weak("前缀是显示注解而不是收到的数据：它会随接收区一起进导出文件与实时日志，但不会进入图表解析");
+                ui.weak(s.ts_note);
+                ui.weak(s.ts_note_2);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("日志长度上限"));
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.max_log_field));
                     ui.add(
                         egui::DragValue::new(&mut self.max_log_chars)
                             .range(0..=1_000_000)
                             .speed(200.0),
                     );
-                    ui.label("字符（0 = 不限）");
+                    ui.label(s.chars_unlimited);
                 });
-                ui.weak("超出上限时从最旧的内容开始淘汰，三种接收视图同步裁剪");
-                ui.checkbox(&mut self.auto_scroll, "自动滚动到最新");
+                ui.weak(s.max_log_note);
+                ui.checkbox(&mut self.auto_scroll, s.auto_scroll_latest);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("重绘间隔"));
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.repaint_field));
                     ui.add(
                         egui::DragValue::new(&mut self.repaint_interval_ms)
                             .range(16..=1000)
                             .speed(1.0),
                     );
-                    ui.label("ms（16~1000，越小越跟手也越耗电）");
+                    ui.label(s.repaint_note);
                 });
 
                 ui.separator();
-                ui.heading("发送");
+                ui.heading(s.send_title);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("负载格式"));
-                    send_format_radios(ui, &mut self.send_format);
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.payload_format));
+                    send_format_radios(ui, &mut self.send_format, s);
                 });
-                ui.weak("HEX 时输入按十六进制解析：允许空格 / 逗号分隔与 0x 前缀；解析失败不会发送，也不会清空输入框");
+                ui.weak(s.hex_note);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("行尾"));
-                    send_line_ending_radios(ui, &mut self.send_line_ending);
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.line_ending));
+                    send_line_ending_radios(ui, &mut self.send_line_ending, s);
                 });
-                ui.weak("追加在字节层：HEX 模式下发出的是 0x0A / 0x0D 0x0A 两个字节，不是字符");
-                ui.checkbox(&mut self.clear_send_after_send, "发送后清空输入框");
+                ui.weak(s.ending_note);
+                ui.checkbox(&mut self.clear_send_after_send, s.clear_after_send);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("定时发送间隔"));
+                    ui.add_sized(
+                        [LABEL_WIDTH, 20.0],
+                        egui::Label::new(s.repeat_interval_field),
+                    );
                     ui.add(
                         egui::DragValue::new(&mut self.repeat_interval_ms)
                             .range(MIN_REPEAT_INTERVAL_MS..=MAX_REPEAT_INTERVAL_MS)
                             .speed(10.0),
                     );
-                    ui.label(format!("ms（{MIN_REPEAT_INTERVAL_MS}~{MAX_REPEAT_INTERVAL_MS}）"));
+                    ui.label(fill(
+                        s.repeat_interval_range,
+                        &[&MIN_REPEAT_INTERVAL_MS, &MAX_REPEAT_INTERVAL_MS],
+                    ));
                 });
-                ui.weak("开关在发送区；断开连接会自动关掉，且不跨进程延续（重启后一定是关的）");
+                ui.weak(s.repeat_note);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("发送历史"));
-                    ui.label(format!("{} / {MAX_SEND_HISTORY} 条", self.send_history.len()));
-                    if ui.button("清空历史").clicked() {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.send_history_label));
+                    ui.label(fill(
+                        s.send_history_count_text,
+                        &[&self.send_history.len(), &MAX_SEND_HISTORY],
+                    ));
+                    if ui.button(s.clear_history).clicked() {
                         clear_send_history = true;
                     }
                 });
-                ui.weak("↑ / ↓ 在输入框首行 / 末行时取历史（首行按 ↑、末行按 ↓）；连续发送相同内容只记一条");
+                ui.weak(s.history_note);
 
                 ui.separator();
-                ui.heading("实时图表");
-                ui.checkbox(
-                    &mut self.show_chart_panel,
-                    "显示图表面板（也可从「视图 → 面板」切换）",
-                );
+                ui.heading(s.nav_chart);
+                ui.checkbox(&mut self.show_chart_panel, s.chart_panel_checkbox);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("样本上限"));
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.max_samples_field));
                     ui.add(
                         egui::DragValue::new(&mut self.chart_max_samples)
                             .range(MIN_SAMPLES..=MAX_SAMPLES)
                             .speed(100.0),
                     );
-                    ui.label(format!("点/曲线（{MIN_SAMPLES}~{MAX_SAMPLES}）"));
+                    ui.label(fill(s.samples_range, &[&MIN_SAMPLES, &MAX_SAMPLES]));
                 });
-                ui.weak("超出上限时从最旧的样本开始淘汰；绘制时每条曲线最多取 4000 点");
-                ui.checkbox(
-                    &mut self.chart_auto_bounds,
-                    "自动缩放（关掉后保留手动拖动/缩放的视图）",
-                );
+                ui.weak(s.samples_note);
+                ui.checkbox(&mut self.chart_auto_bounds, s.auto_bounds_checkbox);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("当前数据"));
-                    if ui.button("清空图表").clicked() {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.current_data));
+                    if ui.button(s.clear_chart).clicked() {
                         clear_chart = true;
                     }
-                    ui.label(format!(
-                        "{} 通道 · {} 样本",
-                        self.chart.channel_count(),
-                        self.chart.sample_count()
+                    ui.label(fill(
+                        s.chart_count_text,
+                        &[&self.chart.channel_count(), &self.chart.sample_count()],
                     ));
                 });
-                ui.weak("格式：一行一组样本，字段用逗号分隔（如 1.0,2.0,3.0）；与接收显示模式无关");
+                ui.weak(s.chart_format_note);
 
                 ui.separator();
-                ui.heading("文件日志");
+                ui.heading(s.file_log);
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("文件名模板"));
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.file_name_template));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.default_log_file_name)
                             .desired_width(240.0),
@@ -184,31 +194,34 @@ impl ComTool {
                 });
                 // 把模板实时展开给用户看：占位符写错（例如 %Q）时会退回默认模板，
                 // 与其等开始记录时才发现，不如当场看见将要生成的名字。
-                ui.weak(format!(
-                    "下次开始记录时生成: {}",
-                    render_log_file_name(&self.default_log_file_name, Local::now())
+                ui.weak(fill(
+                    s.next_file_name,
+                    &[&render_log_file_name(
+                        &self.default_log_file_name,
+                        Local::now(),
+                    )],
                 ));
 
                 ui.horizontal(|ui| {
-                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("输出目录"));
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.output_dir_field));
                     ui.label(self.effective_log_dir().display().to_string());
                 });
                 ui.horizontal(|ui| {
                     ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
-                    if ui.button("选择目录").clicked() {
+                    if ui.button(s.pick_dir).clicked() {
                         pick_dir = true;
                     }
-                    if ui.button("恢复默认").clicked() {
+                    if ui.button(s.restore_default).clicked() {
                         reset_dir = true;
                     }
                     if self.is_logging() {
-                        ui.label(format!("记录中，已写 {} 字节", self.log_written_bytes()));
+                        ui.label(fill(s.logging_written, &[&self.log_written_bytes()]));
                     }
                 });
-                ui.weak("接收区的内容会同步写入该文件；日志文件不受上面的长度上限约束");
+                ui.weak(s.log_note);
 
                 ui.separator();
-                ui.weak("以上均为用户偏好，改动即时生效并在退出时自动保存");
+                ui.weak(s.prefs_note);
             });
         self.show_settings = open;
 

@@ -77,22 +77,24 @@ src/
 │                           + 样本 FIFO 淘汰 + 通道上限（20 测试）
 ├── log_file.rs   (801)     实时文件日志：后台写盘线程 + 文件名模板渲染
 │                           + 同名防截断 + 待写队列上限（14 测试）
-├── sidebar.rs    (288)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
+├── sidebar.rs    (298)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
+├── send.rs       (654)     发送侧纯逻辑：HEX 解析 / 行尾 / 编码 / 历史浏览（27 测试）
+├── strings.rs    (664)     界面文案表（中英同宏臂）+ fill（9 测试，含源码级守卫）
 ├── config.rs     (497)     持久化策略 + 启动不变量修复（15 测试）
 ├── panels/
-│   ├── mod.rs     (151)    面板模块出口（5 条无头 UI 冒烟测试）
-│   ├── menu_bar.rs(132)    顶部菜单栏；返回 MenuAction；主题/时间戳/显示模式单选共用入口
-│   ├── settings.rs(182)    设置窗口（含实时图表与文件日志区块）
-│   ├── chart.rs   (223)    实时图表面板：egui_plot 绘制 + 绘制点抽样（5 测试）
-│   └── info.rs    (53)     信息窗口
-├── communicationtrait.rs (68)  ByteChannel trait + ChannelEvent
+│   ├── mod.rs     (208)    面板模块出口（6 条无头 UI 冒烟测试，含英文界面）
+│   ├── menu_bar.rs(257)    顶部菜单栏；返回 MenuAction；主题/时间戳/编码/发送格式单选共用入口
+│   ├── settings.rs(244)    设置窗口（含实时图表与文件日志区块）
+│   ├── chart.rs   (224)    实时图表面板：egui_plot 绘制 + 绘制点抽样（5 测试）
+│   └── info.rs    (52)     信息窗口
+├── communicationtrait.rs (181)  ByteChannel trait + ChannelEvent + `#[cfg(test)] mod fake` 替身
 ├── serial_impl/
 │   ├── channel.rs (368)    串口后台线程实现（6 测试）
 │   ├── config.rs  (46)     SerialConfig + 波特率档位
 │   └── mod.rs     (13)     出口
 ```
 
-测试函数合计 **116**（`cargo test` 报 115 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
+测试函数合计 **180**（`cargo test` 报 179 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
 需要目视时用 `cargo test app_icon::tests::ascii_preview -- --ignored --nocapture`）。
 
 **权威约定文档**（改代码前先读）：
@@ -118,12 +120,12 @@ src/
 
 ### 质量门禁（P0/P1 改动前 → 改动后）
 
-| 命令 | 前 | P0/P1 后 | P4 后 | P5 后 | P6 第 1 批后 | P6 第 2 批 / P3 后 | 本轮（显示模式互斥修复）后 |
-|---|---|---|---|---|---|---|---|
-| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
-| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed** | **109 passed**（1 ignored，为图标 ASCII 预览） | **115 passed**（1 ignored） |
-| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** |
-| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（逐条同上） | **8 warning**（逐条同上） | **8 warning**（逐条同上；本次改动 0 新增） |
+| 命令 | 前 | P0/P1 后 | P4 后 | P5 后 | P6 第 1 批后 | P6 第 2 批 / P3 后 | 本轮（显示模式互斥修复）后 | F1~F3 后 |
+|---|---|---|---|---|---|---|---|---|
+| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
+| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed** | **109 passed**（1 ignored，为图标 ASCII 预览） | **115 passed**（1 ignored） | **179 passed**（1 ignored） |
+| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** |
+| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（逐条同上） | **8 warning**（逐条同上） | **8 warning**（逐条同上；本次改动 0 新增） | **8 warning**（逐条同上；F1~F3 共 0 新增） |
 
 跑法：
 
@@ -132,12 +134,14 @@ cd E:/Downloads/Zed/AI_comtool-rs
 cargo fmt && cargo check --all-targets && cargo test
 ```
 
-115 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
-一条把字节经事件通道注入后核对日志文件内容的集成测试、五条用
+179 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
+一条把字节经事件通道注入后核对日志文件内容的集成测试、六条用
 `egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图、
-侧边栏、图表面板），11 条对应用图标做纯断言的单元测试（尺寸、透明度、渐变、
-前景笔画、越界检查、确定性），以及 17 条 P3 时间戳前缀测试（格式、三种模式下
-的插入位置、跨批次不重复、程序提示不加前缀、清空后重新标注、不进图表）。
+侧边栏、图表面板、英文界面），11 条对应用图标做纯断言的单元测试（尺寸、透明度、渐变、
+前景笔画、越界检查、确定性），17 条 P3 时间戳前缀测试（格式、三种模式下
+的插入位置、跨批次不重复、程序提示不加前缀、清空后重新标注、不进图表），
+以及 F1~F3 带来的 64 条（`send.rs` 发送侧、`app.rs` 用 `FakeChannel` 驱动的发送链路、
+`receive.rs` 的编码矩阵、`strings.rs` 的文案表不变量与源码守卫）。
 显示模式的互斥规则另有 6 条测试（两个点击方向、启动修复方向、合法组合不被改动、
 冲突存档往返后被修好）。
 
@@ -371,6 +375,70 @@ cargo fmt && cargo check --all-targets && cargo test
 
 ---
 
+### 3.7 增量（2026-09-21：新联线 F1 + F2 + F3）
+
+计划本体见 `FUTURE_ROADMAP.md`。三项按顺序落地，各自单独一次提交：
+
+| 提交 | 内容 |
+|---|---|
+| `2e28994` | **F1** 发送侧补齐：HEX 发送 / 行尾 / 定时发送 / 发送历史 |
+| `e2039ff` | **F2** 收发字符编码选择：GBK / GB18030 / UTF-16LE |
+| （本条提交） | **F3** 多语言真接线 |
+
+**F1 新增 `src/send.rs`**（纯逻辑，不依赖 egui / 串口，因此可以直接单测）：
+
+- `parse_hex()`：允许空格 / 逗号 / 分号 / 冒号 / 连字符分隔与 `0x` 前缀。
+  **奇数位、非十六进制字符都返回带原因的 `Err`**，绝不"跳过看不懂的字符"。
+- `encode_text()` / `build_payload()`：四入参顺序固定为「文本 → 格式 → 行尾 → 编码」。
+- `SendHistory`（上限 50，跳过空串与连续重复，进存档）+ `HistoryNav`（↑/↓ 浏览位置）。
+- 定时发送用 **`Instant` 差值**计时（不是每帧累加，否则帧率波动会漂移）；勾上的那一刻
+  **只起步计时、不立刻发一包**；断开连接一律 `stop_repeat_send()`，且不跨进程延续。
+- 「发送后清空」的语义是**"确实发出去了"才清空**：HEX 解析失败与写失败都保留输入。
+  这是 F1 期间由测试撞出来的一个**真实行为修正**（原实现写失败也清）。
+
+**F1 的测试口子**：`communicationtrait.rs` 里新增 `#[cfg(test)] mod fake`
+（`FakeChannel` + `FakeHandle`）。它让"发送链路 + 连接生命周期"能在 `cargo test`
+里完整跑通——**不需要串口硬件**，也不需要启动 GUI。后续给 `ByteChannel` 加实现
+（F4 的 TCP/UDP）时，这个替身是验证 `receive_data()` 分支的现成手段。
+
+**F2 新增依赖 `encoding_rs`**（本阶段唯一新增依赖）：GBK / GB18030 走它的
+**增量解码器**，被截断的多字节序列留在解码器内部等下一批，跨包拼接不会退化成逐批
+lossy。三个坑：
+
+1. **GBK 与 GB18030 共用解码器、编码器不同**——界面上必须说明这一点，否则用户看到
+   两档"好像一样"会犯嘀咕。
+2. **UTF-16LE 在 `encoding_rs` 里只支持解码**：它的 `encode()` 会把 UTF-8 字节原样退回。
+   所以小端字节由 `encode_utf16()` + `to_le_bytes()` 手写，且**不加 BOM**。
+3. 切换编码时 `AnsiDecoder::sync_encoding()` 丢弃残留半截序列，
+   `config::restore_runtime_state()` 也会重置，避免把上一编码的字节按新编码解释。
+
+**F3 新增 `src/strings.rs`**（界面文案表）。关键设计：
+
+- 用 `macro_rules! strings!` 把**中英两列写在同一条宏臂里**（`字段名: "中文", "English";`）。
+  这比路标原写的"`struct` + 两个 `static`"更强：漏翻译不是"编译错误"，而是**写不出来**。
+- `Language::strings() -> &'static Strings`：返回 `'static`，取出来就不借用 `self`，
+  于是 `&mut self` 的方法体里可以随手取用。
+- **带占位符的文案不能 `format!(s.xxx, arg)`**——`format!` 的格式串必须是字面量
+  （变量会报 `format argument must be a string literal`）。改用 `strings::fill(模板, &[&实参])`。
+- **接收区 / 日志里的程序提示行不翻译**（"串口已关闭"、"已导出到: …"）。它们会同步写进
+  实时日志与导出文件；随界面语言变化会让同一台设备产出的两份日志不可比。
+- 删掉了 `TimestampPrefix::label()`（原来硬编码"关闭 / 每行 / 每批"）。领域类型上挂着
+  界面词汇，迟早有人顺手用上，那几个词就再也不会被翻译。现在必须显式传文案表。
+- **源码级守卫** `strings::tests::ui_sources_do_not_hardcode_chinese`：扫描 5 个纯 UI
+  文件（sidebar / menu_bar / settings / info / chart），出现硬编码中文字面量就失败。
+  唯一豁免是语言下拉里的「中文」（档位**自名**，切到英文时也要写"中文"）。
+  这条测试写完立刻抓到两处真问题，不是摆设（详见该测试与 `contains_token` 的注释）。
+  `app.rs` / `receive.rs` / `log_file.rs` **故意不在清单里**——它们按设计保留中文提示行。
+
+**门禁**：`cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** ·
+`cargo test` **179 passed / 1 ignored** · clippy **8 条**（与之前逐条相同，本阶段 0 新增）。
+
+**未做 / 未验证**：三项都**没有实机运行过**（不启动 GUI、不碰串口是硬规则）。F3 的
+"切到 English 后界面全是英文"只由文案表不变量 + 无头渲染冒烟测试保证，
+**外观与英文文案的通顺度仍需人工过一遍**——§4② 的手工验证清单已加入这一项。
+
+---
+
 ## 4. 未决事项
 
 ### ① GPLv3 合规（**已降为最低优先级**）
@@ -447,6 +515,24 @@ cargo fmt && cargo check --all-targets && cargo test
 26. 若手边正好有修复前留下的存档（`hex_view` 与 `ascii_view` 都是 `true`），直接启动 →
     接收区应有内容（HEX 视图），而不是空白的字节视图
 
+**同一趟也可以把 F1 / F2 / F3 一起验掉**（见 §3.7）：
+
+27. **F1 发送格式**：发送区选「HEX」，输入 `48 656c` → 预览应显示「将发送 3 字节」
+    （**三个**字节，不是把 `48 656c` 拼起来）；输入 `4`（奇数位）或 `zz` →
+    预览应显示红色的「HEX 解析失败: …」，点「发送」**不清空**输入框
+28. **F1 行尾**：切到「CRLF」+ HEX 模式 → 发出的应是 `0D 0A` 两个**字节**（用字节查看视图确认）
+29. **F1 定时发送**：勾上「定时发送」的**那一刻不该有数据出去**；到点后才开始周期性发送；
+    点「关闭串口」→ 勾选框应自动取消（重连后不会自己接着发）
+30. **F1 发送历史**：光标在输入框首行按 ↑ → 取上一条历史；连按 ↑ 逐条往前；
+    自己改一下内容再按 ↑ → 从编辑态重新开始
+31. **F2 编码**：把编码切到「GBK」，鼠标走「发送」→ 用字节查看视图确认发出的是 GBK 字节
+    （不是 UTF-8）；把「HEX 接收」打开看设备回显，中文应能正确解出（**这一条必须实机确认**）
+32. **F3 语言**：设置窗口把语言切到 English → 菜单栏 / 侧边栏 / 设置窗口 / 信息窗口 /
+    图表面板 / 发送区应**全部为英文，无中文残留**；再切回中文 → 与改动前**逐字一致**
+33. **F3 不翻译的部分**：English 下打开一次串口再关闭 → 接收区里的「已打开 …」/「串口已关闭」
+    应**仍然是中文**（这是决策：这些行会进日志文件与导出文件，不能随界面语言变）
+34. English 下重开程序 → 语言选择应被记住（`language` 已落盘）
+
 ### ③ 仓库状态
 
 `AI_comtool-rs` 的 `ai-refactor` 分支工作区是干净的。
@@ -483,7 +569,7 @@ cargo fmt && cargo check --all-targets && cargo test
 > | 文档 | 基线 | 覆盖率口径 | 状态 |
 > |---|---|---|---|
 > | `FEATURE_GAP_AND_PLAN.md` | `SerialGUI-rs` v1.4.0（Rust + egui，GPLv3） | 约 **90%** | P0~P6 **已收口**（唯一明确不做的是版本检查） |
-> | `FUTURE_ROADMAP.md` | `Neutree/COMTool`（Python + PyQt5） | 约 **49%**（26/53 项） | **新开的计划线**：F1~F4 待做，插件架构明确不做 |
+> | `FUTURE_ROADMAP.md` | `Neutree/COMTool`（Python + PyQt5） | 约 **49%**（26/53 项） | **新开的计划线**：F1~F3 已完成，F4 待做，插件架构明确不做 |
 >
 > 两者**没有血缘关系**——`Neutree/COMTool` 只是同名同类的另一个项目、规模大一个量级，
 > 拿它当基线时覆盖率自然掉到一半，不代表项目退步。下面 §6.1 是收口的旧线，
@@ -518,17 +604,17 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
 
 见 **`FUTURE_ROADMAP.md`**（含逐项设计约束、验收标准、排除说明）。按性价比排序：
 
-| 序 | 项 | 工期 | 备注 |
+| 序 | 项 | 工期 | 状态 / 备注 |
 |---|---|---|---|
-| **F1** | 发送侧补齐（HEX 发送 / 行尾 / 定时发送 / 发送历史） | 1~2 天 | 第一优先；零新依赖；「发送文件」需先有待发队列背压 |
-| **F2** | 编码选择（GBK / GB18030） | 2~3 天 | 需新增 `encoding_rs`；**必须走增量解码**，不能退化成 lossy |
-| **F3** | 多语言真接线 | 2~3 天 | 改动面大但机械；接收区/日志内的提示行**不翻译** |
-| **F4** | TCP / UDP 客户端 | 3~5 天 | 零新依赖（`std::net`）；`app.rs:110` 已是 `Box<dyn ByteChannel>`，口子现成 |
+| **F1** | 发送侧补齐（HEX 发送 / 行尾 / 定时发送 / 发送历史） | 1~2 天 | ✅ **已完成**（`2e28994`）。新增 `src/send.rs`（纯逻辑可单测）+ `FakeChannel` 测试替身；「发送文件」仍未做（需先有待发队列背压） |
+| **F2** | 编码选择（GBK / GB18030） | 2~3 天 | ✅ **已完成**（`e2039ff`）。新增依赖 `encoding_rs`；走增量解码，未退化成 lossy |
+| **F3** | 多语言真接线 | 2~3 天 | ✅ **已完成**。新增 `src/strings.rs`（中英同宏臂，漏翻译写不出来）+ 源码级守卫测试；接收区/日志内的提示行**不翻译** |
+| **F4** | TCP / UDP 客户端 | 3~5 天 | ⬜ **待做**。零新依赖（`std::net`）；`app.rs:110` 已是 `Box<dyn ByteChannel>`，口子现成；`ChannelEvent::Closed` 目前是 `#[allow(dead_code)]`，F4 正好把它消掉 |
 | ~~⑤~~ | ~~插件架构（**扩展机制本身**）~~ | — | **明确不做**：与"单 binary、全部行为可单测"的形态互斥 |
 | **D1~D3** | SSH / terminal 插件 / 协议脚本 | — | ⏸️ **待定开发（未排期）**：不是被否决而是时机未到，各自有明确的触发条件。SSH 复用 F4 的连接类型分叉框架；协议脚本建议先试"配置化协议预设表" |
 
-**总工期 8~13 个工作日**。另有 3 条**既有缺陷与 F1/F4 同路径**，建议一起处理：
-`connected` 假阳性（→ F4）、自动重连无退避（→ F4）、待发队列无上限（→ F1 的前置条件）。
+**剩余工期 3~5 个工作日（只剩 F4）**。另有 3 条**既有缺陷与 F1/F4 同路径**：
+`connected` 假阳性（→ F4）、自动重连无退避（→ F4）、待发队列无上限（→ F1 的「发送文件」前置条件）。
 
 本文件未列出的新功能（例如图表按通道显示/隐藏、x 轴改成真实时间基准）仍不在任何计划内。
 
@@ -540,7 +626,7 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
 
 0. **⛔ 未经项目所有者逐次批准，禁止运行本项目（`cargo run` / 直接跑 exe），禁止以任何方式
    占用或打断 COM3。** 开发阶段只用 `cargo fmt` / `cargo check --all-targets` / `cargo test`
-   验证（115 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
+   验证（179 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
    完整条文在 `AGENTS.md` 顶部与 `DEVELOPMENT_GUIDE.md` §0。
    **该规则已配置机器级硬拦截**：PreToolUse 钩子 `~/.workbuddy/hooks/comtool-run-guard.sh`
    （注册于 `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json`），命中即拒绝工具调用，
@@ -591,6 +677,20 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
     主界面里不能"。参数是"本轮哪个刚被勾上"，**不要改成无条件让 HEX 胜出**：那样用户点
     「字节查看」会被当场撤销，表现为"点了没反应"。原因见 §3.6：两个同时为真时字节视图
     渲染的 `ascii_spans` 自始至终没人写过，接收区是**一片空白**。
+16. **界面文案一律走 `self.language.strings()`，不许硬编码中文**（F3 起）。新增文案在
+    `src/strings.rs` 的 `strings!` 宏里**同时写中英两列**；带 `{}` 的文案用
+    `strings::fill(s.字段名, &[&实参])`，**不能**写 `format!(s.字段名, 实参)`
+    （`format!` 的格式串必须是字面量）。`strings::tests::ui_sources_do_not_hardcode_chinese`
+    会扫描 `sidebar.rs` 与 `panels/*`，硬编码中文直接测试失败。**接收区 / 日志里的程序提示行
+    不翻译**——它们会写进实时日志与导出文件，随语言变化会让两份日志不可比。
+17. **发送只有一条路**：按钮 / Enter / 定时发送都走 `ComTool::send_data()`。它清空输入框的
+    前提是"**确实发出去了**"（`clear_send_after_send && !write_failed`）；解析失败与写失败
+    都必须保留输入。发送侧新逻辑优先放进 `send.rs`（纯逻辑，可单测）。测发送链路用
+    `communicationtrait::fake` 的替身通道，不要试图用真实串口。
+18. **收发共用一档编码 `text_encoding`**（F2 起），解码**必须**走 `encoding_rs::Decoder`
+    增量解码，不能"收到一批就 lossy 解一次"。GBK 与 GB18030 **共用解码器**（只有编码器不同）；
+    UTF-16LE 在 `encoding_rs` 里**只支持解码**，小端字节要手写且不加 BOM。切档时丢弃上一批
+    残留的半个字符（`AnsiDecoder::sync_encoding()` + `restore_runtime_state()` 两处）。
 
 ---
 
@@ -631,7 +731,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 115 passed / 1 ignored / fmt 干净）
+# 3. 建立门禁基线（应为 0 warning / 179 passed / 1 ignored / fmt 干净）
 cargo fmt && cargo check --all-targets && cargo test
 
 # 4. 看清两个版本的差异

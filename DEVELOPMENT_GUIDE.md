@@ -16,7 +16,7 @@
   默认值、配置、测试或脚本；不得停止/杀掉/禁用任何可能占用 COM3 的进程、服务或驱动。
   对 COM3 只能"看"（不打开端口的只读枚举，且需先说明理由），不能"碰"。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。115 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。179 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
 - 一次批准只对当次生效，不构成对后续轮次的授权。
@@ -63,18 +63,20 @@
 |---|---|
 | `src/main.rs` | 入口；`APP_TITLE` 常量；字体回退链配置；`eframe::run_native`；把 `app_icon::generate()` 挂进 `ViewportBuilder` |
 | `src/app_icon.rs` | 应用图标：256×256 圆角方波图标，代码绘制、零资源文件、11 条单元测试，不依赖 GUI |
-| `src/app.rs` | `ComTool` 状态、`Default`、`ThemeChoice`、串口生命周期、视图级辅助方法、`eframe::App` 顶层编排 |
-| `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`、字节级可视化、可选时间戳前缀（`TimestampPrefix`）、三种视图渲染、`max_log_chars` FIFO 淘汰 |
+| `src/app.rs` | `ComTool` 状态、`Default`、`Language` / `ThemeChoice`、串口生命周期、视图级辅助方法、`eframe::App` 顶层编排 |
+| `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`（含 `TextEncoding` 增量解码）、字节级可视化、可选时间戳前缀（`TimestampPrefix`）、三种视图渲染、`max_log_chars` FIFO 淘汰 |
+| `src/send.rs` | 发送侧纯逻辑：`parse_hex()`、`encode_text()` / `build_payload()`、`SendHistory` / `HistoryNav`、定时发送间隔钳制；**不依赖 `egui` 与串口**，因此可直接单测 |
+| `src/strings.rs` | 界面文案表：`Strings` + `ZH` / `EN` + `Language::strings()`；`fill()` 填充 `{}` 模板；源码级守卫测试（UI 源码不许硬编码中文） |
 | `src/log_file.rs` | 实时文件日志：后台写盘线程（`LogSink`）、文件名模板渲染、同名防截断、待写队列上限 |
 | `src/chart.rs` | 实时图表数据层：原始字节 → 多通道数值序列（`ChartData`）、跨包分片、样本 FIFO、非数值计数；不依赖 `egui` |
 | `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态 |
-| `src/panels/mod.rs` | 面板模块声明 + 无头 UI 冒烟测试 |
-| `src/panels/menu_bar.rs` | 顶部菜单栏（文件 / 设置 / 视图）；返回 `MenuAction` |
+| `src/panels/mod.rs` | 面板模块声明 + 无头 UI 冒烟测试（含英文界面） |
+| `src/panels/menu_bar.rs` | 顶部菜单栏（文件 / 设置 / 视图 / 文本 / 发送）；返回 `MenuAction`；各档单选（主题 / 时间戳 / 编码 / 发送格式与行尾）共用一处定义 |
 | `src/panels/settings.rs` | 设置窗口：把用户偏好接到真正的控件上 |
 | `src/panels/info.rs` | 信息窗口：版本、技术栈、存档路径、快捷键 |
 | `src/panels/chart.rs` | 实时图表面板：`egui_plot` 绘制、图例、绘制点抽样（`points_for_drawing`） |
 | `src/config.rs` | 持久化策略 + 启动时不变量修复 |
-| `src/communicationtrait.rs` | `ByteChannel` trait 与 `ChannelEvent` |
+| `src/communicationtrait.rs` | `ByteChannel` trait 与 `ChannelEvent`；附 `#[cfg(test)] mod fake` 通道替身 |
 | `src/serial_impl/channel.rs` | 串口实现：后台线程 + 命令/事件双通道 |
 | `src/serial_impl/config.rs` | `SerialConfig` 与波特率档位 |
 
@@ -250,6 +252,12 @@ ui.button("发送") → send_data() → ByteChannel::write(bytes)
 └────────────────────────────────────────────────────────────┘
 ```
 
+> **⑤ 的补充（F3 起）**：控件文案**不许**硬编码。取 `let s = self.language.strings();`
+> 之后用 `s.字段名`；带占位符的文案用 `strings::fill(s.字段名, &[&实参])`
+> （`format!` 不接受变量作格式串）。新增文案在 `src/strings.rs` 的 `strings!` 宏里
+> **同时写中英两列**——宏的形态决定了写不出单列。接收区 / 日志里的**提示行不翻译**，
+> 详见注意事项第 31 条。
+
 ---
 
 ## 4. 实例演示：添加「接收字节计数」
@@ -335,6 +343,13 @@ impl eframe::App for ComTool {
 | 清空图表 | `chart` | `clear_chart()`（`chart.rs`） | 图表面板「清空图表」/ 设置窗口 |
 | 应用图标 | — | `app_icon::generate()`（`app_icon.rs`） | 编译期生成；`main.rs` 挂进 `eframe::NativeOptions::viewport` |
 | release 编译优化级别 | — | `[profile.release] opt-level = 2`（`Cargo.toml`） | 仅影响 `cargo build --release` / `cargo run --release` |
+| 发送格式（文本 / HEX） | `send_format` | `parse_hex()` / `build_payload()`（`send.rs`） | 发送区 / 发送菜单 / 设置窗口三处共用 `send_format_radios()` |
+| 发送行尾（无 / LF / CRLF） | `send_line_ending` | `build_payload()`（`send.rs`，**字节层**追加） | 发送区 / 发送菜单 / 设置窗口三处共用 `send_line_ending_radios()` |
+| 定时发送 | `repeat_send`（运行时，不落盘）、`repeat_interval_ms` | `tick_repeat_send()` / `stop_repeat_send()`（`app.rs`）；间隔钳制在 `send.rs` | 发送区 / 发送菜单的「定时发送」勾选框 + 间隔框 |
+| 发送历史与 ↑/↓ 浏览 | `send_history`（落盘）、`send_history_nav`、`send_cursor_index`（运行时） | `SendHistory` / `HistoryNav` / `on_first_line()` / `on_last_line()`（`send.rs`） | 发送区「发送历史」下拉 / ↑↓ 键 / 设置窗口「清空历史」 |
+| 收发字符编码 | `text_encoding` | `TextEncoding`（`receive.rs`）、`encode_text()`（`send.rs`） | 文本菜单 / 设置窗口「文本编码」区，两处共用 `text_encoding_radios()` |
+| 界面语言 | `language` | `Language::strings()`（`strings.rs`） | 设置窗口「语言」下拉 |
+| 界面文案表 | — | `Strings` / `ZH` / `EN` / `fill()`（`strings.rs`） | 所有 UI 控件文案（接收区/日志提示行除外，见 §6 第 31 条） |
 
 ---
 
@@ -394,7 +409,7 @@ impl eframe::App for ComTool {
 23. **绘制点数必须封顶，且抽样要保留最后一个点**：`panels/chart.rs::points_for_drawing` 把每条曲线抽到 `MAX_DRAWN_POINTS`（4000）以内。样本上限是用户可以调到 10 万的设置项，而 `egui_plot` 每帧都要把点转成它自己的结构——不封顶的话一个设置项就能把界面拖死。抽样时**必须留下最后一个点**（那是最新数据），只按步长取点会把曲线末端切掉，看起来像"设备停了"。曲线配色 `CHANNEL_COLORS` 是**数据编码**（哪条线是哪个通道），刻意不随主题变化，并与主题色区分开。
 
 24. **`egui_plot` 的版本号与 `egui` 并不同步**：`egui_plot 0.37` 才依赖 `egui ^0.36`，而 `egui_plot 0.36` 依赖的是 `egui ^0.35`。升级任何一个之前先核实真实依赖（`cargo tree -i egui`，或直接看本地 `registry/src/**/egui_plot-*/Cargo.toml`），不要凭版本号数字相同就断定兼容。
-25. **`Cargo.toml` 已清理两个死依赖并固定 release 优化级别**：`tokio`（features = `["full"]`，零调用）与 `egui-chinese-font`（零调用，中文字体走 `main.rs::setup_fonts` 直接读系统字体）已移除；`[profile.release] opt-level = 2` 已添加，用于与上游保持一致并缩短 release 构建时间。`chrono` / `rfd` / `serde` / `serialport` / `egui_plot` 仍是活跃依赖。
+25. **`Cargo.toml` 已清理两个死依赖并固定 release 优化级别**：`tokio`（features = `["full"]`，零调用）与 `egui-chinese-font`（零调用，中文字体走 `main.rs::setup_fonts` 直接读系统字体）已移除；`[profile.release] opt-level = 2` 已添加，用于与上游保持一致并缩短 release 构建时间。当前活跃依赖：`chrono` / `rfd` / `serde` / `serialport` / `egui_plot`，以及 F2 新增的 **`encoding_rs`**（GBK / GB18030 的增量解码，Mozilla 维护、纯 Rust、无 C 依赖）。这也是 `FEATURE_GAP_AND_PLAN.md` §8 那句"当前依赖集是最终形态"必须加例外说明的原因。
 26. **应用图标在 `src/app_icon.rs` 里用代码画出来**，而不是 `assets/icon.png`：256×256 圆角方形 + 数字脉冲波形，4×4 超采样做边缘抗锯齿，11 条单元测试覆盖尺寸、透明度、渐变、前景笔画与越界检查。这样没有资源文件丢失风险，图标行为也能在 `cargo test` 里被断言（`egui::__run_test_ui` 只能证明"画得出来不 panic"，而图标的几何正确性靠纯计算测试）。颜色与波形需要人工肉眼确认时，见 `src/app_icon.rs` 末尾的 `#[ignore]` ASCII 预览测试。
 27. **时间戳前缀是"显示注解"，不是数据**：它插在**片段层**（`timestamped_spans()`），因为 `receive_text` 是由片段拼接而来的——在文本层再插一遍迟早会与片段镜像走偏。它因此会进导出文件与实时日志，但**绝不进** `chart.push_bytes()` 的那份原始字节（图表解析的必须是设备真正发来的内容，`receive::tests::timestamps_do_not_leak_into_the_chart` 盯着这一点）。
     - 行首状态**不要另设字段**：`at_receive_line_start()` 从 `receive_text` 尾部推导（空串或以 `\n` 结尾）。三种显示模式、`push_receive_note()`、`clear_receive()` 都在写这个镜像，任何平行字段都会在某个分支上与它不一致，而症状只是"少一个时间戳"，很难注意到。
@@ -407,3 +422,25 @@ impl eframe::App for ComTool {
     - **参数是"本轮哪个刚被勾上"，不要改成无条件让 HEX 胜出**：那样用户在 HEX 模式下点「字节查看」会被当场撤销，表现为"点了没反应"——比空视图更难排查。本函数负责把点击落实下来（置上刚点的那项、关掉另一项），调用方不必先自己写回字段。
     - 启动时传 `(false, false)` 用于修复旧存档里的非法组合，方向按 `receive_data()` 的分支优先级（HEX 胜出），保证修好后是一份**非空**视图。
     - **不要在某个界面上就地写 `if hex { ascii = false; }`**：规则一分散，迟早出现"菜单里能同时勾上、主界面里不能"这种两边不一致。
+
+29. **发送只有一条路**：UI 的「发送」按钮、Enter 键、定时发送**全部**走 `ComTool::send_data()`。它返回"是否真的把字节交给了通道"，但 UI 调用点**不需要**看返回值（失败原因已经写进接收区）；返回值的存在意义是让测试能断言"解析失败时一个字节都没出去"。
+    - `send.rs` 是**纯逻辑**（不依赖 egui、不依赖串口），所以 HEX 解析、行尾追加、编码、历史浏览全部可以直接单测。新加发送侧逻辑请先问"能不能放进 `send.rs`"。
+    - **解析失败与写失败都不清空输入框**。`self.clear_send_after_send` 的语义是"**确实发出去了**才清空"——写失败（通道断开、设备长时间不收数据）时数据根本没出去，清掉等于让用户重打一遍。
+    - `parse_hex()` **绝不静默吞掉看不懂的字符**：奇数个十六进制位、非十六进制字符都返回带原因的 `Err`。静默跳过会让用户以为发出去的是别的东西。
+    - 定时发送的计时基准是 **`Instant` 差值**，不是"每帧累加一个间隔"（帧率波动会漂移，而重绘间隔本身就是可配的 16~1000ms）。勾上的那一刻**只起步计时、不立刻发一包**；断开连接一律 `stop_repeat_send()`，且 `repeat_send` **不落盘**（重启后一定是关的）。
+
+30. **要用 `ByteChannel` 替身测发送链路时，用 `communicationtrait::fake`**：`#[cfg(test)] mod fake` 提供 `FakeChannel` + `FakeHandle`（记录写入、可拒绝写入、可注入 `ChannelEvent`）。有了它，"发送成功 / 解析失败 / 写失败 / 对端报错"这些路径都能在 `cargo test` 里跑完，**不需要串口硬件、也不启动 GUI**。给 `ByteChannel` 加新实现时，这个替身同样是验证 `receive_data()` 分支的现成手段。
+
+31. **界面文案一律走 `self.language.strings()`，不要硬编码中文**（F3 起）：
+    - 新增文案要在 `src/strings.rs` 的 `strings!` 宏里**同时写中英两列**（`字段名: "中文", "English";`）——宏的形态决定了"只补一种语言"写不出来。
+    - 带占位符的文案**不能**写成 `format!(s.字段名, 实参)`：`format!` 的格式串必须是字面量，传变量会报 `format argument must be a string literal`。用 `strings::fill(s.字段名, &[&实参])`。
+    - 取文案用 `let s = self.language.strings();`——返回值是 `&'static`，不借用 `self`，所以 `&mut self` 的方法体里可以随手取。
+    - **源码级守卫**：`strings::tests::ui_sources_do_not_hardcode_chinese` 会扫描 `sidebar.rs` 与 `panels/*`，出现硬编码中文就失败。唯一豁免是语言下拉里的「中文」（档位自名）。
+    - **接收区 / 日志里的程序提示行不翻译**（"串口已关闭"、"已导出到: …"）。它们会同步写进实时日志与导出文件，随界面语言变化会让同一台设备产出的两份日志不可比、也不能被 grep 脚本处理。所以 `app.rs` / `receive.rs` / `log_file.rs` 里**保留**中文提示行，那是有意为之。
+    - 领域类型上**不要**挂界面词汇（F3 就删掉了 `TimestampPrefix::label()`）：留着迟早有人在别处顺手用上，那几个词就再也不会被翻译。
+
+32. **收发共用一档编码**（F2 起）：`text_encoding` 同时管接收解码与发送编码，界面上必须说明这一点——用户不会希望"收到的中文按 GBK 解出来了、发出去的却是 UTF-8"。
+    - 解**必须走增量解码**（`encoding_rs::Decoder` 挂在 `AnsiDecoder` 上），不能"收到一批就 lossy 解一次"：后者把被截断的多字节序列当场换成替换符，跨包的中文就永远是乱码。`receive::tests` 里有一组跨批次喂 UTF-8 的测试专门盯着它。
+    - **GBK 与 GB18030 在 `encoding_rs` 里共用解码器、编码器不同**，所以两档"接收结果相同"，差别只在发送时的可表示字符范围——界面文案必须讲清，否则用户看到两档"好像一样"会犯嘀咕。
+    - **UTF-16LE 在 `encoding_rs` 里只支持解码**（它的 `encode()` 会把 UTF-8 字节原样退回），所以小端字节由 `encode_utf16()` + `to_le_bytes()` 手写，且**不加 BOM**。另外 UTF-16LE 不做 ANSI 转义解析（`ESC` 是 `1B 00` 两个字节，按字节找 `0x1B` 会把数据吃掉）。
+    - 切换编码时要丢弃上一批残留的半个字符：`AnsiDecoder::sync_encoding()` 与 `config::restore_runtime_state()` 两处都做。

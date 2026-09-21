@@ -419,7 +419,8 @@ impl ComTool {
 
     /// 选择日志输出目录（`None` 表示用户取消，保持原值）。
     pub fn pick_log_dir(&mut self) {
-        let mut dialog = rfd::FileDialog::new().set_title("选择日志输出目录");
+        let mut dialog =
+            rfd::FileDialog::new().set_title(self.language.strings().pick_log_dir_title);
         let current = self.effective_log_dir();
         if current.is_dir() {
             dialog = dialog.set_directory(&current);

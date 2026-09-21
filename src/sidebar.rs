@@ -6,6 +6,7 @@
 
 use crate::app::ComTool;
 use crate::serial_impl::BAUD_RATES;
+use crate::strings::{fill, timestamp_prefix_label};
 use egui::Ui;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 
@@ -35,6 +36,10 @@ impl ComTool {
     pub(crate) fn show_sidebar(&mut self, ui: &mut Ui, open: &mut bool) -> SidebarAction {
         let mut action = SidebarAction::default();
 
+        // 文案表是 `&'static`，取出来之后就不借用 `self` 了，闭包里的 `&mut self`
+        // 仍然可用（`Language` 是 `Copy`，这一句只是把语言字段抄了一份）。
+        let s = self.language.strings();
+
         // 本帧要展示的只读快照。在绘制前统一取值，之后即便闭包内改了串口
         // 参数，已画出的信息区也仍是本帧开始时的状态，不会前后矛盾。
         let port_name = self.selected_port.clone();
@@ -44,6 +49,20 @@ impl ComTool {
         let color_mode = self.color_view;
         let timestamp_mode = self.timestamp_prefix;
         let rx_bytes = self.receive_text.len();
+
+        // 「显示模式」那一行由「HEX / 文本」+「+ 颜色」+「+ 字节查看」拼成。也在这里
+        // 定好：闭包内再去读 `self` 会让同一行的几个勾选项状态来自不同时刻。
+        let display_mode_text = {
+            let mut text = String::from(if hex_mode { s.hex } else { s.text });
+            if color_mode {
+                text.push_str(s.suffix_color);
+            }
+            if self.ascii_view {
+                text.push_str(s.suffix_byte_view);
+            }
+            text
+        };
+        let timestamp_text = timestamp_prefix_label(s, timestamp_mode);
         let port_list = self.ports.clone();
         let is_logging = self.is_logging();
         let log_path = self
@@ -61,56 +80,47 @@ impl ComTool {
             .show_collapsible(ui, open, |ui| {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.heading("侧边栏");
+                    ui.heading(s.nav_sidebar);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let btn = egui::Button::new(egui::RichText::new(">>").size(20.0))
                             .min_size(egui::vec2(32.0, 32.0));
-                        if ui.add(btn).on_hover_text("收起").clicked() {
+                        if ui.add(btn).on_hover_text(s.collapse).clicked() {
                             action.close_requested = true;
                         }
                     });
                 });
                 ui.separator();
 
-                egui::CollapsingHeader::new("串口信息")
+                egui::CollapsingHeader::new(s.serial_info)
                     .default_open(true)
                     .show(ui, |ui| {
-                        ui.label(format!(
-                            "端口: {}",
-                            if port_name.is_empty() {
-                                "未选择"
+                        ui.label(fill(
+                            s.port_label,
+                            &[&if port_name.is_empty() {
+                                s.not_selected
                             } else {
-                                &port_name
-                            }
+                                port_name.as_str()
+                            }],
                         ));
-                        ui.label(format!("波特率: {}", current_baud));
+                        ui.label(fill(s.baud_label, &[&current_baud]));
                         ui.label(if is_connected {
-                            "状态: 已连接"
+                            s.status_connected
                         } else {
-                            "状态: 未连接"
+                            s.status_disconnected
                         });
                     });
 
-                egui::CollapsingHeader::new("接收统计")
+                egui::CollapsingHeader::new(s.rx_stats)
                     .default_open(true)
                     .show(ui, |ui| {
-                        ui.label(format!("接收字节数: {}", rx_bytes));
-                        ui.label(format!(
-                            "显示模式: {}{}{}",
-                            if hex_mode { "HEX" } else { "文本" },
-                            if color_mode { " + 颜色" } else { "" },
-                            if self.ascii_view {
-                                " + 字节查看"
-                            } else {
-                                ""
-                            }
-                        ));
-                        ui.label(format!("时间戳前缀: {}", timestamp_mode.label()));
+                        ui.label(fill(s.rx_bytes_label, &[&rx_bytes]));
+                        ui.label(fill(s.display_mode_line, &[&display_mode_text]));
+                        ui.label(fill(s.timestamp_prefix_line, &[&timestamp_text]));
                     });
 
-                egui::CollapsingHeader::new("可用串口").show(ui, |ui| {
+                egui::CollapsingHeader::new(s.available_ports).show(ui, |ui| {
                     if port_list.is_empty() {
-                        ui.weak("（无）");
+                        ui.weak(s.none_placeholder);
                     } else {
                         for p in &port_list {
                             ui.label(p);
@@ -120,10 +130,10 @@ impl ComTool {
 
                 ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                     ui.horizontal(|ui| {
-                        ui.add_sized([70.0, 20.0], egui::Label::new("端口"));
+                        ui.add_sized([70.0, 20.0], egui::Label::new(s.port_field));
                         egui::ComboBox::from_id_salt("port")
                             .selected_text(if self.selected_port.is_empty() {
-                                "请选择端口"
+                                s.select_port
                             } else {
                                 &self.selected_port
                             })
@@ -136,12 +146,12 @@ impl ComTool {
                                     );
                                 }
                             });
-                        if ui.button("刷新").clicked() {
+                        if ui.button(s.refresh).clicked() {
                             self.refresh_ports();
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.add_sized([70.0, 20.0], egui::Label::new("波特率"));
+                        ui.add_sized([70.0, 20.0], egui::Label::new(s.baud_field));
                         egui::ComboBox::from_id_salt("baud")
                             .selected_text(self.baud_rate.to_string())
                             .show_ui(ui, |ui| {
@@ -155,9 +165,9 @@ impl ComTool {
                             });
 
                         let label = if self.connected {
-                            "打开串口"
+                            s.open_port_button
                         } else {
-                            "关闭串口"
+                            s.close_port_button
                         };
                         let button = egui::Button::new(label).selected(self.connected);
                         if ui.add(button).clicked() {
@@ -169,7 +179,7 @@ impl ComTool {
                         }
                     });
                     ui.horizontal(|ui| {
-                        ui.add_sized([70.0, 20.0], egui::Label::new("数据位"));
+                        ui.add_sized([70.0, 20.0], egui::Label::new(s.data_bits));
                         egui::ComboBox::from_id_salt("data_bits")
                             .selected_text(format!("{:?}", self.data_bits))
                             .show_ui(ui, |ui| {
@@ -187,7 +197,7 @@ impl ComTool {
                                 }
                             });
 
-                        ui.add_sized([70.0, 20.0], egui::Label::new("停止位"));
+                        ui.add_sized([70.0, 20.0], egui::Label::new(s.stop_bits));
                         egui::ComboBox::from_id_salt("stop_bits")
                             .selected_text(format!("{:?}", self.stop_bits))
                             .show_ui(ui, |ui| {
@@ -201,7 +211,7 @@ impl ComTool {
                             });
                     });
                     ui.horizontal(|ui| {
-                        ui.add_sized([70.0, 20.0], egui::Label::new("校验"));
+                        ui.add_sized([70.0, 20.0], egui::Label::new(s.parity));
                         egui::ComboBox::from_id_salt("parity")
                             .selected_text(format!("{:?}", self.parity))
                             .show_ui(ui, |ui| {
@@ -214,7 +224,7 @@ impl ComTool {
                                 }
                             });
 
-                        ui.add_sized([70.0, 20.0], egui::Label::new("流控"));
+                        ui.add_sized([70.0, 20.0], egui::Label::new(s.flow_control));
                         egui::ComboBox::from_id_salt("flow_control")
                             .selected_text(format!("{:?}", self.flow_control))
                             .show_ui(ui, |ui| {
@@ -238,35 +248,35 @@ impl ComTool {
 
                     // —— 再往上：清空日志 / 导出日志 ——
                     ui.horizontal(|ui| {
-                        if ui.button("清空日志").clicked() {
+                        if ui.button(s.clear_log).clicked() {
                             action.clear_requested = true;
                         }
-                        if ui.button("导出日志").clicked() {
+                        if ui.button(s.export_log).clicked() {
                             action.export_requested = true;
                         }
                     });
 
                     ui.add_space(6.0);
 
-                    egui::CollapsingHeader::new("文件日志")
+                    egui::CollapsingHeader::new(s.file_log)
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 let label = if is_logging {
-                                    "停止记录"
+                                    s.stop_logging
                                 } else {
-                                    "开始记录"
+                                    s.start_logging
                                 };
                                 if ui.button(label).clicked() {
                                     action.log_toggle_requested = true;
                                 }
-                                if ui.button("选择目录").clicked() {
+                                if ui.button(s.pick_dir).clicked() {
                                     action.pick_log_dir_requested = true;
                                 }
                             });
 
                             if is_logging {
-                                ui.label(format!("已记录 {} 字节", log_written));
+                                ui.label(fill(s.logged_bytes, &[&log_written]));
                                 let name = std::path::Path::new(&log_path)
                                     .file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
@@ -275,10 +285,10 @@ impl ComTool {
                                 // 悬停时再给出完整路径。
                                 ui.label(name).on_hover_text(&log_path);
                             } else {
-                                ui.weak("未记录");
+                                ui.weak(s.not_logging);
                             }
 
-                            ui.weak(format!("输出目录: {log_dir}"));
+                            ui.weak(fill(s.output_dir_line, &[&log_dir]));
                         });
                 });
             });

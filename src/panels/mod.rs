@@ -19,7 +19,7 @@ pub(crate) use menu_bar::{send_format_radios, send_line_ending_radios};
 
 #[cfg(test)]
 mod tests {
-    use crate::app::ComTool;
+    use crate::app::{ComTool, Language};
     use eframe::egui;
 
     /// 无头渲染冒烟测试：菜单栏、设置窗口、信息窗口都能画出来而不 panic。
@@ -54,7 +54,12 @@ mod tests {
         app.receive_text.push_str("hello\n⣿\n");
 
         egui::__run_test_ui(|ui| {
-            crate::receive::show_plain_receive(ui, &app.receive_text, app.auto_scroll);
+            crate::receive::show_plain_receive(
+                ui,
+                &app.receive_text,
+                app.auto_scroll,
+                app.language.strings().copy_all_log,
+            );
         });
         egui::__run_test_ui(|ui| {
             app.render_color_receive(ui);
@@ -66,7 +71,12 @@ mod tests {
         // 关掉自动滚动后同样要能画（只是不再强制 stick_to_bottom）
         app.auto_scroll = false;
         egui::__run_test_ui(|ui| {
-            crate::receive::show_plain_receive(ui, &app.receive_text, app.auto_scroll);
+            crate::receive::show_plain_receive(
+                ui,
+                &app.receive_text,
+                app.auto_scroll,
+                app.language.strings().copy_all_log,
+            );
         });
     }
 
@@ -131,6 +141,49 @@ mod tests {
         app.chart_auto_bounds = false;
         egui::__run_test_ui(|ui| {
             app.render_chart_panel(ui);
+        });
+    }
+
+    /// 英文界面同样要能画出来。
+    ///
+    /// 文案表换了整整一列，这里才会暴露"英文那一列写坏了"的问题：`{}` 个数对不上
+    /// （`fill` 会留下未填充的 `{}`）、某一列写成了空串、说明行比中文长得多把布局
+    /// 撑坏……无头渲染至少能证明"切到 English 点一圈不会炸"。
+    ///
+    /// 外观仍要人工确认——这条测试证明不了控件里的字确实是英文。
+    #[test]
+    fn english_ui_renders_without_panic() {
+        let mut app = ComTool {
+            language: Language::En,
+            show_settings: true,
+            show_info: true,
+            show_chart_panel: true,
+            ..ComTool::default()
+        };
+        app.receive_text.push_str("hello\n");
+        app.chart.push_bytes(b"1,2\n", app.chart_max_samples);
+
+        egui::__run_test_ui(|ui| {
+            app.show_menu_bar(ui);
+        });
+
+        let mut open = true;
+        egui::__run_test_ui(|ui| {
+            app.show_sidebar(ui, &mut open);
+        });
+
+        egui::__run_test_ui(|ui| {
+            app.show_settings_window(ui);
+            app.show_info_window(ui);
+        });
+
+        egui::__run_test_ui(|ui| {
+            app.render_chart_panel(ui);
+        });
+
+        egui::__run_test_ui(|ui| {
+            app.render_color_receive(ui);
+            app.render_ascii_receive(ui);
         });
     }
 

@@ -103,7 +103,7 @@
 | **中** | **自动重连无退避**。每 500ms 失败一次就新建一个线程 | `src/app.rs:490-519` | 串口被其它程序占用时，持续高频重试并反复 spawn 线程 | 加指数退避 + 上限次数 |
 | **中** | **读取缓冲固定 1024 + `timeout(10ms)`** | `src/serial_impl/serial.rs:81, 59` | 3 Mbps 下每 ≈2.7ms 填满一次，syscall 频次偏高、循环空转 | 提高到 4096~8192；空闲期不必要地阻塞 10ms |
 | **中** | **自动滚动写死开启**，无开关 | `src/app.rs:233` | 用户向上翻阅历史日志时会被强制拉回底部 | 加 `auto_scroll` 字段 + 设置项 |
-| **低** | `src/config.rs` 是**空文件**；`Language` 枚举已定义但未接线；`egui-chinese-font` 依赖已引入却手写了字体加载 | `src/config.rs`、`src/app.rs:76-79` | 死代码 / 冗余依赖（`tokio` 启用 `full` 但零使用，纯增加编译时间） | 清理或接线 |
+| **低** | `src/config.rs` 是**空文件**；`Language` 枚举已定义但未接线；`egui-chinese-font` 依赖已引入却手写了字体加载 | `src/config.rs`、`src/app.rs:76-79` | 死代码 / 冗余依赖（`tokio` 启用 `full` 但零使用，纯增加编译时间） | ✅ **三项均已解决**：`config.rs` 已是持久化层；`Language` 已由 `src/strings.rs` 真正接线（F3）；`tokio` / `egui-chinese-font` 已随 P6 移除 |
 | **低** | `eframe` 的 `persistence` feature 已启用但未使用 | `Cargo.toml:8`、`src/main.rs:77` | "已付费未使用"的能力 | 阶段 P1 |
 
 ---

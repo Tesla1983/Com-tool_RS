@@ -9,6 +9,7 @@
 //! 是并列的第四种；用户在 HEX 模式下盯着字节看时，没有理由让曲线停掉。
 
 use crate::app::ComTool;
+use crate::strings::fill;
 use eframe::egui;
 use egui::Ui;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
@@ -80,18 +81,21 @@ impl ComTool {
         // 清空是状态变更，不能在绘制闭包里直接做：先记录意图，画完再派发
         // （与 sidebar / settings 的 action 同一条约定）。
         let mut clear_requested = false;
+        let s = self.language.strings();
 
         ui.horizontal(|ui| {
-            ui.label("实时图表:");
-            ui.checkbox(&mut self.chart_auto_bounds, "自动缩放");
-            if ui.button("清空图表").clicked() {
+            ui.label(s.chart_panel_label);
+            ui.checkbox(&mut self.chart_auto_bounds, s.auto_bounds);
+            if ui.button(s.clear_chart).clicked() {
                 clear_requested = true;
             }
-            ui.weak(format!(
-                "{} 通道 · {} 样本 · 每通道上限 {}",
-                self.chart.channel_count(),
-                self.chart.sample_count(),
-                self.chart_max_samples
+            ui.weak(fill(
+                s.chart_summary,
+                &[
+                    &self.chart.channel_count(),
+                    &self.chart.sample_count(),
+                    &self.chart_max_samples,
+                ],
             ));
         });
 
@@ -100,21 +104,18 @@ impl ComTool {
         let ignored = self.chart.ignored_fields();
         let discarded = self.chart.discarded_segments();
         if ignored > 0 || discarded > 0 {
-            let mut detail = Vec::new();
+            let mut detail: Vec<String> = Vec::new();
             if ignored > 0 {
-                detail.push(format!("忽略 {ignored} 个非数值字段"));
+                detail.push(fill(s.ignored_fields, &[&ignored]));
             }
             if discarded > 0 {
-                detail.push(format!("丢弃 {discarded} 段超长数据"));
+                detail.push(fill(s.discarded_segments, &[&discarded]));
             }
-            ui.weak(format!(
-                "{}（格式：一行一组样本，字段用逗号分隔，例如 1.0,2.0,3.0）",
-                detail.join(" · ")
-            ));
+            ui.weak(fill(s.chart_format_hint, &[&detail.join(" · ")]));
         }
 
         if self.chart.is_empty() {
-            ui.weak("等待数据…");
+            ui.weak(s.waiting_data);
         } else {
             // 先把要画的数据整理好再进闭包：`Plot::show` 的闭包捕获 `series`，
             // 不借用 `self`，于是这段代码不会与 `self` 的其它可变借用打架。

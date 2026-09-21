@@ -22,12 +22,16 @@ use crate::send::{
     clamp_repeat_interval, on_first_line, on_last_line,
 };
 use crate::serial_impl::{DEFAULT_BAUD_RATE, SerialChannel, SerialConfig, scan_ports};
+use crate::strings::fill;
 use eframe::egui;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-/// 界面语言（方案 A：目前仅作为设置项占位，尚未接入文案切换）
+/// 界面语言。
+///
+/// 它只决定一件事：`Language::strings()` 取哪张文案表（见 [`crate::strings`]）。
+/// 枚举本身不持有任何文案，所以加一种语言 = 在 `strings.rs` 的宏里加一列。
 #[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Language {
     Zh,
@@ -287,8 +291,8 @@ impl ComTool {
         }
 
         let Some(path) = rfd::FileDialog::new()
-            .set_title("导出接收数据.txt")
-            .add_filter("文本文件", &["txt"])
+            .set_title(self.language.strings().export_dialog_title)
+            .add_filter(self.language.strings().export_text_filter, &["txt"])
             .save_file()
         else {
             return;
@@ -640,16 +644,17 @@ impl eframe::App for ComTool {
         }
 
         // ③ 中央区
+        let s = self.language.strings();
         egui::CentralPanel::default().show(ui, |ui| {
             // 设置 / 信息两个窗口跟着中央区一起绘制（主界面的常驻部分）
             self.show_settings_window(ui);
             self.show_info_window(ui);
 
             ui.horizontal(|ui| {
-                ui.toggle_value(&mut self.sidebar_open, "☰ 侧边栏");
+                ui.toggle_value(&mut self.sidebar_open, s.sidebar_toggle);
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⚙ 设置").clicked() {
+                    if ui.button(s.settings_button).clicked() {
                         self.show_settings = true;
                     }
                 });
@@ -667,17 +672,17 @@ impl eframe::App for ComTool {
                 let mut hex_just_enabled = false;
                 let mut ascii_just_enabled = false;
                 ui.horizontal(|ui| {
-                    ui.label("接收设置:");
-                    if ui.checkbox(&mut show_hex, "HEX").changed() && show_hex {
+                    ui.label(s.receive_settings);
+                    if ui.checkbox(&mut show_hex, s.hex).changed() && show_hex {
                         show_text = false; // 勾 HEX → 取消文本
                         hex_just_enabled = true;
                     }
-                    if ui.checkbox(&mut show_text, "文本").changed() && show_text {
+                    if ui.checkbox(&mut show_text, s.text).changed() && show_text {
                         show_hex = false; // 勾文本 → 取消 HEX
                     }
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.color_view, "颜色");
-                        if ui.checkbox(&mut self.ascii_view, "字节查看").changed()
+                        ui.checkbox(&mut self.color_view, s.color);
+                        if ui.checkbox(&mut self.ascii_view, s.byte_view).changed()
                             && self.ascii_view
                         {
                             ascii_just_enabled = true;
@@ -695,7 +700,7 @@ impl eframe::App for ComTool {
                     self.render_ascii_receive(ui);
                 } else {
                     // 普通文本模式：不折行 + 纵/横双向滚动 + 可选中 + 右键复制全部
-                    show_plain_receive(ui, &self.receive_text, self.auto_scroll);
+                    show_plain_receive(ui, &self.receive_text, self.auto_scroll, s.copy_all_log);
                 }
             }
 
@@ -714,15 +719,16 @@ impl eframe::App for ComTool {
             if self.show_send_panel {
                 // 发送区
                 ui.horizontal(|ui| {
-                    ui.label("发送区:");
+                    ui.label(s.send_area);
                     ui.separator();
-                    ui.label("格式");
-                    send_format_radios(ui, &mut self.send_format);
+                    ui.label(s.format);
+                    send_format_radios(ui, &mut self.send_format, s);
                     ui.separator();
-                    ui.label("行尾");
-                    send_line_ending_radios(ui, &mut self.send_line_ending);
+                    ui.label(s.line_ending);
+                    send_line_ending_radios(ui, &mut self.send_line_ending, s);
                     ui.separator();
-                    if ui.checkbox(&mut self.repeat_send, "定时发送").changed() && self.repeat_send
+                    if ui.checkbox(&mut self.repeat_send, s.repeat_send).changed()
+                        && self.repeat_send
                     {
                         // 勾上的那一刻只起步计时，不立刻发一包（见 `tick_repeat_send`）
                         self.last_repeat_send = None;
@@ -819,7 +825,7 @@ impl eframe::App for ComTool {
                 const PREVIEW_MAX_LEN: usize = 16 * 1024;
                 ui.horizontal(|ui| {
                     if self.send_text.len() > PREVIEW_MAX_LEN {
-                        ui.weak("输入过长，已停止实时校验");
+                        ui.weak(s.preview_too_long);
                     } else {
                         match build_payload(
                             &self.send_text,
@@ -828,28 +834,28 @@ impl eframe::App for ComTool {
                             self.text_encoding,
                         ) {
                             Ok(payload) => {
-                                ui.weak(format!("将发送 {} 字节", payload.bytes.len()));
+                                ui.weak(fill(s.will_send_bytes, &[&payload.bytes.len()]));
                                 if payload.had_unmappable {
                                     let color = ui.visuals().error_fg_color;
                                     ui.colored_label(
                                         color,
-                                        format!(
-                                            "有字符在 {} 里无法表示，将被替换",
-                                            self.text_encoding.label()
+                                        fill(
+                                            s.unmappable_in_encoding,
+                                            &[&self.text_encoding.label()],
                                         ),
                                     );
                                 }
                             }
                             Err(reason) => {
                                 let error_color = ui.visuals().error_fg_color;
-                                ui.colored_label(error_color, format!("HEX 解析失败: {reason}"));
+                                ui.colored_label(error_color, fill(s.hex_parse_failed, &[&reason]));
                             }
                         }
                     }
                     // 让用户知道现在按 ↑ / ↓ 是在翻历史而不是在移光标
                     if self.send_history_nav.is_active() {
                         ui.separator();
-                        ui.weak("历史浏览中：↑ 更旧 / ↓ 更新");
+                        ui.weak(s.history_browsing);
                     }
                 });
 
@@ -859,14 +865,14 @@ impl eframe::App for ComTool {
                 let mut do_send = false;
                 let mut do_clear = false;
                 ui.horizontal(|ui| {
-                    if ui.button("发送").clicked() {
+                    if ui.button(s.send_title).clicked() {
                         do_send = true;
                     }
-                    if ui.button("清空发送").clicked() {
+                    if ui.button(s.clear_send_button).clicked() {
                         do_clear = true;
                     }
                     if self.repeat_send && !self.connected {
-                        ui.weak("未连接：连上之后才会开始定时发送");
+                        ui.weak(s.repeat_needs_connection);
                     }
                 });
                 if enter_to_send {

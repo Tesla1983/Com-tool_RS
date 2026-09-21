@@ -672,7 +672,16 @@ fn trim_spans_front(spans: &mut Vec<ColoredSpan>, max: usize) {
 ///
 /// `stick_to_bottom` 由 [`crate::app::ComTool::auto_scroll`] 决定：关掉自动滚动后，
 /// 用户向上翻阅历史时不会被强行拉回底部。
-fn show_receive_scroll(ui: &mut Ui, job: egui::text::LayoutJob, stick_to_bottom: bool) -> bool {
+///
+/// `copy_all_label` 是右键菜单那一项的文案。这两个接收视图函数是**自由函数**（不持有
+/// `ComTool`），所以文案只能由调用方传进来——`Language::strings()` 是 `&'static`，
+/// 传 `&str` 没有额外开销。
+fn show_receive_scroll(
+    ui: &mut Ui,
+    job: egui::text::LayoutJob,
+    stick_to_bottom: bool,
+    copy_all_label: &str,
+) -> bool {
     let mut copy_all = false;
     egui::ScrollArea::vertical()
         .stick_to_bottom(stick_to_bottom)
@@ -682,7 +691,7 @@ fn show_receive_scroll(ui: &mut Ui, job: egui::text::LayoutJob, stick_to_bottom:
         .show(ui, |ui| {
             let response = ui.add(egui::Label::new(job).wrap().selectable(true));
             response.context_menu(|ui| {
-                if ui.button("复制全部日志").clicked() {
+                if ui.button(copy_all_label).clicked() {
                     copy_all = true;
                     ui.close();
                 }
@@ -693,7 +702,12 @@ fn show_receive_scroll(ui: &mut Ui, job: egui::text::LayoutJob, stick_to_bottom:
 
 /// 普通文本模式接收区：不折行（Extend）+ 纵/横双向滚动，
 /// 等宽 galley 绘制保证盲文 ASCII 图案整行对齐；可选中、右键复制全部日志。
-pub(crate) fn show_plain_receive(ui: &mut Ui, text: &str, stick_to_bottom: bool) {
+pub(crate) fn show_plain_receive(
+    ui: &mut Ui,
+    text: &str,
+    stick_to_bottom: bool,
+    copy_all_label: &str,
+) {
     let job = egui::text::LayoutJob::simple(
         text.to_owned(),
         egui::FontId::monospace(14.0),
@@ -712,7 +726,7 @@ pub(crate) fn show_plain_receive(ui: &mut Ui, text: &str, stick_to_bottom: bool)
                     .selectable(true),
             );
             response.context_menu(|ui| {
-                if ui.button("复制全部日志").clicked() {
+                if ui.button(copy_all_label).clicked() {
                     ui.ctx().copy_text(text.to_owned());
                     ui.close();
                 }
@@ -749,16 +763,10 @@ pub enum TimestampPrefix {
     PerBatch,
 }
 
-impl TimestampPrefix {
-    /// 界面上显示用的短标签。
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Off => "关闭",
-            Self::PerLine => "每行",
-            Self::PerBatch => "每批",
-        }
-    }
-}
+// 这里原本有一个 `TimestampPrefix::label()`，返回硬编码的"关闭 / 每行 / 每批"。
+// F3 把它删掉了：那是**界面词汇**，不是领域概念，留在领域类型上迟早有人顺手用上，
+// 于是那几个词就再也不会被翻译。现在它叫 `crate::strings::timestamp_prefix_label`，
+// 必须显式传文案表。
 
 /// 把一个时刻渲染成 `[HH:MM:SS.mmm]`。
 ///
@@ -1066,7 +1074,12 @@ impl ComTool {
         let job = self.build_layout(egui::Color32::BLACK);
 
         // ③ 在函数内部绘制滚动区，替换掉主界面里默认的滚动区
-        if show_receive_scroll(ui, job, self.auto_scroll) {
+        if show_receive_scroll(
+            ui,
+            job,
+            self.auto_scroll,
+            self.language.strings().copy_all_log,
+        ) {
             ui.ctx().copy_text(self.receive_text.clone());
         }
     }
@@ -1080,7 +1093,12 @@ impl ComTool {
         let job = self.build_ascii_layout(egui::Color32::BLACK);
 
         // ③ 绘制滚动区（样式与彩色模式一致）
-        if show_receive_scroll(ui, job, self.auto_scroll) {
+        if show_receive_scroll(
+            ui,
+            job,
+            self.auto_scroll,
+            self.language.strings().copy_all_log,
+        ) {
             ui.ctx().copy_text(self.receive_text.clone());
         }
     }

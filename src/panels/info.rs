@@ -5,11 +5,9 @@
 
 use crate::APP_TITLE;
 use crate::app::ComTool;
+use crate::strings::fill;
 use eframe::egui;
 use egui::Ui;
-
-/// 应用简介（`Cargo.toml` 暂无 `description` 字段，先写在这里）。
-const APP_DESCRIPTION: &str = "基于 eframe/egui 的串口调试上位机";
 
 impl ComTool {
     /// 绘制关于窗口（`show_info` 为 false 时直接返回）。
@@ -18,8 +16,9 @@ impl ComTool {
             return;
         }
 
+        let s = self.language.strings();
         let mut open = self.show_info;
-        egui::Window::new("信息")
+        egui::Window::new(s.info_window_title)
             .collapsible(false)
             .resizable(false)
             .open(&mut open)
@@ -28,25 +27,25 @@ impl ComTool {
                 ui.set_min_width(340.0);
 
                 ui.heading(APP_TITLE);
-                ui.label(format!("版本 {}", env!("CARGO_PKG_VERSION")));
-                ui.label(APP_DESCRIPTION);
+                ui.label(fill(s.version_label, &[&env!("CARGO_PKG_VERSION")]));
+                ui.label(s.app_description);
 
                 ui.separator();
-                ui.label("串口后端: serialport");
-                ui.label("界面框架: eframe / egui");
+                ui.label(s.serial_backend);
+                ui.label(s.ui_framework);
                 match eframe::storage_dir(APP_TITLE) {
                     Some(dir) => {
-                        ui.label(format!("设置存档: {}", dir.display()));
+                        ui.label(fill(s.settings_dir, &[&dir.display()]));
                     }
                     None => {
-                        ui.label("设置存档: 当前平台不适用");
+                        ui.label(s.settings_dir_unavailable);
                     }
                 }
 
                 ui.separator();
-                ui.label("快捷键");
-                ui.label("Enter 发送 / Shift+Enter 换行");
-                ui.label("接收区右键：复制全部日志");
+                ui.label(s.shortcuts);
+                ui.label(s.shortcut_send);
+                ui.label(s.shortcut_copy);
             });
         self.show_info = open;
     }
