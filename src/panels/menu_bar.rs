@@ -4,6 +4,7 @@
 //! 顶部栏放在最前才能横跨整个窗口。
 
 use crate::app::{ComTool, ThemeChoice};
+use crate::receive::TimestampPrefix;
 use eframe::egui;
 use egui::Ui;
 
@@ -63,6 +64,9 @@ impl ComTool {
                     ui.checkbox(&mut self.hex_view, "HEX 接收");
                     ui.separator();
                     ui.checkbox(&mut self.auto_scroll, "自动滚动");
+                    ui.separator();
+                    ui.label("时间戳前缀");
+                    timestamp_radios(ui, &mut self.timestamp_prefix);
                 });
             });
         });
@@ -103,4 +107,12 @@ pub(crate) fn theme_radios(ui: &mut Ui, theme: &mut ThemeChoice) {
     ui.radio_value(theme, ThemeChoice::System, "跟随系统");
     ui.radio_value(theme, ThemeChoice::Light, "浅色");
     ui.radio_value(theme, ThemeChoice::Dark, "深色");
+}
+
+/// 时间戳前缀三选一。同样由菜单与设置窗口共用——选项集合只有一处定义，
+/// 就不会出现"菜单里能选每批、设置里只能选到每行"这种不一致。
+pub(crate) fn timestamp_radios(ui: &mut Ui, prefix: &mut TimestampPrefix) {
+    ui.radio_value(prefix, TimestampPrefix::Off, "关闭");
+    ui.radio_value(prefix, TimestampPrefix::PerLine, "每行");
+    ui.radio_value(prefix, TimestampPrefix::PerBatch, "每批");
 }

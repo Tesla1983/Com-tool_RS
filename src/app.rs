@@ -13,7 +13,7 @@
 use crate::chart::ChartData;
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::log_file::LogSink;
-use crate::receive::{AnsiDecoder, AnsiStyle, ColoredSpan, show_plain_receive};
+use crate::receive::{AnsiDecoder, AnsiStyle, ColoredSpan, TimestampPrefix, show_plain_receive};
 use crate::serial_impl::{DEFAULT_BAUD_RATE, SerialChannel, SerialConfig, scan_ports};
 use eframe::egui;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
@@ -147,6 +147,8 @@ pub struct ComTool {
     pub auto_scroll: bool,
     /// 日志长度上限（字符数，0 = 不限）；超出后从最旧的内容开始淘汰
     pub max_log_chars: usize,
+    /// 收到数据时是否加时间戳前缀，以及按行还是按批（见 [`crate::receive::TimestampPrefix`]）
+    pub timestamp_prefix: TimestampPrefix,
     /// 界面重绘间隔（毫秒），实际使用时会被夹到 16~1000
     pub repaint_interval_ms: u64,
     /// 发送后是否清空输入框
@@ -155,8 +157,6 @@ pub struct ComTool {
     pub default_log_file_name: String,
     /// 实时文件日志的输出目录（空 = 用 [`crate::log_file::default_log_dir`]）
     pub log_dir: String,
-    /// 启动时是否检查更新（P6 使用，默认关闭）
-    pub check_update_on_start: bool,
     /// 接收区是否显示
     pub show_receive_panel: bool,
     /// 发送区是否显示
@@ -413,11 +413,11 @@ impl Default for ComTool {
             theme: ThemeChoice::default(),
             auto_scroll: true,
             max_log_chars: DEFAULT_MAX_LOG_CHARS,
+            timestamp_prefix: TimestampPrefix::default(),
             repaint_interval_ms: DEFAULT_REPAINT_INTERVAL_MS,
             clear_send_after_send: true,
             default_log_file_name: DEFAULT_LOG_FILE_NAME.to_string(),
             log_dir: String::new(),
-            check_update_on_start: false,
             show_receive_panel: true,
             show_send_panel: true,
             show_chart_panel: DEFAULT_SHOW_CHART_PANEL,

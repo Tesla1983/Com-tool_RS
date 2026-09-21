@@ -59,7 +59,7 @@ Rust 串口调试上位机（GUI 串口助手）。技术栈：
 | 语言/版本 | Rust **edition 2024**（需 rustc ≥ 1.85；实测工具链 `rustc 1.97.1`） |
 | GUI | `egui` / `eframe` **0.36.1**（`glow` 后端 + `persistence` feature） |
 | 串口 | `serialport` 4.10.0（manifest 写 `"4.7.2"` 是 caret 要求，实解析到 4.10.0） |
-| 其它 | `rfd`（文件对话框）、`serde`（持久化）、`chrono`（日志文件名时间戳，P4 起在用）、`egui_plot` 0.37（实时图表，P5 起在用）。`tokio` 与 `egui-chinese-font` 已作为死依赖移除（见 P6 第 1 批） |
+| 其它 | `rfd`（文件对话框）、`serde`（持久化）、`chrono`（日志文件名与接收时间戳前缀的格式化，P4 起在用）、`egui_plot` 0.37（实时图表，P5 起在用）。`tokio` 与 `egui-chinese-font` 已作为死依赖移除（见 P6 第 1 批） |
 | 类型 | 单 binary crate（无 workspace、无 CI、无 lint 配置） |
 
 ### 模块结构（`ai-refactor` 分支）
@@ -67,20 +67,21 @@ Rust 串口调试上位机（GUI 串口助手）。技术栈：
 ```
 src/
 ├── main.rs                 入口；字体回退链；eframe::run_native；APP_TITLE 常量；挂 `app_icon` 到窗口图标
-├── app_icon.rs   (289)     256×256 圆角方波图标，代码绘制、零资源文件、11 测试（1 条 ASCII 预览默认跳过）
+├── app_icon.rs   (540)     256×256 圆角方波图标，代码绘制、零资源文件、11 测试（1 条 ASCII 预览默认跳过）
 ├── app.rs        (595)     ComTool 状态 + Default + 串口生命周期 + eframe::App 编排
-├── receive.rs    (886)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
-│                           + 三种渲染 + FIFO 淘汰（17 测试）
+├── receive.rs   (1365)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
+│                           + 可选时间戳前缀（TimestampPrefix）+ 三种渲染
+│                           + FIFO 淘汰（35 测试）
 ├── chart.rs      (485)     实时图表数据层：多通道数值流解析 + 跨包分片
 │                           + 样本 FIFO 淘汰 + 通道上限（20 测试）
 ├── log_file.rs   (801)     实时文件日志：后台写盘线程 + 文件名模板渲染
 │                           + 同名防截断 + 待写队列上限（14 测试）
-├── sidebar.rs    (286)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
-├── config.rs     (434)     持久化策略 + 启动不变量修复（12 测试）
+├── sidebar.rs    (288)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
+├── config.rs     (453)     持久化策略 + 启动不变量修复（13 测试）
 ├── panels/
 │   ├── mod.rs     (151)    面板模块出口（5 条无头 UI 冒烟测试）
-│   ├── menu_bar.rs(106)    顶部菜单栏；返回 MenuAction
-│   ├── settings.rs(180)    设置窗口（含实时图表与文件日志区块）
+│   ├── menu_bar.rs(118)    顶部菜单栏；返回 MenuAction；主题/时间戳单选共用入口
+│   ├── settings.rs(182)    设置窗口（含实时图表与文件日志区块）
 │   ├── chart.rs   (223)    实时图表面板：egui_plot 绘制 + 绘制点抽样（5 测试）
 │   └── info.rs    (53)     信息窗口
 ├── communicationtrait.rs (68)  ByteChannel trait + ChannelEvent
@@ -90,7 +91,8 @@ src/
 │   └── mod.rs     (13)     出口
 ```
 
-测试函数合计 **90**（`cargo test` 报 90 passed，1 ignored；两者一致）。
+测试函数合计 **110**（`cargo test` 报 109 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
+需要目视时用 `cargo test app_icon::tests::ascii_preview -- --ignored --nocapture`）。
 
 **权威约定文档**（改代码前先读）：
 - `AGENTS.md` — 给 AI/协作者的模块地图与硬性约束（简短，必读）
@@ -115,12 +117,12 @@ src/
 
 ### 质量门禁（P0/P1 改动前 → 改动后）
 
-| 命令 | 前 | P0/P1 后 | P4 后 | 本轮（P5）后 | 本轮（P6 第 1 批）后 |
-|---|---|---|---|---|---|
-| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
-| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed**（1 ignored，为图标 ASCII 预览） |
-| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** |
-| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（与上轮逐条相同，未改既有代码；`app_icon.rs` 与 `Cargo.toml` 新代码 0 新增） |
+| 命令 | 前 | P0/P1 后 | P4 后 | P5 后 | P6 第 1 批后 | 本轮（P6 第 2 批 / P3）后 |
+|---|---|---|---|---|---|---|
+| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
+| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed** | **109 passed**（1 ignored，为图标 ASCII 预览） |
+| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** | **干净** |
+| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（逐条同上） | **8 warning**（逐条同上：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`；时间戳这批新代码 0 新增） |
 
 跑法：
 
@@ -129,30 +131,32 @@ cd E:/Downloads/Zed/AI_comtool-rs
 cargo fmt && cargo check --all-targets && cargo test
 ```
 
-90 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
+109 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
 一条把字节经事件通道注入后核对日志文件内容的集成测试、五条用
 `egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图、
-侧边栏、图表面板），以及 11 条对应用图标做纯断言的单元测试（尺寸、透明度、渐变、
-前景笔画、越界检查、确定性）。
+侧边栏、图表面板），11 条对应用图标做纯断言的单元测试（尺寸、透明度、渐变、
+前景笔画、越界检查、确定性），以及 17 条 P3 时间戳前缀测试（格式、三种模式下
+的插入位置、跨批次不重复、程序提示不加前缀、清空后重新标注、不进图表）。
 
 ### 3.1 增量（2026-09-21：P2 菜单栏 + 设置面板，P3 部分提前）
 
 | 项 | 值 |
 |---|---|
 | 新增模块 | `src/panels/{mod,menu_bar,settings,info}.rs` |
-| 新增持久化字段 | `theme` `auto_scroll` `max_log_chars` `repaint_interval_ms` `clear_send_after_send` `default_log_file_name` `check_update_on_start` `show_receive_panel` `show_send_panel` |
+| 新增持久化字段 | `theme` `auto_scroll` `max_log_chars` `repaint_interval_ms` `clear_send_after_send` `default_log_file_name` `check_update_on_start` `show_receive_panel` `show_send_panel`（其中 `check_update_on_start` 已在 P6 第 2 批随"不做版本检查"的决议删除，见 §3.5） |
 | 新增运行时字段 | `show_info`（与 `show_settings` 一样 `#[serde(skip)]`） |
 | 门禁 | `cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** · `cargo test` **34 passed** · clippy 仍是 9 条既有警告（新代码 0 新增） |
 
 - **上游 F 组（顶栏与菜单）4 项全部可用**：File(Info/Quit) · Settings 菜单 · 主题切换
   （浅色/深色/跟随系统）· 面板显隐勾选（至少保留一个可见）。
 - **上游 G 组（设置项）6 项中 4 项已真正接线**：日志长度上限 · 发送后清空 · 自动滚动 ·
-  重绘间隔（16~1000 ms）。剩下 2 项**只有设置项本身**：`default_log_file_name` 等 P4 的
-  实时文件日志消费、`check_update_on_start` 等 P6 的版本检查消费——两者在设置窗口里都
-  带了明确标注，不会让人误以为已经生效。
+  重绘间隔（16~1000 ms）。剩下 2 项当时**只有设置项本身**：`default_log_file_name`（P4 已
+  被实时文件日志消费）与 `check_update_on_start`（P6 第 2 批决定不做版本检查，该项已连同
+  设置窗口里的复选框一起删除，见 §3.5）。当时两者都在界面上带了明确标注，不会让人误以为
+  已经生效——这个做法值得保留：**宁可写清"未接线"，也不要让开关假装在工作**。
 - **P3 提前完成的部分**：`max_log_chars` FIFO 淘汰（四份镜像各自按同一字符预算裁剪、
   能从句中切开 `ColoredSpan` 并保留其样式、按字符边界切分不破坏 UTF-8）+ `auto_scroll`
-  开关。P3 剩下的"可选时间戳前缀"仍未做。
+  开关。P3 剩下的"可选时间戳前缀"已于 2026-09-21 完成，见 §3.5。
 - **P2 的一处偏离**：设置做成了窗口（`egui::Window`）而不是停靠面板，上游是设置面板。
   功能等价，未按上游搬。
 - **仍未实测**：磁盘持久化（需实机运行，见 §4②）；P2 的界面外观也只通过了无头渲染
@@ -270,7 +274,62 @@ cargo fmt && cargo check --all-targets && cargo test
 **未做 / 未验证**
 
 - **图标外观只有代码级预览确认**：256×256 PNG 用 Python 纯标准库 zlib 临时转出看过，圆角、渐变、波形形状正确，但真实任务栏 16~32 px 的小尺寸效果需要实机运行才能最终确认。
-- **版本检查仍未实现**：设置项 `check_update_on_start` 已存在但没有任何消费逻辑。见 §6 后续计划与下文"下一步"。
+
+### 3.5 增量（2026-09-21：P3 可选时间戳前缀 + P6 第 2 批决定不做版本检查）
+
+| 项 | 值 |
+|---|---|
+| 变更模块 | `src/receive.rs`（核心）、`src/app.rs`、`src/sidebar.rs`、`src/panels/{settings,menu_bar}.rs`、`src/config.rs`（含测试） |
+| 新增持久化字段 | `timestamp_prefix`（`TimestampPrefix::{Off, PerLine, PerBatch}`，默认 `Off`） |
+| 删除持久化字段 | `check_update_on_start`（版本检查整体取消，见下） |
+| 新增依赖 | 无（复用已在用的 `chrono`） |
+| 新增测试 | 16 条（`receive.rs`）+ 1 条（`config.rs`，锁定"已删除字段的旧存档仍能读出来"） |
+| 门禁 | `cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** · `cargo test` **109 passed**（1 ignored） · clippy **8 条**（逐条同上轮，新代码 0 新增） |
+
+**做了什么（P3 时间戳前缀）**
+
+- 三档设置 `TimestampPrefix`：`Off`（默认，**行为与从前逐字节相同**）/ `PerLine` /
+  `PerBatch`。用三值枚举而不是两个 `bool`，因为"不加时间戳、但按行"是非法组合。
+  入口有三处：设置窗口「接收」区、视图菜单、以及侧边栏「接收统计」里的当前档位回显。
+- 前缀形如 `[12:00:00.123]`（本地时间，毫秒）。格式串是 `receive.rs` 里的常量
+  `TIMESTAMP_FORMAT`，`format_timestamp()` 单独抽出来是为了让测试能喂固定时刻——
+  `%.3f` 是"小数点 + 三位毫秒"这件事由断言钉住，不靠记忆。
+- **插在片段层**（`timestamped_spans()`）：`receive_text` 是由片段拼接而来的，两处各插
+  一遍迟早走偏；只插一次，四份镜像自然一致。它因此也出现在导出文件与实时日志里
+  （与"日志文件内容 = 接收区内容"这条既有承诺一致）。
+- **它是注解，不是数据**：`chart.push_bytes()` 拿到的仍是原始字节，前缀绝不进去
+  （`timestamps_do_not_leak_into_the_chart` 盯着这一点）。
+- **行首状态不新增字段**：`at_receive_line_start()` 从 `receive_text` 尾部推导
+  （空串或以 `\n` 结尾）。三种显示模式、`push_receive_note()`、`clear_receive()` 都在写
+  这个镜像，任何平行状态字段都会在某个分支上与它不一致。
+- 一批只取**一次** `Local::now()`：同一块数据里的多行本来就同时到达，逐行取时间会造出
+  "每隔几毫秒来一行"的假象。**没有内容就不加前缀**，判据是"有非空片段"而不是"片段
+  数组非空"（文本模式收到半个多字节序列时片段是空的）。
+- 顺手做的一次收敛：`receive_data()` 里三条模式分支的"加时间戳 → 写镜像 → 投日志"
+  被合并成一条公共尾部（原先三份重复的拼接逻辑），并**逐分支核对镜像落点**——HEX 优先
+  于字节查看，落点是 `!hex_view && ascii_view` 而不是 `ascii_view`；后者会让"两个勾选框
+  同时打开"时片段落进另一份镜像，这正是这次改写最容易悄悄引入的回归，已用
+  `hex_takes_precedence_over_ascii_like_before` 锁住。
+
+**做了什么（P6 第 2 批：决定不做版本检查）**
+
+- **项目所有者决定跳过版本检查**（2026-09-21）。理由与实现成本无关：内网环境访问不到
+  检查地址，一个永远失败的开关比没有这个功能更糟。
+- 因此把 `check_update_on_start` 设置项、它在设置窗口「更新」区的那一整个段落、
+  以及"将在 P6 接线"的说明一并删除——**界面上不留无效开关**。删除是安全的数据变更：
+  反序列化会忽略存档里已经不认识的那个键，`archive_with_a_removed_field_still_loads`
+  把这条固定下来（顺带也防止以后有人给 `ComTool` 加 `deny_unknown_fields`，那会让所有
+  旧存档读不出来）。
+- 若将来要做，重加一个字段 + 一个复选框即可，代码里没有留下半成品。
+
+**未做 / 未验证**
+
+- 时间戳的**界面外观（灰色、与数据的对比度）没有肉眼确认过**；只验证了文本内容正确。
+- 三种模式都加前缀，包括 **HEX 与字节查看视图**。在那些视图里前缀是"注解"而不是收到的
+  字节，靠方括号与灰色区分；若要一份纯字节记录，请关掉前缀（这也是默认值）。
+- clippy 那 8 条既有风格警告**仍未处理**：它们都在本任务未触及的既有代码里（`AnsiDecoder`
+  的手写 `Default`、若干 `manual_range_contains` 等），`cargo clippy --fix` 可一键清掉，
+  但那会改动本任务范围之外的代码，因此留给下次专门做一次"清警告"提交。
 
 ---
 
@@ -330,6 +389,16 @@ cargo fmt && cargo check --all-targets && cargo test
 16. 点「清空图表」→ 曲线清空、通道数与样本数归零
 17. 把设置里的「样本上限」改成 10，再连发 20 行数据 → 图表最多保留 10 个点/曲线
 
+**同一趟也可以把 P3 时间戳前缀验掉**（设置窗口「接收 → 时间戳前缀」，或视图菜单）：
+
+18. 选「每行」→ 之后每行开头应出现灰色的 `[HH:MM:SS.mmm]`；发一条不带换行的数据，
+    再发一条以换行结尾的数据 → 前缀应只在行的开头出现，**不会**在同一行的后半段重复
+19. 选「每批」→ 一个数据块只标注一次：同一块里的第二行**不带**前缀（与「每行」对照）
+20. 切到 HEX 与字节查看视图 → 前缀仍然出现（它是注解，不是数据）；把设置改回「关闭」→
+    接收区内容应恢复成纯数据，与开启前完全一致
+21. 开着「每行」时点侧边栏「清空日志」，再发一行 → 清空后的第一行应重新带上前缀
+22. 开着前缀时开始记录日志 → 日志文件里的每一行也应带前缀（与接收区一致）
+
 ### ③ 仓库状态
 
 `AI_comtool-rs` 的 `ai-refactor` 分支工作区是干净的。
@@ -347,12 +416,14 @@ cargo fmt && cargo check --all-targets && cargo test
 | 中 | 待发队列无上限 | `channel.rs::worker_main` 的 `outgoing` | 设备长期不可写 + 用户持续点发送时队列增长。原实现用 unbounded mpsc 同样无上限，未引入新问题，但应加背压 |
 | 中 | 写路径瞬态错误静默重试 | `channel.rs::worker_main` | `WouldBlock` / `Interrupted` 直接重试是合理的，但设备长期不接受数据时用户得不到提示。建议侧边栏显示「待发字节数」 |
 | ~~低~~ **已清理** | ~~2 个未使用依赖~~ | `Cargo.toml` | 已于 P6 第 1 批移除：`tokio`（features = `["full"]`，零调用，明显拖慢编译）与 `egui-chinese-font`（零调用，中文字体已由 `main.rs::setup_fonts` 读系统字体实现）。`chrono` / `egui_plot` / `rfd` / `serde` / `serialport` 仍是活跃依赖 |
-| 低 | 8 条 clippy 风格警告 | `app.rs` / `receive.rs` | `derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`。全部位于截至 P5 未改动的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写；其余 8 条留待 P6 一并处理） |
+| 低 | 8 条 clippy 风格警告 | `app.rs` / `receive.rs` | `derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`。全部位于**本任务未触及**的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写）。`cargo clippy --fix` 可一键清掉，但那会改动范围之外的代码，因此留作一次专门的"清警告"提交（P6 收尾不再处理） |
 | 低 | 记录中途改配置不切换文件 | `log_file.rs` | 记录过程中改「文件名模板」或「输出目录」不会切到新文件，下次开始记录才生效；界面上没有特别提示 |
 | 低 | **图表不支持无换行的连续逗号流** | `chart.rs::push_bytes` | 通道语义（第 k 个字段 = 第 k 条曲线）要求「一行一组」；无换行时通道数只能靠猜，猜错就画错位。因此这类数据在超过 4096 字节后被**整行丢弃**并在界面计数。属于明确的设计取舍，不是待修 bug |
 | 低 | 绘制抽样（4000 点/曲线）未在界面暴露 | `panels/chart.rs` | 样本上限（可配）与绘制抽样（固定 4000）是两层不同的限制，界面只显示了前者。用户设到 10 万时会看到"曲线比样本数少"，目前只能靠文档解释 |
 | 低 | 图表 x 轴是组序号而非时间 | `chart.rs` | 串口数据没有可靠时间基准，因此看不出真实时间跨度或采样率。若将来要显示"每秒多少个样本"，需要在解析端额外维护时间戳 |
 | 低 | 图表解析在面板隐藏时也照常进行 | `receive.rs::receive_data` | 刻意如此：打开面板时立刻能看到已有曲线，而不是"打开后才从零开始"。代价是即使用户从不看图，每次接收仍会做一次扫描与少量解析 |
+| 低 | 「HEX 接收」与「字节查看」同时勾上时**字节查看视图是空的** | `app.rs` 接收设置行 / `receive.rs` 的镜像落点 | 既有行为，本次改写刻意保持不变（`hex_takes_precedence_over_ascii_like_before` 锁的就是它）：HEX 分支优先，片段写进 `display_spans`，`ascii_spans` 保持为空，而「颜色」未勾时渲染的正是 `ascii_spans`。最小修法是在 UI 上把两者做成互斥（勾一个自动取消另一个，与「HEX / 文本」那对一致），属于界面行为决策，未在本轮范围内 |
+| 低 | 时间戳前缀在 HEX / 字节查看视图里是"注解"而不是收到的字节 | `receive.rs` | 刻意如此（三种视图一致 + 日志文件一致），靠方括号与灰色区分。要一份纯字节记录请关掉前缀（默认就是关闭）。实时日志文件同样会带上前缀 |
 
 ---
 
@@ -366,16 +437,21 @@ cargo fmt && cargo check --all-targets && cargo test
 | **P0** 架构拆分 | `app.rs` 拆为模块 | ✅ **已完成** |
 | **P1** 配置与持久化 | `AppSettings` + `ComTool` 派生 serde + `save()` | ✅ **已完成**（未做磁盘实测，见 §4②） |
 | **P2** 菜单栏 + 设置面板 | 顶部面板：File(Info/Quit) / Settings / 主题切换 / Byte mode / 面板显隐互斥。把 `config.rs` 的持久化字段接上真正的设置 UI | ✅ **已完成**（见 §3.1；G 组中「默认文件名」「启动检查更新」两项只有设置项，等 P4/P6 消费） |
-| **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，`ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | 🟡 **部分完成**：FIFO 淘汰与 `auto_scroll` 已提前做完；时间戳前缀未做 |
+| **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，`ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | ✅ **已完成**：FIFO 淘汰与 `auto_scroll` 在 P2 期间提前做完；**时间戳前缀见 §3.5** |
 | **P4** 实时文件日志 | Start/Stop Log 开关 + 默认文件名 `LogFile_%Y-%m-%d_%H-%M-%S.txt`（chrono 现成）；**写入必须走独立线程 + `BufWriter`，绝不在 UI 线程 `write_all`** | ✅ **已完成**（见 §3.2；落在 `src/log_file.rs` 而非计划里的 `src/panels/file_log.rs`，另加了输出目录选择与同名防截断） |
 | **P5** 实时图表 | 建议引 `egui_plot` 而非移植上游手绘代码；支持逗号分隔多通道；`stream_buffer` 处理跨包分片 | ✅ **已完成**（见 §3.3；落在 `src/chart.rs` + `src/panels/chart.rs`，多通道上限 16、绘制点封顶 4000、数据不足时断线而不补 0） |
-| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或 3s 超时静默失败**，内网要能跳过）；应用图标；`[profile.release] opt-level = 2`；清理未使用依赖 | 🟡 **Info 弹窗 ✅**；**依赖清理 ✅**（移除 `tokio`、`egui-chinese-font`）；**release profile ✅**（`opt-level = 2`）；**应用图标 ✅**（代码绘制、11 测试）。**版本检查仍未实现** —— 下一步（待用户决策是否引入网络依赖 / 具体 URL） |
+| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或 3s 超时静默失败**，内网要能跳过）；应用图标；`[profile.release] opt-level = 2`；清理未使用依赖 | ✅ **除版本检查外全部完成**：Info 弹窗 ✅；依赖清理 ✅（移除 `tokio`、`egui-chinese-font`）；release profile ✅；应用图标 ✅（代码绘制、11 测试）；**版本检查：所有者决定不做**，`check_update_on_start` 与它的设置段落已一并删除（见 §3.5）。阶段内只剩 §5 里那 8 条既有 clippy 警告未清 |
 
 **覆盖率参考**：改动前相对 `SerialGUI-rs` 约 40%（核心链路约 90%）；P0/P1 完成后全局约 45%；
-P2 完成约 75%（可日常使用）；P4 完成约 80%；**P5 完成约 88%（功能对齐上游）**。
+P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（功能对齐上游）；
+**P6 两批完成约 90%**（唯一明确不做的是版本检查）。
 
-**P3 的收尾项**：计划里的「可选时间戳前缀」仍未做（FIFO 淘汰与 `auto_scroll` 已在 P2 期间提前完成）。
-它与 P6 都可以作为下一步；P6 里的「版本检查」需要联外网，内网环境建议做成默认关闭。
+**计划里还剩什么**：P0~P6 的**功能项已全部落地或明确取消**。剩下的都不是功能开发：
+① §4② 的磁盘持久化实机验证（**必须由所有者亲手跑**，AI 不运行本项目）；
+② §4① 的 GPLv3 合规二选一（已降为最低优先级，仅对外分发前必须拍板）；
+③ §5 里那 8 条既有 clippy 警告的清理（`cargo clippy --fix` 一键，建议单独一次提交）；
+④ §5 里「HEX + 字节查看同时勾选」的界面互斥（需要一次界面行为决策）。
+其余可做的新功能（例如图表按通道显示/隐藏、x 轴改成真实时间基准）都不在原计划内。
 
 ---
 
@@ -385,7 +461,7 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；**P5 完成约 88%（
 
 0. **⛔ 未经项目所有者逐次批准，禁止运行本项目（`cargo run` / 直接跑 exe），禁止以任何方式
    占用或打断 COM3。** 开发阶段只用 `cargo fmt` / `cargo check --all-targets` / `cargo test`
-   验证（90 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
+   验证（109 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
    完整条文在 `AGENTS.md` 顶部与 `DEVELOPMENT_GUIDE.md` §0。
    **该规则已配置机器级硬拦截**：PreToolUse 钩子 `~/.workbuddy/hooks/comtool-run-guard.sh`
    （注册于 `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json`），命中即拒绝工具调用，
@@ -424,6 +500,12 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；**P5 完成约 88%（
     绕开日志——那会让日志文件悄悄少一段数据。
 13. **「记录中」的唯一事实来源是 `log.is_some()`**，不要再加一个 `bool logging` 字段；
     查询用 `is_logging()` / `log_path()` / `log_written_bytes()`。
+14. **时间戳前缀是显示注解，不是数据**：它在片段层插入（`timestamped_spans()`，因为
+    `receive_text` 由片段拼接而来，插两次迟早走偏），因此会进导出与文件日志，但
+    **绝不进 `chart.push_bytes()`**。行首状态从 `receive_text` 尾部推导
+    （`at_receive_line_start()`），**不要另设平行字段**；一批只取一次 `Local::now()`；
+    没有内容（无**非空**片段）时一个前缀都不加。改动 `receive_data()` 的分支时，务必
+    核对**镜像落点与分支一一对应**：HEX 优先于字节查看，落点是 `!hex_view && ascii_view`。
 
 ---
 
@@ -464,7 +546,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 79 passed / fmt 干净）
+# 3. 建立门禁基线（应为 0 warning / 109 passed / 1 ignored / fmt 干净）
 cargo fmt && cargo check --all-targets && cargo test
 
 # 4. 看清两个版本的差异
@@ -473,7 +555,8 @@ git diff master ai-refactor --stat
 # 5. 读这三份文档再动手
 #    AGENTS.md / DEVELOPMENT_GUIDE.md / REFACTOR_REPORT.md
 
-# 6. 建议的第一件活：P6 收尾（见 §6）、或 P3 剩下的时间戳前缀；GPLv3 合规已降为最低优先级（§4①）
+# 6. 计划内的功能项已全部落地（P0~P6）。下一件活从 §4② 的磁盘持久化实机验证（需所有者亲手跑）
+#    或 §5 里那 8 条既有 clippy 警告的清理开始；GPLv3 合规已降为最低优先级（§4①）
 ```
 
 如果你要对照原版行为：`git -C E:\Downloads\Zed\comtool-rs log -1`（原版停在 `04dc007`），

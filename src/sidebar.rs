@@ -42,6 +42,7 @@ impl ComTool {
         let current_baud = self.baud_rate;
         let hex_mode = self.hex_view;
         let color_mode = self.color_view;
+        let timestamp_mode = self.timestamp_prefix;
         let rx_bytes = self.receive_text.len();
         let port_list = self.ports.clone();
         let is_logging = self.is_logging();
@@ -104,6 +105,7 @@ impl ComTool {
                                 ""
                             }
                         ));
+                        ui.label(format!("时间戳前缀: {}", timestamp_mode.label()));
                     });
 
                 egui::CollapsingHeader::new("可用串口").show(ui, |ui| {

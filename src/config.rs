@@ -102,7 +102,7 @@ fn normalize_panel_visibility(app: &mut ComTool) {
 mod tests {
     use super::*;
     use crate::app::{Language, ThemeChoice};
-    use crate::receive::{AnsiStyle, ColoredSpan};
+    use crate::receive::{AnsiStyle, ColoredSpan, TimestampPrefix};
     // 调用 `get_string`/`set_string` 需要 trait 本身在作用域内
     use eframe::Storage as _;
     use serialport::{DataBits, FlowControl, Parity, StopBits};
@@ -157,7 +157,7 @@ mod tests {
             clear_send_after_send: false,
             default_log_file_name: "MyLog_%Y.txt".to_string(),
             log_dir: "E:/serial-logs".to_string(),
-            check_update_on_start: true,
+            timestamp_prefix: TimestampPrefix::PerLine,
             show_receive_panel: true,
             show_send_panel: false,
             show_chart_panel: true,
@@ -209,10 +209,7 @@ mod tests {
             original.default_log_file_name
         );
         assert_eq!(restored.log_dir, original.log_dir);
-        assert_eq!(
-            restored.check_update_on_start,
-            original.check_update_on_start
-        );
+        assert_eq!(restored.timestamp_prefix, original.timestamp_prefix);
         assert_eq!(restored.show_receive_panel, original.show_receive_panel);
         assert_eq!(restored.show_send_panel, original.show_send_panel);
         // P5 新增的图表偏好同样要能往返
@@ -278,6 +275,23 @@ mod tests {
         assert!(restored.serial.is_none());
     }
 
+    /// P6 删掉了字段 `check_update_on_start`（版本检查被整体取消），而**旧存档里
+    /// 还留着它**。反序列化默认忽略未知字段，这条测试把"数据兼容承诺"钉下来，
+    /// 而不是靠"应该没问题"——一旦哪天有人加上 `deny_unknown_fields`，这里会先红。
+    #[test]
+    fn archive_with_a_removed_field_still_loads() {
+        let mut storage = MemoryStorage::default();
+        storage.set_string(
+            STORAGE_KEY,
+            r#"(selected_port:"COM7",baud_rate:4800,check_update_on_start:true)"#.to_string(),
+        );
+
+        let restored = load(Some(&storage));
+
+        assert_eq!(restored.selected_port, "COM7");
+        assert_eq!(restored.baud_rate, 4800);
+    }
+
     /// 存档损坏时必须退化为默认值，绝不能 panic——否则用户只要有一个坏存档
     /// 就再也打不开程序。
     #[test]
@@ -318,6 +332,11 @@ mod tests {
         assert!(!app.show_chart_panel, "图表默认不显示，避免占掉接收区高度");
         assert!(app.chart.is_empty(), "默认没有图表数据");
         assert_eq!(app.chart_max_samples, crate::app::DEFAULT_CHART_MAX_SAMPLES);
+        assert_eq!(
+            app.timestamp_prefix,
+            TimestampPrefix::Off,
+            "默认不加时间戳前缀：开启前的接收内容必须逐字节保持不变"
+        );
     }
 
     /// 正在进行的实时文件日志不得跨进程延续。

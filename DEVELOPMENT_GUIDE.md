@@ -16,7 +16,7 @@
   默认值、配置、测试或脚本；不得停止/杀掉/禁用任何可能占用 COM3 的进程、服务或驱动。
   对 COM3 只能"看"（不打开端口的只读枚举，且需先说明理由），不能"碰"。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。90 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。109 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
 - 一次批准只对当次生效，不构成对后续轮次的授权。
@@ -64,7 +64,7 @@
 | `src/main.rs` | 入口；`APP_TITLE` 常量；字体回退链配置；`eframe::run_native`；把 `app_icon::generate()` 挂进 `ViewportBuilder` |
 | `src/app_icon.rs` | 应用图标：256×256 圆角方波图标，代码绘制、零资源文件、11 条单元测试，不依赖 GUI |
 | `src/app.rs` | `ComTool` 状态、`Default`、`ThemeChoice`、串口生命周期、视图级辅助方法、`eframe::App` 顶层编排 |
-| `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`、字节级可视化、三种视图渲染、`max_log_chars` FIFO 淘汰 |
+| `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`、字节级可视化、可选时间戳前缀（`TimestampPrefix`）、三种视图渲染、`max_log_chars` FIFO 淘汰 |
 | `src/log_file.rs` | 实时文件日志：后台写盘线程（`LogSink`）、文件名模板渲染、同名防截断、待写队列上限 |
 | `src/chart.rs` | 实时图表数据层：原始字节 → 多通道数值序列（`ChartData`）、跨包分片、样本 FIFO、非数值计数；不依赖 `egui` |
 | `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态 |
@@ -88,11 +88,11 @@
         ▼
 receive_data()                     ← 业务层（src/receive.rs）：拉取原始字节
    ├─ 原始字节 → chart.push_bytes()  → 多通道数值序列（与显示模式无关，见 §2.2）
-   ├─ HEX 模式    → 逐字节转文本        → push 进 display_spans
-   ├─ 字节查看    → ascii_spans_from_bytes → push 进 ascii_spans
-   └─ 文本模式    → decoder.feed() 解析 ANSI 颜色 → push 进 display_spans
-        │        （三条分支都同步 append 到 receive_text）
-        │        （每条分支的文本同时经 log_append() 投给实时文件日志，见 §2.1）
+   ├─ HEX 模式    → 逐字节转文本         ┐
+   ├─ 字节查看    → ascii_spans_from_bytes ├→ 片段 → apply_timestamp_prefix()（§2.3）
+   └─ 文本模式    → decoder.feed() 解析 ANSI 颜色 ┘
+        │        （三条分支的片段走同一条公共尾部：加时间戳 → 写片段镜像）
+        │        （同一份文本再 append 到 receive_text，并经 log_append() 投给文件日志，见 §2.1）
         ▼
 display_spans / ascii_spans         ← 状态层：片段缓存（内存）
         │
@@ -146,6 +146,35 @@ receive_data() ──原始字节──> ChartData::push_bytes() ──> 每通�
 - 图表数据是纯运行时状态（`#[serde(skip)]`），跨会话不保留；`chart_max_samples`
   在 `restore_runtime_state` 里夹到合法区间。
 
+### 2.3 时间戳前缀（P3）
+
+可选的显示注解，默认**关闭**（关闭时接收链路与没有这个功能时逐字节相同）：
+
+```
+TimestampPrefix::{Off, PerLine, PerBatch}      ← 设置窗口「接收」区 / 视图菜单
+        │
+        ▼
+apply_timestamp_prefix(spans)                  ← 必须是本批写入镜像**之前**读行首状态
+        ├─ 前缀文本 = format_timestamp(Local::now())   每批只取一次时间
+        └─ timestamped_spans(spans, mode, prefix, at_line_start)
+                 │  按 `\n` 切行，在每个行首插入一个灰色临时片段
+                 ▼
+        片段镜像（display_spans / ascii_spans）→ 拼接出 receive_text → 导出 / 复制 / 文件日志
+```
+
+- **在片段层插，不在文本层插**：`receive_text` 由片段拼接而来，两处各插一遍迟早走偏。
+  只插一次，四份镜像自然一致——这也是它不需要新增镜像的原因。
+- **它是注解，不是数据**：只进显示文本（含导出与文件日志），**绝不**进 `chart.push_bytes()`
+  的那份原始字节。两条路在 `receive_data` 里是分开的。
+- **行首状态不另设字段**：`at_receive_line_start()` 从 `receive_text` 的尾部推导
+  （空串或结尾是 `\n`）。三种显示模式、程序提示、`clear_receive()` 都会写这个镜像，
+  任何并行状态字段都会在某个分支上与它不一致。
+- **没有内容就不加前缀**（判据是"有非空片段"，不是"片段数组非空"）：文本模式收到
+  半个多字节序列时片段是空的，此时加前缀会凭空造出一行。
+- 行边界就是 `\n`。HEX 视图每批一行，于是"每行"在那里自然退化成"每批"——这是设计如此。
+- 镜像落点必须与分支顺序一致：HEX 优先于字节查看，所以落点是
+  `!hex_view && ascii_view`，而不是 `ascii_view`。
+
 发送方向：
 
 ```
@@ -158,7 +187,7 @@ ui.button("发送") → send_data() → ByteChannel::write(bytes)
                                      串口
 ```
 
-> **同一份接收数据维护四份镜像**：`receive_text`（纯文本，供导出与普通视图）、`display_spans`（彩色片段）、`ascii_text` / `ascii_spans`（字节可视化）。四者必须同步清空、同步追加——`ComTool::clear_receive()` 是唯一的复位入口。裁剪只作用于这四份内存镜像；磁盘上的实时日志文件是另一条旁路（见 §2.1）。
+> **同一份接收数据维护四份镜像**：`receive_text`（纯文本，供导出与普通视图）、`display_spans`（彩色片段）、`ascii_text` / `ascii_spans`（字节可视化）。四者必须同步清空、同步追加——`ComTool::clear_receive()` 是唯一的复位入口。裁剪只作用于这四份内存镜像；磁盘上的实时日志文件是另一条旁路（见 §2.1）。开启时间戳前缀时（§2.3），前缀是这些镜像内容的一部分，因此导出文件与文件日志里也会带上它。
 
 ---
 
@@ -292,6 +321,7 @@ impl eframe::App for ComTool {
 | 设置窗口 | `show_settings` 与各偏好字段 | `show_settings_window()`（`panels/settings.rs`） | 设置菜单 / 「⚙ 设置」按钮 |
 | 日志长度上限（FIFO 淘汰） | `max_log_chars` | `trim_receive_logs()`（`receive.rs`） | 设置窗口「日志长度上限」 |
 | 自动滚动 | `auto_scroll` | 三个接收视图的 `stick_to_bottom` 参数 | 设置窗口 / 视图菜单 |
+| 时间戳前缀 | `timestamp_prefix` | `apply_timestamp_prefix()` / `timestamped_spans()` / `format_timestamp()`（`receive.rs`） | 设置窗口「接收」区 / 视图菜单；侧边栏「接收统计」显示当前档位 |
 | 重绘间隔 | `repaint_interval_ms` | `ui()` 里的 `request_repaint_after` | 设置窗口「重绘间隔」 |
 | 发送后清空 | `clear_send_after_send` | `send_data()`（`app.rs`） | 设置窗口 |
 | 面板显隐（至少留一个） | `sidebar_open` / `show_receive_panel` / `show_chart_panel` / `show_send_panel` | `visible_panel_count()`（`app.rs`） | 视图菜单「面板」 |
@@ -315,6 +345,8 @@ impl eframe::App for ComTool {
 2. **新增字段务必同步 `impl Default`**：egui 结构体大多通过 `Default::default()` 创建，漏初始化会直接编译失败。
 
 3. **新增字段务必同步持久化策略**：见 §3 步骤 ③。`ComTool` 带容器级 `#[serde(default)]`，所以新增字段本身不会导致旧存档读不出来；但如果它是运行时状态却没有 `#[serde(skip)]`，就会把一个无意义的快照写进磁盘，并在下次启动时带着过期值出现。运行时字段还必须加入 `config::restore_runtime_state` 的重建列表。
+
+   反过来，**删除**一个持久化字段是安全的：反序列化会忽略存档里已经不认识的那些键（`config::tests::archive_with_a_removed_field_still_loads` 把这一点钉住了）。别让那条测试失效——例如给 `ComTool` 加上 `#[serde(deny_unknown_fields)]`，那会让所有旧存档直接读不出来。P6 决定不做版本检查时，就是按这条把 `check_update_on_start` 连同它的设置项一起删掉的：界面里留一个永远不生效的开关，比没有这个功能更糟。
 
 4. **UI 事件与业务逻辑分离**：把数据处理写在 `impl ComTool` 里，`ui()` 只负责画控件和调用方法。侧边栏尤其注意——它在 `sidebar.rs` 里只记录「用户按了什么」，真正的状态变更由 `app.rs` 统一派发。
 
@@ -364,3 +396,9 @@ impl eframe::App for ComTool {
 24. **`egui_plot` 的版本号与 `egui` 并不同步**：`egui_plot 0.37` 才依赖 `egui ^0.36`，而 `egui_plot 0.36` 依赖的是 `egui ^0.35`。升级任何一个之前先核实真实依赖（`cargo tree -i egui`，或直接看本地 `registry/src/**/egui_plot-*/Cargo.toml`），不要凭版本号数字相同就断定兼容。
 25. **`Cargo.toml` 已清理两个死依赖并固定 release 优化级别**：`tokio`（features = `["full"]`，零调用）与 `egui-chinese-font`（零调用，中文字体走 `main.rs::setup_fonts` 直接读系统字体）已移除；`[profile.release] opt-level = 2` 已添加，用于与上游保持一致并缩短 release 构建时间。`chrono` / `rfd` / `serde` / `serialport` / `egui_plot` 仍是活跃依赖。
 26. **应用图标在 `src/app_icon.rs` 里用代码画出来**，而不是 `assets/icon.png`：256×256 圆角方形 + 数字脉冲波形，4×4 超采样做边缘抗锯齿，11 条单元测试覆盖尺寸、透明度、渐变、前景笔画与越界检查。这样没有资源文件丢失风险，图标行为也能在 `cargo test` 里被断言（`egui::__run_test_ui` 只能证明"画得出来不 panic"，而图标的几何正确性靠纯计算测试）。颜色与波形需要人工肉眼确认时，见 `src/app_icon.rs` 末尾的 `#[ignore]` ASCII 预览测试。
+27. **时间戳前缀是"显示注解"，不是数据**：它插在**片段层**（`timestamped_spans()`），因为 `receive_text` 是由片段拼接而来的——在文本层再插一遍迟早会与片段镜像走偏。它因此会进导出文件与实时日志，但**绝不进** `chart.push_bytes()` 的那份原始字节（图表解析的必须是设备真正发来的内容，`receive::tests::timestamps_do_not_leak_into_the_chart` 盯着这一点）。
+    - 行首状态**不要另设字段**：`at_receive_line_start()` 从 `receive_text` 尾部推导（空串或以 `\n` 结尾）。三种显示模式、`push_receive_note()`、`clear_receive()` 都在写这个镜像，任何平行字段都会在某个分支上与它不一致，而症状只是"少一个时间戳"，很难注意到。
+    - 一批只取**一次** `Local::now()`：同一块数据里的多行本来就同时到达，逐行取时间会造出"每隔几毫秒来一行"的假象。
+    - **没有内容就不加前缀**，判据是"有非空片段"而不是"片段数组非空"——文本模式收到半个多字节序列时片段是空的，此时加前缀等于凭空造出一行。
+    - 行边界就是 `\n`，所以 HEX 视图（每批一行）下"每行"自然退化为"每批"，这是设计如此，不是缺陷。
+    - 片段的落点必须与模式分支顺序一致：HEX 优先于字节查看，因此落点是 `!hex_view && ascii_view`。写成 `ascii_view` 会让"两个勾选框同时打开"时片段落进另一份镜像——这正是改写 `receive_data` 时最容易悄悄引入的回归（`receive::tests::hex_takes_precedence_over_ascii_like_before` 锁住了它）。

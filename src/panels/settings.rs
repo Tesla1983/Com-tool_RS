@@ -3,10 +3,11 @@
 //! 旧版这里是「只有一个语言占位下拉」的空壳；现在每一项都绑到实际生效的字段。
 //! 生效范围分三类，界面上如实标注：
 //!
-//! - **立即生效**：主题、日志长度上限、自动滚动、重绘间隔、发送后清空、文件名模板、
-//!   图表样本上限、图表自动缩放；
+//! - **立即生效**：主题、时间戳前缀、日志长度上限、自动滚动、重绘间隔、发送后清空、
+//!   文件名模板、图表样本上限、图表自动缩放；
 //! - **打开窗口时生效**：日志输出目录（记录过程中改动会在下次开始记录时生效）；
-//! - **接线待做**：启动时检查更新（P6 版本检查使用，默认关闭）。
+//! - **已移除**：启动时检查更新。P6 决定不做版本检查——内网环境访问不到检查地址，
+//!   留一个「开了也没用」的开关比没有更糟，因此连同设置项一并删除。
 
 use crate::app::{ComTool, Language};
 use crate::chart::{MAX_SAMPLES, MIN_SAMPLES};
@@ -15,7 +16,7 @@ use chrono::Local;
 use eframe::egui;
 use egui::Ui;
 
-use super::menu_bar::theme_radios;
+use super::menu_bar::{theme_radios, timestamp_radios};
 
 /// 左侧标签列的宽度，让右侧控件纵向对齐。
 const LABEL_WIDTH: f32 = 104.0;
@@ -65,6 +66,12 @@ impl ComTool {
 
                 ui.separator();
                 ui.heading("接收");
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("时间戳前缀"));
+                    timestamp_radios(ui, &mut self.timestamp_prefix);
+                });
+                ui.weak("形如 [12:00:00.123] 的本地时间前缀；每行 = 每个换行后重新标注，每批 = 每次收到数据标注一次");
+                ui.weak("前缀是显示注解而不是收到的数据：它会随接收区一起进导出文件与实时日志，但不会进入图表解析");
                 ui.horizontal(|ui| {
                     ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new("日志长度上限"));
                     ui.add(
@@ -156,11 +163,6 @@ impl ComTool {
                     }
                 });
                 ui.weak("接收区的内容会同步写入该文件；日志文件不受上面的长度上限约束");
-
-                ui.separator();
-                ui.heading("更新");
-                ui.checkbox(&mut self.check_update_on_start, "启动时检查更新");
-                ui.weak("版本检查将在 P6 接线；离线或内网环境建议保持关闭");
 
                 ui.separator();
                 ui.weak("以上均为用户偏好，改动即时生效并在退出时自动保存");
