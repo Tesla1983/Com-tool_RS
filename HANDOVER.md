@@ -59,14 +59,15 @@ Rust 串口调试上位机（GUI 串口助手）。技术栈：
 | 语言/版本 | Rust **edition 2024**（需 rustc ≥ 1.85；实测工具链 `rustc 1.97.1`） |
 | GUI | `egui` / `eframe` **0.36.1**（`glow` 后端 + `persistence` feature） |
 | 串口 | `serialport` 4.10.0（manifest 写 `"4.7.2"` 是 caret 要求，实解析到 4.10.0） |
-| 其它 | `rfd`（文件对话框）、`serde`（持久化）、`chrono`（日志文件名时间戳，P4 起真正在用）、`egui_plot` 0.37（实时图表，P5 起在用）、`tokio` / `egui-chinese-font`（**已声明但当前零调用**） |
+| 其它 | `rfd`（文件对话框）、`serde`（持久化）、`chrono`（日志文件名时间戳，P4 起在用）、`egui_plot` 0.37（实时图表，P5 起在用）。`tokio` 与 `egui-chinese-font` 已作为死依赖移除（见 P6 第 1 批） |
 | 类型 | 单 binary crate（无 workspace、无 CI、无 lint 配置） |
 
 ### 模块结构（`ai-refactor` 分支）
 
 ```
 src/
-├── main.rs                 入口；字体回退链；eframe::run_native；APP_TITLE 常量
+├── main.rs                 入口；字体回退链；eframe::run_native；APP_TITLE 常量；挂 `app_icon` 到窗口图标
+├── app_icon.rs   (289)     256×256 圆角方波图标，代码绘制、零资源文件、11 测试（1 条 ASCII 预览默认跳过）
 ├── app.rs        (595)     ComTool 状态 + Default + 串口生命周期 + eframe::App 编排
 ├── receive.rs    (886)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
 │                           + 三种渲染 + FIFO 淘汰（17 测试）
@@ -89,7 +90,7 @@ src/
 │   └── mod.rs     (13)     出口
 ```
 
-测试函数合计 **79**（`cargo test` 报 79 passed；两者一致）。
+测试函数合计 **90**（`cargo test` 报 90 passed，1 ignored；两者一致）。
 
 **权威约定文档**（改代码前先读）：
 - `AGENTS.md` — 给 AI/协作者的模块地图与硬性约束（简短，必读）
@@ -114,12 +115,12 @@ src/
 
 ### 质量门禁（P0/P1 改动前 → 改动后）
 
-| 命令 | 前 | P0/P1 后 | P4 后 | 本轮（P5）后 |
-|---|---|---|---|---|
-| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
-| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** |
-| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** |
-| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） |
+| 命令 | 前 | P0/P1 后 | P4 后 | 本轮（P5）后 | 本轮（P6 第 1 批）后 |
+|---|---|---|---|---|---|
+| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
+| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed**（1 ignored，为图标 ASCII 预览） |
+| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** |
+| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（与上轮逐条相同，未改既有代码；`app_icon.rs` 与 `Cargo.toml` 新代码 0 新增） |
 
 跑法：
 
@@ -128,10 +129,11 @@ cd E:/Downloads/Zed/AI_comtool-rs
 cargo fmt && cargo check --all-targets && cargo test
 ```
 
-79 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
-一条把字节经事件通道注入后核对日志文件内容的集成测试，以及五条用
+90 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
+一条把字节经事件通道注入后核对日志文件内容的集成测试、五条用
 `egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图、
-侧边栏、图表面板）。
+侧边栏、图表面板），以及 11 条对应用图标做纯断言的单元测试（尺寸、透明度、渐变、
+前景笔画、越界检查、确定性）。
 
 ### 3.1 增量（2026-09-21：P2 菜单栏 + 设置面板，P3 部分提前）
 
@@ -246,6 +248,30 @@ cargo fmt && cargo check --all-targets && cargo test
   界面上只暴露了前者——抽样这件事目前只在文档与代码注释里。
 - x 轴是组序号而非时间，因此**无法看出真实的时间跨度或采样率**。
 
+### 3.4 增量（2026-09-21：P6 收尾第 1 批 — 依赖清理 / release profile / 应用图标）
+
+| 项 | 值 |
+|---|---|
+| 变更模块 | `Cargo.toml`、`src/main.rs`、新增 `src/app_icon.rs` |
+| 新增依赖 | 无 |
+| 移除依赖 | `tokio` 1.53.1（features = `["full"]`，零调用）、`egui-chinese-font` 0.2.0（零调用，中文字体已由 `main.rs::setup_fonts` 读系统字体实现） |
+| 新增 Cargo profile | `[profile.release] opt-level = 2`（与上游一致，下调 Rust 默认的 3，缩短 release 构建时间） |
+| 新增图标 | 256×256 圆角方形 + 数字脉冲波形，代码绘制，4×4 超采样抗锯齿，11 条单元测试（外加 1 条默认跳过的 ASCII 预览测试） |
+| 门禁 | `cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** · `cargo test` **90 passed**（1 ignored） · clippy **8 条**（与上轮逐条相同，新代码 0 新增） |
+
+**做了什么**
+
+- **死依赖清理**：`tokio` 启用 `full` 会明显拖慢编译且全项目零调用；串口、日志、未来版本检查都只需要一次性的超时/后台线程，用 std 线程足够。
+  `egui-chinese-font` 也未被调用——`main.rs` 里已手写系统字体回退链（读 `C:\Windows\Fonts` 下的 `msyh.ttc` / `simsun.ttc` / `simhei.ttf` 等），不需要再包一层 crate。
+- **release 优化级别固定为 2**：不写时 Rust 默认是 3；降到 2 与上游 `SerialGUI-rs` 保持一致，对 GUI 程序来说瓶颈在布局与 IO，少一档优化几乎不影响体感，却能缩短 release 构建时间、减小体积。
+- **应用图标零资源文件**：`src/app_icon.rs` 用代码生成 `egui::IconData`（RGBA、256×256、圆角方形 + 两个脉冲的数字波形）。没有 `assets/icon.png`，因此不存在"资源文件缺失/与二进制不同步"的路径；同时所有几何与颜色属性都能被 `cargo test` 断言。
+- **图标接进窗口**：`main.rs` 通过 `egui::ViewportBuilder::default().with_icon(Arc::new(app_icon::generate()))` 设置，eframe 在 Windows 上会把 `IconData` 重新编码成 PNG 再交给 `CreateIconFromResourceEx`，所以任务栏与窗口标题栏都能看到图标。此路径不新增依赖（`image` 是 eframe 本来就带的目标平台依赖）。
+
+**未做 / 未验证**
+
+- **图标外观只有代码级预览确认**：256×256 PNG 用 Python 纯标准库 zlib 临时转出看过，圆角、渐变、波形形状正确，但真实任务栏 16~32 px 的小尺寸效果需要实机运行才能最终确认。
+- **版本检查仍未实现**：设置项 `check_update_on_start` 已存在但没有任何消费逻辑。见 §6 后续计划与下文"下一步"。
+
 ---
 
 ## 4. 未决事项
@@ -320,7 +346,7 @@ cargo fmt && cargo check --all-targets && cargo test
 | 中 | 自动重连无退避 | `app.rs::auto_reconnect` | 每 500 ms 失败一次就新建线程，串口被占用时会持续重试 |
 | 中 | 待发队列无上限 | `channel.rs::worker_main` 的 `outgoing` | 设备长期不可写 + 用户持续点发送时队列增长。原实现用 unbounded mpsc 同样无上限，未引入新问题，但应加背压 |
 | 中 | 写路径瞬态错误静默重试 | `channel.rs::worker_main` | `WouldBlock` / `Interrupted` 直接重试是合理的，但设备长期不接受数据时用户得不到提示。建议侧边栏显示「待发字节数」 |
-| 低 | 2 个未使用依赖 | `Cargo.toml` | `tokio` / `egui-chinese-font` 零调用。`tokio` 启用 `full` 会明显拖慢编译。保留是因为它们对应计划里的「版本检查」与中文字体内置，是否移除由你决定（`chrono` 自 P4、`egui_plot` 自 P5 起已在用） |
+| ~~低~~ **已清理** | ~~2 个未使用依赖~~ | `Cargo.toml` | 已于 P6 第 1 批移除：`tokio`（features = `["full"]`，零调用，明显拖慢编译）与 `egui-chinese-font`（零调用，中文字体已由 `main.rs::setup_fonts` 读系统字体实现）。`chrono` / `egui_plot` / `rfd` / `serde` / `serialport` 仍是活跃依赖 |
 | 低 | 8 条 clippy 风格警告 | `app.rs` / `receive.rs` | `derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`。全部位于截至 P5 未改动的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写；其余 8 条留待 P6 一并处理） |
 | 低 | 记录中途改配置不切换文件 | `log_file.rs` | 记录过程中改「文件名模板」或「输出目录」不会切到新文件，下次开始记录才生效；界面上没有特别提示 |
 | 低 | **图表不支持无换行的连续逗号流** | `chart.rs::push_bytes` | 通道语义（第 k 个字段 = 第 k 条曲线）要求「一行一组」；无换行时通道数只能靠猜，猜错就画错位。因此这类数据在超过 4096 字节后被**整行丢弃**并在界面计数。属于明确的设计取舍，不是待修 bug |
@@ -343,7 +369,7 @@ cargo fmt && cargo check --all-targets && cargo test
 | **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，`ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | 🟡 **部分完成**：FIFO 淘汰与 `auto_scroll` 已提前做完；时间戳前缀未做 |
 | **P4** 实时文件日志 | Start/Stop Log 开关 + 默认文件名 `LogFile_%Y-%m-%d_%H-%M-%S.txt`（chrono 现成）；**写入必须走独立线程 + `BufWriter`，绝不在 UI 线程 `write_all`** | ✅ **已完成**（见 §3.2；落在 `src/log_file.rs` 而非计划里的 `src/panels/file_log.rs`，另加了输出目录选择与同名防截断） |
 | **P5** 实时图表 | 建议引 `egui_plot` 而非移植上游手绘代码；支持逗号分隔多通道；`stream_buffer` 处理跨包分片 | ✅ **已完成**（见 §3.3；落在 `src/chart.rs` + `src/panels/chart.rs`，多通道上限 16、绘制点封顶 4000、数据不足时断线而不补 0） |
-| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或 3s 超时静默失败**，内网要能跳过）；应用图标；`[profile.release] opt-level = 2`；清理未使用依赖 | 🟡 Info 弹窗已完成；其余未做 —— **下一步** |
+| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或 3s 超时静默失败**，内网要能跳过）；应用图标；`[profile.release] opt-level = 2`；清理未使用依赖 | 🟡 **Info 弹窗 ✅**；**依赖清理 ✅**（移除 `tokio`、`egui-chinese-font`）；**release profile ✅**（`opt-level = 2`）；**应用图标 ✅**（代码绘制、11 测试）。**版本检查仍未实现** —— 下一步（待用户决策是否引入网络依赖 / 具体 URL） |
 
 **覆盖率参考**：改动前相对 `SerialGUI-rs` 约 40%（核心链路约 90%）；P0/P1 完成后全局约 45%；
 P2 完成约 75%（可日常使用）；P4 完成约 80%；**P5 完成约 88%（功能对齐上游）**。
@@ -359,7 +385,7 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；**P5 完成约 88%（
 
 0. **⛔ 未经项目所有者逐次批准，禁止运行本项目（`cargo run` / 直接跑 exe），禁止以任何方式
    占用或打断 COM3。** 开发阶段只用 `cargo fmt` / `cargo check --all-targets` / `cargo test`
-   验证（79 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
+   验证（90 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
    完整条文在 `AGENTS.md` 顶部与 `DEVELOPMENT_GUIDE.md` §0。
    **该规则已配置机器级硬拦截**：PreToolUse 钩子 `~/.workbuddy/hooks/comtool-run-guard.sh`
    （注册于 `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json`），命中即拒绝工具调用，

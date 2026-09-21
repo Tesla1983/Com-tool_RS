@@ -4,8 +4,10 @@ use crate::app::ComTool;
 
 use eframe::egui;
 use egui::{FontData, FontDefinitions, FontFamily};
+use std::sync::Arc;
 
 mod app;
+mod app_icon;
 mod chart;
 mod communicationtrait;
 mod config;
@@ -79,6 +81,10 @@ fn setup_fonts(ctx: &egui::Context) {
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
+        // 窗口与任务栏图标在编译期用代码绘制（见 `app_icon`）。不设置时
+        // eframe 会退回它自带的 egui 图标；在 Windows 上 eframe 会把这份
+        // RGBA 重新编码成 PNG 再交给 `CreateIconFromResourceEx`。
+        viewport: egui::ViewportBuilder::default().with_icon(Arc::new(app_icon::generate())),
         ..Default::default()
     };
 

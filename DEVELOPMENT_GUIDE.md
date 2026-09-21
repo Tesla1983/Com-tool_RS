@@ -16,7 +16,7 @@
   默认值、配置、测试或脚本；不得停止/杀掉/禁用任何可能占用 COM3 的进程、服务或驱动。
   对 COM3 只能"看"（不打开端口的只读枚举，且需先说明理由），不能"碰"。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。79 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。90 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
 - 一次批准只对当次生效，不构成对后续轮次的授权。
@@ -61,7 +61,8 @@
 
 | 文件 | 职责 |
 |---|---|
-| `src/main.rs` | 入口；`APP_TITLE` 常量；字体回退链配置；`eframe::run_native` |
+| `src/main.rs` | 入口；`APP_TITLE` 常量；字体回退链配置；`eframe::run_native`；把 `app_icon::generate()` 挂进 `ViewportBuilder` |
+| `src/app_icon.rs` | 应用图标：256×256 圆角方波图标，代码绘制、零资源文件、11 条单元测试，不依赖 GUI |
 | `src/app.rs` | `ComTool` 状态、`Default`、`ThemeChoice`、串口生命周期、视图级辅助方法、`eframe::App` 顶层编排 |
 | `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`、字节级可视化、三种视图渲染、`max_log_chars` FIFO 淘汰 |
 | `src/log_file.rs` | 实时文件日志：后台写盘线程（`LogSink`）、文件名模板渲染、同名防截断、待写队列上限 |
@@ -302,6 +303,8 @@ impl eframe::App for ComTool {
 | 数值流解析（多通道） | `chart`、`chart_max_samples` | `ChartData::push_bytes()`（`chart.rs`，在 `receive_data()` 里对原始字节调用） | 无（自动） |
 | 图表样本上限 / 自动缩放 | `chart_max_samples`、`chart_auto_bounds` | `ChartData::push_bytes` 的淘汰逻辑 / `Plot::auto_bounds` | 设置窗口「实时图表」区 |
 | 清空图表 | `chart` | `clear_chart()`（`chart.rs`） | 图表面板「清空图表」/ 设置窗口 |
+| 应用图标 | — | `app_icon::generate()`（`app_icon.rs`） | 编译期生成；`main.rs` 挂进 `eframe::NativeOptions::viewport` |
+| release 编译优化级别 | — | `[profile.release] opt-level = 2`（`Cargo.toml`） | 仅影响 `cargo build --release` / `cargo run --release` |
 
 ---
 
@@ -359,3 +362,5 @@ impl eframe::App for ComTool {
 23. **绘制点数必须封顶，且抽样要保留最后一个点**：`panels/chart.rs::points_for_drawing` 把每条曲线抽到 `MAX_DRAWN_POINTS`（4000）以内。样本上限是用户可以调到 10 万的设置项，而 `egui_plot` 每帧都要把点转成它自己的结构——不封顶的话一个设置项就能把界面拖死。抽样时**必须留下最后一个点**（那是最新数据），只按步长取点会把曲线末端切掉，看起来像"设备停了"。曲线配色 `CHANNEL_COLORS` 是**数据编码**（哪条线是哪个通道），刻意不随主题变化，并与主题色区分开。
 
 24. **`egui_plot` 的版本号与 `egui` 并不同步**：`egui_plot 0.37` 才依赖 `egui ^0.36`，而 `egui_plot 0.36` 依赖的是 `egui ^0.35`。升级任何一个之前先核实真实依赖（`cargo tree -i egui`，或直接看本地 `registry/src/**/egui_plot-*/Cargo.toml`），不要凭版本号数字相同就断定兼容。
+25. **`Cargo.toml` 已清理两个死依赖并固定 release 优化级别**：`tokio`（features = `["full"]`，零调用）与 `egui-chinese-font`（零调用，中文字体走 `main.rs::setup_fonts` 直接读系统字体）已移除；`[profile.release] opt-level = 2` 已添加，用于与上游保持一致并缩短 release 构建时间。`chrono` / `rfd` / `serde` / `serialport` / `egui_plot` 仍是活跃依赖。
+26. **应用图标在 `src/app_icon.rs` 里用代码画出来**，而不是 `assets/icon.png`：256×256 圆角方形 + 数字脉冲波形，4×4 超采样做边缘抗锯齿，11 条单元测试覆盖尺寸、透明度、渐变、前景笔画与越界检查。这样没有资源文件丢失风险，图标行为也能在 `cargo test` 里被断言（`egui::__run_test_ui` 只能证明"画得出来不 panic"，而图标的几何正确性靠纯计算测试）。颜色与波形需要人工肉眼确认时，见 `src/app_icon.rs` 末尾的 `#[ignore]` ASCII 预览测试。

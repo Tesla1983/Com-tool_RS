@@ -3,6 +3,13 @@ name = "comtool-rs"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+# 与上游保持一致：release 使用 opt-level = 2，而不是 Rust 默认的 3。
+# 这是一款每次重绘都要跑一遍布局与文本排版的 GUI 程序，热点在串口 IO 与
+# egui 布局，不在算术；少一档优化几乎不影响体感，却能明显缩短 release
+# 构建时间。注意这是**下调**：不写这一节时 Rust 默认就是 3。
+opt-level = 2
+
 [dependencies]
 egui = "0.36.1"
 eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "wayland"] }
@@ -14,7 +21,13 @@ serde = { version = "1.0.229", features = ["derive"] }
 # Serialize/Deserialize，这样端口参数可以直接随应用状态落盘，不必再写一层
 # 枚举与字符串之间的手写转换。
 serialport = { version = "4.7.2", features = ["serde"] }
+# chrono 只用于日志文件名的时间戳格式化（P4 起在用）。
 chrono = "0.4.45"
-egui-chinese-font = "0.2.0"
+# rfd 提供「选择输出目录」的原生对话框（P4 起在用）。
 rfd = "0.17.2"
-tokio = { version = "1.53.1", features = ["full"] }
+# 已移除的两个死依赖（P6 收尾）：
+# - `tokio`：全项目零调用。串口与日志写盘都用 std 线程 + mpsc，版本检查也
+#   只会有一次带超时的请求，用不上 runtime；而 `features = ["full"]` 曾明显
+#   拖慢编译。
+# - `egui-chinese-font`：零调用。中文字体是 `main.rs::setup_fonts` 直接读
+#   `C:\Windows\Fonts` 下的系统字体并挂进回退链的，没有走这个 crate。
