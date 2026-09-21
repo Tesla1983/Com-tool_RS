@@ -124,6 +124,21 @@ fn worker_main(
         loop {
             match commands.try_recv() {
                 Ok(WorkerCommand::Transmit(bytes)) => outgoing.push_back((bytes, 0)),
+                Ok(WorkerCommand::SetLineState { rts, dtr }) => {
+                    // 现场直接改：这两个调用只是驱动层的两次控制请求，不阻塞。
+                    // 失败走 `Notice` 而不是 `Failed`——拉不动一根控制线并不代表
+                    // 通道坏了，判成掉线会让界面从"已连接"跳走、还会把定时发送关掉。
+                    if let Some(level) = rts
+                        && let Err(e) = port.write_request_to_send(level)
+                    {
+                        let _ = events.send(ChannelEvent::Notice(format!("设置 RTS 失败: {e}")));
+                    }
+                    if let Some(level) = dtr
+                        && let Err(e) = port.write_data_terminal_ready(level)
+                    {
+                        let _ = events.send(ChannelEvent::Notice(format!("设置 DTR 失败: {e}")));
+                    }
+                }
                 Ok(WorkerCommand::Halt) => return,
                 Err(TryRecvError::Empty) => break,
                 // UI 侧把 Sender 丢了，说明对象正在析构，同样收工。
@@ -223,6 +238,19 @@ impl ByteChannel for SerialChannel {
         })?;
         self.cfg = cfg.clone();
         Ok(())
+    }
+
+    /// 串口是**唯一**会覆盖它的实现（RTS / DTR 是串口专有的两根控制线）。
+    ///
+    /// 只把请求投给后台线程就返回：真正的驱动调用在那里做。因此 `Ok` 的含义是
+    /// "请求已送达"，线到底拉没拉动由后台线程的判断决定（失败会回一条 `Notice`）。
+    fn set_line_state(&mut self, rts: Option<bool>, dtr: Option<bool>) -> io::Result<()> {
+        let Some(commands) = self.commands.as_ref() else {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "串口尚未打开"));
+        };
+        commands
+            .send(WorkerCommand::SetLineState { rts, dtr })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "串口后台线程已退出"))
     }
 }
 

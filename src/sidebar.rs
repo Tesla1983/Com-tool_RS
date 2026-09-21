@@ -5,7 +5,7 @@
 //! 派发逻辑集中在 `app.rs` 一处，侧边栏不会在渲染过程中偷偷改状态。
 
 use crate::app::{ComTool, ConnectionKind};
-use crate::serial_impl::BAUD_RATES;
+use crate::serial_impl::{BAUD_RATES, CUSTOM_BAUD_MAX, CUSTOM_BAUD_MIN};
 use crate::strings::{Strings, fill, timestamp_prefix_label};
 use egui::Ui;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
@@ -66,6 +66,7 @@ impl ComTool {
         let color_mode = self.color_view;
         let timestamp_mode = self.timestamp_prefix;
         let rx_bytes = self.receive_text.len();
+        let tx_bytes = self.tx_bytes;
 
         // 连接类型决定了「显示哪一组参数」与「状态那一行怎么说」，所以它也要在绘制前
         // 定死：下面的信息区与参数区必须来自同一个时刻的类型，否则用户刚点完单选就
@@ -170,6 +171,12 @@ impl ComTool {
                     .default_open(true)
                     .show(ui, |ui| {
                         ui.label(fill(s.rx_bytes_label, &[&rx_bytes]));
+                        // 两个计数的口径**不一样**，所以悬停里要点明（N4）：
+                        // 接收那个是"当前留在缓冲区里的字节数"（会被上限裁掉），
+                        // 发送那个是"自本次连接以来累计送出去的字节数"（只增不减）。
+                        // 不写清楚的话，用户会拿两个数字相加去对账。
+                        ui.label(fill(s.tx_bytes_label, &[&tx_bytes]))
+                            .on_hover_text(s.tx_bytes_hover);
                         ui.label(fill(s.display_mode_line, &[&display_mode_text]));
                         ui.label(fill(s.timestamp_prefix_line, &[&timestamp_text]));
                     });
@@ -278,6 +285,20 @@ impl ComTool {
                                         );
                                     }
                                 });
+                            // N5：下拉里只有 20 个常用档，非标波特率（比如 250000、
+                            // 921600 之外的板级值）必须能直接敲。做成"下拉旁边跟一个
+                            // 可拖可键入的数字框"而不是再塞一个输入框：两者改的是
+                            // **同一个** `baud_rate`，不存在"选了 9600 又在旁边填了
+                            // 115200"这种自相矛盾的状态。
+                            //
+                            // 越界不走 `clamp_baud` 兜底，而是由 `range` 当场夹住：
+                            // 用户拖不出界，也就不需要靠"打开端口时偷偷改掉"来补救。
+                            ui.add(
+                                egui::DragValue::new(&mut self.baud_rate)
+                                    .range(CUSTOM_BAUD_MIN..=CUSTOM_BAUD_MAX)
+                                    .speed(1000.0),
+                            )
+                            .on_hover_text(s.baud_custom_hint);
                         });
                         ui.horizontal(|ui| {
                             ui.add_sized([70.0, 20.0], egui::Label::new(s.data_bits));
@@ -341,6 +362,59 @@ impl ComTool {
                                         );
                                     }
                                 });
+                        });
+
+                        // —— 控制线 RTS / DTR（N1）——
+                        //
+                        // 三个约束都体现在这一段里：
+                        //
+                        // * 未连接时**置灰**。通道没开就没有地方投递命令，"点了没反应"
+                        //   不如一眼看出不能点；置灰的理由挂在 `on_disabled_hover_text`
+                        //   上，不让用户去猜。
+                        // * 只画勾选框、**不画"当前电平"**。`serialport` 只提供写、不
+                        //   提供读（见 [`crate::app::ComTool::rts`]），驱动回读不到引脚，
+                        //   界面就绝不能假装知道自己把线拉到了哪里。措辞也照这个来：
+                        //   勾选框表达"我们请求的电平"。
+                        // * 打开端口**不会**顺手拉线，所以这两个勾选框的初值恒为未勾选
+                        //   （见 [`crate::app::ComTool::open_connection`]）：上电瞬间把
+                        //   DTR 拉高会把不少开发板直接拽进复位。
+                        //
+                        // 另外：流控选「硬件」时，本驱动在 Windows 上取
+                        // `RtsControl::Enable`（`serialport` 的内部行为），RTS 由驱动
+                        // 负责保持。此时手动勾选未必是线上的最终电平——这正是上面那句
+                        // "请求"的含义。
+                        ui.horizontal(|ui| {
+                            ui.add_sized([70.0, 20.0], egui::Label::new(s.line_state_header));
+                            let mut rts = self.rts;
+                            let mut dtr = self.dtr;
+                            let rts_response =
+                                ui.add_enabled(is_connected, egui::Checkbox::new(&mut rts, "RTS"));
+                            let dtr_response =
+                                ui.add_enabled(is_connected, egui::Checkbox::new(&mut dtr, "DTR"));
+
+                            // 先把 `changed()` 取出来：`on_hover_text` 会**消费**
+                            // `Response`（它不是 `Copy`），链式调用之后再问就晚了。
+                            let rts_changed = rts_response.changed();
+                            let dtr_changed = dtr_response.changed();
+
+                            // 两种提示各管一段，都挂上就不用在这里写 if：
+                            // `on_hover_text` 在控件被禁用时本来就不显示（egui 的定义），
+                            // 禁用的解释交给 `on_disabled_hover_text`。
+                            rts_response
+                                .on_hover_text(s.line_state_hover)
+                                .on_disabled_hover_text(s.line_state_hint);
+                            dtr_response
+                                .on_hover_text(s.line_state_hover)
+                                .on_disabled_hover_text(s.line_state_hint);
+
+                            // 一次只改一根：`None` 表示"那一根不动"（见
+                            // [`crate::app::ComTool::apply_line_state`]）。
+                            if rts_changed {
+                                self.apply_line_state(Some(rts), None);
+                            }
+                            if dtr_changed {
+                                self.apply_line_state(None, Some(dtr));
+                            }
                         });
                     } else {
                         // 网络参数：地址 + 端口。串口那一整组（端口名 / 波特率 /

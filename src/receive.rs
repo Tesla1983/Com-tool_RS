@@ -952,6 +952,12 @@ impl ComTool {
                         self.connected = false;
                         channel_down = true;
                     }
+                    ChannelEvent::Notice(msg) => {
+                        // 非致命：只显示，**不动** `connected`、也不停定时发送。
+                        // 判成掉线的话，拉不动一根控制线会让界面从"已连接"跳走，
+                        // 而数据其实照样在收发（见 `ChannelEvent::Notice` 的文档）。
+                        notes.push(format!("{noun}: {msg}\n"));
+                    }
                 }
             }
         }

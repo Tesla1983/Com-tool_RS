@@ -16,7 +16,7 @@
   默认值、配置、测试或脚本；不得停止/杀掉/禁用任何可能占用 COM3 的进程、服务或驱动。
   对 COM3 只能"看"（不打开端口的只读枚举，且需先说明理由），不能"碰"。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。207 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。230 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
 - 一次批准只对当次生效，不构成对后续轮次的授权。
@@ -63,22 +63,22 @@
 |---|---|
 | `src/main.rs` | 入口；`APP_TITLE` 常量；字体回退链配置；`eframe::run_native`；把 `app_icon::generate()` 挂进 `ViewportBuilder` |
 | `src/app_icon.rs` | 应用图标：256×256 圆角方波图标，代码绘制、零资源文件、11 条单元测试，不依赖 GUI |
-| `src/app.rs` | `ComTool` 状态、`Default`、`Language` / `ThemeChoice` / `ConnectionKind`、连接生命周期（`open_connection()` 按类型分叉）、视图级辅助方法、`eframe::App` 顶层编排 |
-| `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`（含 `TextEncoding` 增量解码）、字节级可视化、可选时间戳前缀（`TimestampPrefix`）、三种视图渲染、`max_log_chars` FIFO 淘汰 |
-| `src/send.rs` | 发送侧纯逻辑：`parse_hex()`、`encode_text()` / `build_payload()`、`SendHistory` / `HistoryNav`、定时发送间隔钳制；**不依赖 `egui` 与串口**，因此可直接单测 |
+| `src/app.rs` | `ComTool` 状态、`Default`、`Language` / `ThemeChoice` / `ConnectionKind`、连接生命周期（`open_connection()` 按类型分叉）、视图级辅助方法、`eframe::App` 顶层编排；F5 起还有控制线（`apply_line_state`）、发送计数、端口热插拔（`rescan_ports` / `note_focus`）与常用数据区（`render_send_presets`） |
+| `src/receive.rs` | 接收链路：四份镜像状态、`AnsiDecoder`（含 `TextEncoding` 增量解码）、字节级可视化、可选时间戳前缀（`TimestampPrefix`）、三种视图渲染、`max_log_chars` FIFO 淘汰；`ChannelEvent::Notice` 只写提示、不改连接状态 |
+| `src/send.rs` | 发送侧纯逻辑：`parse_hex()`、`parse_escapes()`、`encode_text()` / `build_payload()`、`SendFormat`（文本 / HEX / 转义）、`SendHistory` / `HistoryNav`、`SendPresets`、定时发送间隔钳制；**不依赖 `egui` 与串口**，因此可直接单测 |
 | `src/strings.rs` | 界面文案表：`Strings` + `ZH` / `EN` + `Language::strings()`；`fill()` 填充 `{}` 模板；源码级守卫测试（UI 源码不许硬编码中文） |
 | `src/log_file.rs` | 实时文件日志：后台写盘线程（`LogSink`）、文件名模板渲染、同名防截断、待写队列上限 |
 | `src/chart.rs` | 实时图表数据层：原始字节 → 多通道数值序列（`ChartData`）、跨包分片、样本 FIFO、非数值计数；不依赖 `egui` |
-| `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态；连接类型单选 + 「串口参数 / 网络参数」双分支（F4） |
-| `src/panels/mod.rs` | 面板模块声明 + 无头 UI 冒烟测试（含英文界面） |
+| `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态；连接类型单选 + 「串口参数 / 网络参数」双分支（F4）；F5 起含发送字节计数、波特率自由输入与控制线 RTS/DTR 一行 |
+| `src/panels/mod.rs` | 面板模块声明 + 无头 UI 冒烟测试（含英文界面、已连接侧边栏、常用数据行） |
 | `src/panels/menu_bar.rs` | 顶部菜单栏（文件 / 设置 / 视图 / 文本 / 发送）；返回 `MenuAction`；各档单选（主题 / 时间戳 / 编码 / 发送格式与行尾）共用一处定义 |
 | `src/panels/settings.rs` | 设置窗口：把用户偏好接到真正的控件上 |
 | `src/panels/info.rs` | 信息窗口：版本、技术栈、存档路径、快捷键 |
 | `src/panels/chart.rs` | 实时图表面板：`egui_plot` 绘制、图例、绘制点抽样（`points_for_drawing`） |
 | `src/config.rs` | 持久化策略 + 启动时不变量修复 |
-| `src/communicationtrait.rs` | `ByteChannel` trait（`open` / `close` / `is_active` / `write` / `configure` / `local_addr`）与 `ChannelEvent`；三者共用的后台线程脚手架 `worker`（`WorkerCommand` / `StateGuard` / `is_transient`）；附 `#[cfg(test)] mod fake` 通道替身 |
-| `src/serial_impl/channel.rs` | 串口实现：后台线程 + 命令/事件双通道 |
-| `src/serial_impl/config.rs` | `SerialConfig` 与波特率档位 |
+| `src/communicationtrait.rs` | `ByteChannel` trait（`open` / `close` / `is_active` / `write` / `configure` / `set_line_state` / `local_addr`）与 `ChannelEvent`（`Bytes` / `Failed` / `Closed` / `Notice`）；三者共用的后台线程脚手架 `worker`（`WorkerCommand` / `StateGuard` / `is_transient`）；附 `#[cfg(test)] mod fake` 通道替身 |
+| `src/serial_impl/channel.rs` | 串口实现：后台线程 + 命令/事件双通道；唯一覆盖 `set_line_state` 的实现 |
+| `src/serial_impl/config.rs` | `SerialConfig` 与波特率档位；任意波特率的区间与 `clamp_baud()` |
 | `src/net_impl/config.rs` | `NetConfig`：远端地址 / 端口 / UDP 本地端口 + `validate()` / `remote_addr()` |
 | `src/net_impl/tcp.rs` | `TcpChannel`：**同步 connect**、`set_nodelay`、对端关闭发 `ChannelEvent::Closed` |
 | `src/net_impl/udp.rs` | `UdpChannel`：绑 `0.0.0.0:local_port` 后 `connect` 固化对端；零长度数据报不是 EOF |
@@ -472,3 +472,19 @@ impl eframe::App for ComTool {
 
 38. **网络侧的可忽略错误不要塞进公共函数**（F4 起）：`communicationtrait::worker::is_transient` 只放三种**所有传输共有**的（`TimedOut` / `WouldBlock` / `Interrupted`）。某个传输特有的（Windows 上 connected UDP socket 把 ICMP port unreachable 报成 `ConnectionReset`）由该实现自己补——塞进公共函数会让串口那边也跟着忽略一个真故障。
     - 共用脚手架（`WorkerCommand` / `StateGuard` / `IDLE` / `ACTIVE`）同理：三条实现共有的硬约定只有一处，不要复制三份。
+
+39. **打开端口不许动控制线**（F5 / N1 起）：`open_connection()` 成功后只把 `rts` / `dtr` 同步成 `false`，**不发任何 `SetLineState`**。理由是硬的：上电瞬间把 DTR 拉高会把相当多的开发板直接拽进复位，而用户只是想打开端口看看。`serialport` 在 Windows 上打开时本就把两根线都置为 Disable（`windows/dcb.rs`），我们不去改变这个事实。
+    - 勾选框的语义是「**我们请求的电平**」，不是"引脚此刻的电平"——驱动只提供写、不提供读，界面看不到硬件把线拉到了哪里。措辞、注释、悬停三处都必须说这一点，否则迟早有人把它当测量值用。
+
+40. **控制线失败不是掉线**（F5 / N1 起）：`ChannelEvent::Notice` 是**非致命**事件，`receive_data()` 里只往接收区写一行提示，**不动 `connected`、不停定时发送**。与 `Failed` / `Closed` 严格分开——拉不动一根控制线时数据其实照样在收发，判成掉线会让界面跳到"未连接"。
+    - 新加"失败但不致命"的通道侧事件时照这个来：加 `Notice` 的**新用途**，而不是把 `Failed` 的语义放宽。
+
+41. **发送路径只有一个收口**（F4 起、F5 加固）：任何新的发送入口（按钮、常用数据、将来的文件发送）都必须走 `payload_for()`（编码 + 行尾，唯一一处）→ `transmit()`（写通道 + 报错 + `tx_bytes` 计数，唯一一处）。**不许在回调里自己拼一遍 `channel.write()`**：漏一次就是"某条路径失败了不提示"或"计数对不上"，而且都是静默的。
+    - `tx_bytes` 只在 `write` 返回 `Ok` **之后**累加，与「发送后清空输入框」同一条原则：确实发出去了才算数。
+
+42. **常用数据满了不淘汰**（F5 / N2 起）：`SendPresets` 与 `SendHistory` 的容量策略**故意相反**——历史是自动攒的、淘汰最旧的；常用数据是用户亲手挑的，满了就拒绝新增（`can_add()` 是**唯一**判定处，界面置灰与 `add()` 都调它）。
+    - 标签不落盘：由 `preset_label()` 从内容现推（取首行 + 按**字符**截断）。
+
+43. **绘制入口要能被无头测试驱动**（F5 起）：新增的绘制逻辑优先抽成 `fn xxx(&mut self, ui: &mut Ui)`（`pub(crate)` 视需要），而不是内联进 `eframe::App::ui`。原因是硬的：`ui()` 需要一个 `eframe::Frame`，无头测试构造不出来，内联在里面的控件等于**一次也不会被 `cargo test` 画到**。
+    - 参照 `render_send_presets()`：抽出来之后 `panels::tests` 能把它"空 / 有内容 / 已满 / 英文"四种状态各画一遍。
+    - 与之配套的一条：**纯绘制不得产生副作用**。无头渲染不投递指针事件，`changed()` 恒为 false——测试就断言"画完之后通道里一条命令都没有"。`show_sidebar` 的烟雾测试现在是这么写的。

@@ -193,9 +193,15 @@ pub(crate) fn text_encoding_radios(ui: &mut Ui, encoding: &mut TextEncoding) {
 ///
 /// `HEX` 是专有名词，中英两列取值相同——这是事实，不是漏翻译
 /// （`strings.rs` 的 `identical_entries_are_language_neutral_only` 认这一点）。
+/// 发送格式三选一（N3 起是三档，不是两档）。
+///
+/// **只在这里定义一次**：菜单栏、发送区、设置窗口三处都调它。三处各写一遍的
+/// 后果是"某天加了第四档，只改了两处"——界面上就出现了"设置窗口里能选、发送区
+/// 里选不到"的格式。
 pub(crate) fn send_format_radios(ui: &mut Ui, format: &mut SendFormat, s: &Strings) {
     ui.radio_value(format, SendFormat::Text, s.text);
     ui.radio_value(format, SendFormat::Hex, s.hex);
+    ui.radio_value(format, SendFormat::Escape, s.escape);
 }
 
 /// 发送行尾三选一。三值枚举而不是"追加 CR / 追加 LF"两个勾选框：那四个组合里

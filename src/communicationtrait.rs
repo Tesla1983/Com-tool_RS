@@ -31,6 +31,14 @@ pub enum ChannelEvent {
 
     /// 通道发生错误。字符串用于向用户展示，不保证机器可解析。
     Failed(String),
+
+    /// 通道侧的一条**非致命**消息：只该显示给用户，不改变连接状态。
+    ///
+    /// 与 `Failed` 的区别是决定性的——`Failed` 的含义是"这条通道已经不能用了"，
+    /// 上层据此置 `connected = false`、停掉定时发送、让自动重连接手。而"设置 RTS
+    /// 失败"这类**只影响单次操作**的错误若走 `Failed`，用户会看到界面从"已连接"
+    /// 跳成"未连接"、定时发送被静默关掉，而实际上数据照样在收发。
+    Notice(String),
 }
 
 /// 后台线程持有的字节流通道。
@@ -75,6 +83,23 @@ pub trait ByteChannel: Send {
             "该通道类型不接受运行时配置",
         ))
     }
+
+    /// 把手动电平请求交给后台线程。`None` 表示"这一根线不动"。
+    ///
+    /// **默认实现直接拒绝**：只有串口有 RTS / DTR 这两根控制线，网络通道没有。
+    /// 与 [`configure`](Self::configure) 同一个套路——"这个实现不提供该能力"必须
+    /// 当场说出来，而不是静默忽略；静默忽略会让用户以为线已经拉下去了。
+    ///
+    /// 用 `Option<bool>` 而不是两个 `bool`：调用方通常只想动其中一根。用两个 `bool`
+    /// 表达"不动"，就只能把另一根**按调用方以为的值**重写一遍，而我们其实并不知道
+    /// 它现在是什么电平——`serialport` 只提供写、不提供读。
+    fn set_line_state(&mut self, rts: Option<bool>, dtr: Option<bool>) -> io::Result<()> {
+        let _ = (rts, dtr);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "该通道类型没有 RTS / DTR 控制线",
+        ))
+    }
 }
 
 /// 后台线程实现方共用的脚手架。
@@ -93,6 +118,14 @@ pub(crate) mod worker {
     pub(crate) enum WorkerCommand {
         /// 把这段字节发给对端。
         Transmit(Vec<u8>),
+        /// 改变控制线的输出电平（`None` = 这一根不动）。只有串口会收到它。
+        ///
+        /// 它必须走指令队列而不是在 `SerialChannel` 上直接办：端口句柄归后台线程独占，
+        /// UI 线程够不着（本模块文档第 2 条）。
+        SetLineState {
+            rts: Option<bool>,
+            dtr: Option<bool>,
+        },
         /// 结束工作循环并返回。
         Halt,
     }
@@ -145,6 +178,9 @@ pub(crate) mod fake {
         written: Vec<Vec<u8>>,
         active: bool,
         reject_writes: bool,
+        reject_line_state: bool,
+        /// 每一次 `set_line_state` 的实参，按发生顺序。
+        line_state_calls: Vec<(Option<bool>, Option<bool>)>,
         sink: Option<Sender<ChannelEvent>>,
     }
 
@@ -190,6 +226,21 @@ pub(crate) mod fake {
         /// 让后续 `write` 一律失败，用来验证"发送失败"分支。
         pub(crate) fn reject_writes(&self, reject: bool) {
             self.shared.lock().expect("锁未被毒化").reject_writes = reject;
+        }
+
+        /// 让后续 `set_line_state` 一律失败，用来验证"线状态设置失败"走的是
+        /// **非致命**提示（`Notice`）而不是掉线（`Failed`）。
+        pub(crate) fn reject_line_state(&self, reject: bool) {
+            self.shared.lock().expect("锁未被毒化").reject_line_state = reject;
+        }
+
+        /// 到目前为止每一次线状态请求的实参。
+        pub(crate) fn line_state_calls(&self) -> Vec<(Option<bool>, Option<bool>)> {
+            self.shared
+                .lock()
+                .expect("锁未被毒化")
+                .line_state_calls
+                .clone()
         }
 
         /// 往被测代码的事件通道里灌一个事件（通道未打开时什么也不做）。
@@ -242,6 +293,17 @@ pub(crate) mod fake {
         /// 替身接受任何配置：被测代码传进来的是串口参数，而替身不关心内容——
         /// 拒绝配置会让 `open_connection` 走失败分支，测不到后面的链路。
         fn configure(&mut self, _settings: &dyn std::any::Any) -> io::Result<()> {
+            Ok(())
+        }
+
+        /// 记下每一次请求。**不接受** trait 的默认实现（那个一律报 `Unsupported`），
+        /// 否则"界面上勾一下 RTS 到底有没有传到通道"就没法在门禁里验。
+        fn set_line_state(&mut self, rts: Option<bool>, dtr: Option<bool>) -> io::Result<()> {
+            let mut shared = self.shared.lock().expect("锁未被毒化");
+            if shared.reject_line_state {
+                return Err(io::Error::other("替身通道被要求拒绝线状态操作"));
+            }
+            shared.line_state_calls.push((rts, dtr));
             Ok(())
         }
     }

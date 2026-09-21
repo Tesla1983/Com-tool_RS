@@ -141,6 +141,10 @@ fn worker_main(
         loop {
             match commands.try_recv() {
                 Ok(WorkerCommand::Transmit(bytes)) => outgoing.push_back((bytes, 0)),
+                // 网络通道没有 RTS / DTR：`ByteChannel::set_line_state` 的默认实现
+                // 直接报 `Unsupported`，所以这条指令到不了这里。写出来只是让 match
+                // 穷尽——顺带说明"三个实现共用同一个指令枚举"是编译期强制同步的。
+                Ok(WorkerCommand::SetLineState { .. }) => {}
                 Ok(WorkerCommand::Halt) => return,
                 Err(TryRecvError::Empty) => break,
                 // UI 侧把 Sender 丢了，说明对象正在析构，同样收工。
@@ -384,6 +388,7 @@ mod tests {
         let mut got: Vec<u8> = Vec::new();
         let mut saw_close = false;
         let mut failure: Option<String> = None;
+        let mut notice: Option<String> = None;
 
         wait_until(
             || {
@@ -394,14 +399,18 @@ mod tests {
                         // 对端正常关闭必须走 Closed。收成 Failed 就是实现错了，
                         // 记下来在断言里说清楚，而不是在闭包里 panic。
                         ChannelEvent::Failed(msg) => failure = Some(msg),
+                        // TCP 没有 RTS/DTR，也不该产生别的非致命通知。真收到了
+                        // 说明事件路由串了，同样记下来交给断言。
+                        ChannelEvent::Notice(msg) => notice = Some(msg),
                     }
                 }
-                saw_close || failure.is_some()
+                saw_close || failure.is_some() || notice.is_some()
             },
             Duration::from_secs(5),
         );
 
         assert_eq!(failure, None, "对端正常关闭必须上报 Closed，而不是 Failed");
+        assert_eq!(notice, None, "TCP 通道不应产生非致命通知（Notice）");
         assert!(saw_close, "对端关闭后必须上报 Closed");
         assert_eq!(got, b"pong", "对端回包的字节应原样送达");
         assert!(

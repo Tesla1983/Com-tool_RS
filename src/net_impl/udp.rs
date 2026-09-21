@@ -126,6 +126,10 @@ fn worker_main(
         loop {
             match commands.try_recv() {
                 Ok(WorkerCommand::Transmit(bytes)) => outgoing.push_back((bytes, 0)),
+                // 网络通道没有 RTS / DTR：`ByteChannel::set_line_state` 的默认实现
+                // 直接报 `Unsupported`，所以这条指令到不了这里。写出来只是让 match
+                // 穷尽——顺带说明"三个实现共用同一个指令枚举"是编译期强制同步的。
+                Ok(WorkerCommand::SetLineState { .. }) => {}
                 Ok(WorkerCommand::Halt) => return,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
@@ -345,6 +349,7 @@ mod tests {
         peer.send_to(b"world", bound).expect("对端应能发回数据报");
 
         let mut got: Vec<u8> = Vec::new();
+        let mut notice: Option<String> = None;
         let received = wait_until(
             || {
                 while let Ok(event) = rx.try_recv() {
@@ -353,12 +358,16 @@ mod tests {
                         // UDP 无连接，任何情况下都不该出现 Closed
                         ChannelEvent::Closed => panic!("UDP 不会产生 Closed 事件"),
                         ChannelEvent::Failed(msg) => panic!("不该出现失败事件: {msg}"),
+                        // UDP 同样没有 RTS/DTR，非致命通知不该出现。不 panic
+                        // （它按设计不是致命事件），改为记下由断言说清楚。
+                        ChannelEvent::Notice(msg) => notice = Some(msg),
                     }
                 }
-                !got.is_empty()
+                !got.is_empty() || notice.is_some()
             },
             Duration::from_secs(5),
         );
+        assert_eq!(notice, None, "UDP 通道不应产生非致命通知（Notice）");
         assert!(received, "对端发来的数据报应送达");
         assert_eq!(got, b"world");
 

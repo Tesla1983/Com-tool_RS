@@ -20,6 +20,20 @@ use serde::{Deserialize, Serialize};
 /// 发送历史的容量上限（条）。超出后淘汰最旧的一条。
 pub const MAX_SEND_HISTORY: usize = 50;
 
+/// 常用数据的容量上限（条）。超出后拒绝新增（**不淘汰旧的**）。
+///
+/// 与 [`MAX_SEND_HISTORY`] 的淘汰策略不同，理由是这两份列表的性质相反：历史是
+/// 自动攒出来的，淘汰最旧的天经地义；常用数据是用户**亲手挑出来**的，静默删掉
+/// 第一条会让人以为程序丢了数据。满了就明确拒绝，由用户自己先删一条。
+pub const MAX_SEND_PRESETS: usize = 16;
+
+/// 常用数据按钮上短标签的字符上限（N2）。
+///
+/// 放在这里而不是界面里：这是**标签策略**（多长算太长）而不是布局参数，改了它
+/// 会影响所有渲染这一列表的地方。12 个字符按等宽字体算约 90px，加上内边距正好
+/// 容纳三四个按钮一行。
+pub const PRESET_LABEL_CHARS: usize = 12;
+
 /// 定时发送间隔的下限（毫秒）。
 ///
 /// 10ms = 100 次/秒。再快就已经超出手动调试的意义，只会把 UI 线程和串口驱动
@@ -43,6 +57,13 @@ pub enum SendFormat {
     Text,
     /// 按十六进制发送：输入是十六进制文本，解析成字节后发出。
     Hex,
+    /// 按转义序列发送（N3）：`\r` `\n` `\t` `\0` `\xNN` `\\` 变成字节，
+    /// 其余字面文本仍按用户所选的编码编码。
+    ///
+    /// 单独立一档而不是给文本模式加一个 `escape: bool`：这正是"输入的解析方式"
+    /// 这根轴上的第三个取值，与 [`crate::app::ComTool::send_format`] 的定义完全一致。
+    /// 加 bool 会让"文本 + 转义 + HEX"这些组合里出现无意义的格子。
+    Escape,
 }
 
 /// 发送时追加的行尾。
@@ -120,6 +141,88 @@ pub fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// 转义序列解析出来的一个片段。
+///
+/// 拆成"字面文本"与"原始字节"两种，而不是直接产出 `Vec<u8>`：字面文本还得按当前
+/// 编码编码（GBK 下"你好"是两个字节），而转义产出的是**原样字节**。混在一起的话
+/// `\xC4\xE3` 会被当成文本再编码一遍。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EscItem {
+    /// 一段普通文本，交给调用方按当前编码编码。
+    Literal(String),
+    /// 转义直接产出的字节。
+    Bytes(Vec<u8>),
+}
+
+/// 单字符转义表。
+///
+/// **不解释 `\u{...}`**：那会把"文本编码"偷偷混进来——用户选了 GBK 就说明字面文本
+/// 的字节由 GBK 决定，此时再给一条绕过编码的入口，同一段输入就有了两种互不相容的
+/// 解释。要指定原始字节，用 `\xNN`。
+const ESCAPES: &[(char, u8)] = &[
+    ('r', 0x0D),
+    ('n', 0x0A),
+    ('t', 0x09),
+    ('0', 0x00),
+    ('\\', b'\\'),
+];
+
+/// 把带转义的文本解析成片段序列。
+///
+/// 与 [`parse_hex`] 同一条规则：**写错了就报错，绝不静默丢弃**（模块文档第 1 条）。
+/// 未知转义（`\q`）、`\x` 后面位数不足或含非十六进制字符、结尾孤立的 `\`，一律
+/// 返回 `Err`，调用方据此"不发、也不清空输入框"。
+pub(crate) fn parse_escapes(input: &str) -> Result<Vec<EscItem>, String> {
+    let mut items = Vec::new();
+    let mut literal = String::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            literal.push(c);
+            continue;
+        }
+
+        // 见到 `\` 先把攒着的字面文本冲出去：顺序必须保住，`a\x41b` 里那两段文本
+        // 不能因为"先收集再统一编码"而被合并成一个整体（合并后仍等价，但一旦以后再
+        // 加"字面文本可被某个开关影响"的行为，这里就会变成 bug）。
+        if !literal.is_empty() {
+            items.push(EscItem::Literal(std::mem::take(&mut literal)));
+        }
+
+        let Some(next) = chars.next() else {
+            return Err("结尾有一个孤立的 `\\`：它后面还差一个转义字符".to_string());
+        };
+
+        if let Some((_, byte)) = ESCAPES.iter().find(|(name, _)| *name == next) {
+            items.push(EscItem::Bytes(vec![*byte]));
+            continue;
+        }
+
+        if next == 'x' {
+            let digits: String = chars.by_ref().take(2).collect();
+            if digits.chars().count() < 2 {
+                return Err(format!("`\\x` 后面需要两位十六进制数，只给了 `{digits}`"));
+            }
+            if let Some(bad) = digits.chars().find(|c| !c.is_ascii_hexdigit()) {
+                return Err(format!("`\\x{digits}` 里的 `{bad}` 不是十六进制字符"));
+            }
+            let byte = u8::from_str_radix(&digits, 16).expect("已校验为两位十六进制，必然可解析");
+            items.push(EscItem::Bytes(vec![byte]));
+            continue;
+        }
+
+        return Err(format!(
+            "认不出转义 `\\{next}`；可用的是 \\\\ \\r \\n \\t \\0 \\xNN"
+        ));
+    }
+
+    if !literal.is_empty() {
+        items.push(EscItem::Literal(literal));
+    }
+    Ok(items)
+}
+
 /// 一次发送要写出去的字节，以及一个必须让用户知道的警告。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Payload {
@@ -165,6 +268,9 @@ pub fn encode_text(text: &str, encoding: TextEncoding) -> (Vec<u8>, bool) {
 ///
 /// HEX 模式**不经过编码**：输入本身就是字节的十六进制写法，再按编码解释一遍等于
 /// 多此一举，还会把 `41 42` 变成别的意思。
+///
+/// 转义模式（N3）介于两者之间：**转义产出的字节原样、字面文本照常编码**。写成
+/// "整个模式都不编码"是错的——用户在 GBK 档下敲的中文仍该是 GBK 字节。
 pub fn build_payload(
     text: &str,
     format: SendFormat,
@@ -174,6 +280,21 @@ pub fn build_payload(
     let (mut bytes, had_unmappable) = match format {
         SendFormat::Text => encode_text(text, encoding),
         SendFormat::Hex => (parse_hex(text)?, false),
+        SendFormat::Escape => {
+            let mut out = Vec::new();
+            let mut unmappable = false;
+            for item in parse_escapes(text)? {
+                match item {
+                    EscItem::Literal(literal) => {
+                        let (encoded, had) = encode_text(&literal, encoding);
+                        out.extend_from_slice(&encoded);
+                        unmappable |= had;
+                    }
+                    EscItem::Bytes(raw) => out.extend_from_slice(&raw),
+                }
+            }
+            (out, unmappable)
+        }
     };
     bytes.extend_from_slice(ending.bytes());
     Ok(Payload {
@@ -245,6 +366,93 @@ impl SendHistory {
     pub fn from_back(&self, back: usize) -> Option<&str> {
         let index = self.entries.len().checked_sub(back + 1)?;
         self.entries.get(index).map(String::as_str)
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+/// 由内容推出按钮上的短标签（N2）。
+///
+/// 取**第一行**、去掉首尾空白，超过 `max_chars` 个字符就截断并加省略号。按**字符**
+/// 而不是字节截断：中文一个字三字节，按字节切会切出半个字（这是本项目的老教训）。
+///
+/// 第一行为空（内容以换行开头、或整条只有空白）时给一个占位标签，否则按钮会是
+/// 一块空白、连点都找不到地方。
+pub fn preset_label(text: &str, max_chars: usize) -> String {
+    let first_line = text.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return "…".to_string();
+    }
+    let mut chars = first_line.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+/// 常用数据：用户挑出来、想一键重发的几条（N2）。
+///
+/// **只存内容，不存标签**——标签由 [`preset_label`] 从内容现推。存标签要多一个字段
+/// 和一套改名界面，换来的只是"两条开头一样的指令能区分开"，而把完整内容挂在按钮的
+/// 悬停提示上就够了。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendPresets {
+    entries: Vec<String>,
+}
+
+impl SendPresets {
+    /// 全部条目，按加入顺序。
+    pub fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.entries.len() >= MAX_SEND_PRESETS
+    }
+
+    pub fn contains(&self, text: &str) -> bool {
+        self.entries.iter().any(|entry| entry == text)
+    }
+
+    /// 这段内容能不能存进去。
+    ///
+    /// 界面用它决定「存为常用」按钮是否可点。**判定只有这一处**——否则按钮的置灰
+    /// 条件与 [`add`](Self::add) 的实际规则迟早对不上（按钮亮着、点了没反应）。
+    ///
+    /// 拒绝三种：空内容、与已有条目一字不差、列表已满。
+    pub fn can_add(&self, text: &str) -> bool {
+        !text.is_empty() && !self.is_full() && !self.contains(text)
+    }
+
+    /// 存一条，返回是否真的存进去了。
+    ///
+    /// 满了**不淘汰旧的**（与 [`SendHistory`] 相反）：这些是用户亲手挑的，静默删掉
+    /// 第一条会让人以为程序丢了数据。满了就明确拒绝，由用户自己先删一条。
+    pub fn add(&mut self, text: &str) -> bool {
+        if !self.can_add(text) {
+            return false;
+        }
+        self.entries.push(text.to_string());
+        true
+    }
+
+    /// 删掉第 `index` 条；越界什么也不做。
+    pub fn remove(&mut self, index: usize) {
+        if index < self.entries.len() {
+            self.entries.remove(index);
+        }
     }
 
     pub fn clear(&mut self) {
@@ -650,5 +858,157 @@ mod tests {
         assert_eq!(nav.newer(&h), Some("b".to_string()));
         assert_eq!(nav.newer(&h), Some("新的草稿".to_string()));
         assert_eq!(nav.newer(&h), None, "已回到编辑态，再按 ↓ 不该动");
+    }
+
+    // ---------- N3：转义序列 ----------
+
+    /// 转义与字面文本**必须切成不同的片段**：`\n` 是原样字节，字面文本走编码。
+    /// 合成一段"先拼字符串再统一编码"就丢掉了这个区分（`\xC4` 会被再编码一次）。
+    #[test]
+    fn escapes_split_into_literals_and_raw_bytes() {
+        assert_eq!(
+            parse_escapes("a\\r\\nb").unwrap(),
+            vec![
+                EscItem::Literal("a".to_string()),
+                EscItem::Bytes(vec![0x0D]),
+                EscItem::Bytes(vec![0x0A]),
+                EscItem::Literal("b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn escapes_cover_the_documented_set() {
+        assert_eq!(
+            parse_escapes("\\r").unwrap(),
+            vec![EscItem::Bytes(vec![0x0D])]
+        );
+        assert_eq!(
+            parse_escapes("\\n").unwrap(),
+            vec![EscItem::Bytes(vec![0x0A])]
+        );
+        assert_eq!(
+            parse_escapes("\\t").unwrap(),
+            vec![EscItem::Bytes(vec![0x09])]
+        );
+        assert_eq!(
+            parse_escapes("\\0").unwrap(),
+            vec![EscItem::Bytes(vec![0x00])]
+        );
+        assert_eq!(
+            parse_escapes("\\\\").unwrap(),
+            vec![EscItem::Bytes(vec![b'\\'])]
+        );
+        assert_eq!(
+            parse_escapes("\\x41\\x0a").unwrap(),
+            vec![EscItem::Bytes(vec![0x41]), EscItem::Bytes(vec![0x0A])]
+        );
+        // 没有转义时整段就是一个 Literal
+        assert_eq!(
+            parse_escapes("hello").unwrap(),
+            vec![EscItem::Literal("hello".to_string())]
+        );
+        assert!(parse_escapes("").unwrap().is_empty());
+    }
+
+    /// 与 `parse_hex` 同一条规则：**写错了就报错，绝不静默跳过**（模块文档第 1 条）。
+    #[test]
+    fn escapes_reject_unknown_and_incomplete_forms() {
+        assert!(parse_escapes("\\q").unwrap_err().contains('q'));
+        assert!(parse_escapes("\\x4").unwrap_err().contains("两位"));
+        assert!(parse_escapes("\\xZZ").unwrap_err().contains("十六进制"));
+        assert!(parse_escapes("ab\\").unwrap_err().contains("孤立"));
+    }
+
+    /// 转义模式下**字节绕过编码**：`\xC4\xE3` 就是 `C4 E3` 两个字节，
+    /// 不会被 GBK 再编码一遍（那会变成四个字节，而且完全不是用户要的东西）。
+    #[test]
+    fn escaped_bytes_bypass_the_encoding() {
+        let payload = build_payload(
+            "\\xC4\\xE3",
+            SendFormat::Escape,
+            SendLineEnding::None,
+            TextEncoding::Gbk,
+        )
+        .expect("合法转义不该解析失败");
+
+        assert_eq!(payload.bytes, vec![0xC4, 0xE3]);
+    }
+
+    /// 同一段输入里，字面文本照旧走所选编码，转义字节原样——两者可以混用。
+    #[test]
+    fn escape_mode_still_encodes_literal_text() {
+        let payload = build_payload(
+            "你\\n",
+            SendFormat::Escape,
+            SendLineEnding::None,
+            TextEncoding::Gbk,
+        )
+        .expect("合法转义不该解析失败");
+
+        let mut expected = encoding_rs::GBK.encode("你").0.into_owned();
+        expected.push(0x0A);
+        assert_eq!(payload.bytes, expected);
+        assert_eq!(
+            payload.bytes.len(),
+            3,
+            "GBK 的「你」是两个字节，加换行共三个"
+        );
+    }
+
+    /// 行尾不管在哪一档都追加在**字节层**（与 HEX 档同一个道理）。
+    #[test]
+    fn escape_mode_appends_line_ending_at_byte_level() {
+        let payload = payload("hi", SendFormat::Escape, SendLineEnding::Crlf).unwrap();
+        assert_eq!(payload.bytes, b"hi\r\n");
+    }
+
+    // ---------- N2：常用数据 ----------
+
+    #[test]
+    fn preset_label_takes_the_first_line_and_truncates_by_chars() {
+        assert_eq!(preset_label("AT+RST\nAT+GMR", 12), "AT+RST");
+        assert_eq!(preset_label("  padded  ", 12), "padded");
+        assert_eq!(preset_label("abcdefghijklmnop", 4), "abcd…");
+
+        // 按**字符**截断：中文一个字三字节，按字节切会切出半个字
+        assert_eq!(preset_label("中文五五六六", 4), "中文五五…");
+        assert_eq!(
+            preset_label("中文五五", 4),
+            "中文五五",
+            "刚好放得下就不加省略号"
+        );
+
+        // 首行是空白时给一个占位，否则按钮是一块空白、连点的地方都找不到
+        assert_eq!(preset_label("\nrest", 12), "…");
+        assert_eq!(preset_label("", 12), "…");
+    }
+
+    #[test]
+    fn presets_add_remove_and_refuse_over_limit() {
+        let mut presets = SendPresets::default();
+        assert!(presets.is_empty());
+        assert!(!presets.can_add(""));
+
+        assert!(presets.add("a"));
+        assert!(presets.contains("a"));
+        assert!(!presets.add("a"), "重复项要拒绝");
+        assert_eq!(presets.len(), 1);
+
+        for i in 0..MAX_SEND_PRESETS {
+            presets.add(&format!("p{i}"));
+        }
+        assert!(presets.is_full());
+        assert!(!presets.add("overflow"), "满了不淘汰旧的，只拒绝");
+        assert_eq!(presets.len(), MAX_SEND_PRESETS);
+        assert_eq!(presets.entries()[0], "a", "第一条必须还在");
+
+        presets.remove(0);
+        assert_eq!(presets.entries()[0], "p0");
+        presets.remove(999);
+        assert_eq!(presets.len(), MAX_SEND_PRESETS - 1, "越界删除什么也不做");
+
+        presets.clear();
+        assert!(presets.is_empty());
     }
 }

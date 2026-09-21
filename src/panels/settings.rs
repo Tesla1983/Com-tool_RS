@@ -12,7 +12,9 @@
 use crate::app::{ComTool, Language};
 use crate::chart::{MAX_SAMPLES, MIN_SAMPLES};
 use crate::log_file::render_log_file_name;
-use crate::send::{MAX_REPEAT_INTERVAL_MS, MAX_SEND_HISTORY, MIN_REPEAT_INTERVAL_MS};
+use crate::send::{
+    MAX_REPEAT_INTERVAL_MS, MAX_SEND_HISTORY, MAX_SEND_PRESETS, MIN_REPEAT_INTERVAL_MS, SendFormat,
+};
 use crate::strings::fill;
 use chrono::Local;
 use eframe::egui;
@@ -39,6 +41,7 @@ impl ComTool {
         let mut reset_dir = false;
         let mut clear_chart = false;
         let mut clear_send_history = false;
+        let mut clear_send_presets = false;
 
         let s = self.language.strings();
 
@@ -122,7 +125,19 @@ impl ComTool {
                     ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.payload_format));
                     send_format_radios(ui, &mut self.send_format, s);
                 });
-                ui.weak(s.hex_note);
+                // 只显示**当前那一档**的说明。三档的解析规则互不相容（HEX 把输入当
+                // 十六进制文本、转义把 `\n` 当字节、文本什么都不解释），把三份规则
+                // 一起摆出来，用户得自己挑哪一段才适用于自己选的档，反而更容易看错。
+                match self.send_format {
+                    // 文本档没有额外规则可讲，不占地方。
+                    SendFormat::Text => {}
+                    SendFormat::Hex => {
+                        ui.weak(s.hex_note);
+                    }
+                    SendFormat::Escape => {
+                        ui.weak(s.escape_note);
+                    }
+                }
                 ui.horizontal(|ui| {
                     ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.line_ending));
                     send_line_ending_radios(ui, &mut self.send_line_ending, s);
@@ -156,6 +171,19 @@ impl ComTool {
                     }
                 });
                 ui.weak(s.history_note);
+                // 常用数据（N2）在这里只放"还剩多少位置"和"一键清空"：内容本身在
+                // 发送区编辑（那里才看得见发送效果）。**计数必须有**——列表满了会
+                // 拒绝新增，用户得能提前知道还剩几条。
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.presets_header));
+                    ui.label(fill(
+                        s.preset_count_text,
+                        &[&self.send_presets.len(), &MAX_SEND_PRESETS],
+                    ));
+                    if ui.button(s.clear_presets).clicked() {
+                        clear_send_presets = true;
+                    }
+                });
 
                 ui.separator();
                 ui.heading(s.nav_chart);
@@ -239,6 +267,9 @@ impl ComTool {
             // 历史没了，浏览位置也必须一起复位——否则 ↑ 会基于旧下标去取，
             // 表现为"按了没反应"。
             self.send_history_nav.reset();
+        }
+        if clear_send_presets {
+            self.send_presets.clear();
         }
     }
 }

@@ -187,6 +187,81 @@ mod tests {
         });
     }
 
+    /// 已连接状态下的侧边栏：RTS / DTR 控件走"可点"分支，与未连接时的置灰分支
+    /// 是两段不同的代码，两段都要画一遍（N1）。
+    ///
+    /// 顺带锁住一条约定：**绘制本身不得向通道投递任何命令**。无头渲染不投递指针
+    /// 事件，所以 `changed()` 恒为 false——这正好是"只是把控件画出来"的等价物。
+    #[test]
+    fn connected_sidebar_renders_without_panic() {
+        use crate::app::ConnectionKind;
+        use crate::communicationtrait::fake::FakeChannel;
+
+        let (channel, handle) = FakeChannel::new();
+        let mut app = ComTool {
+            channel: Some(Box::new(channel)),
+            channel_kind: Some(ConnectionKind::Serial),
+            connection_kind: ConnectionKind::Serial,
+            selected_port: "COM_TEST".to_string(),
+            ..ComTool::default()
+        };
+        app.open_connection();
+        assert!(app.connected, "替身通道应当能打开成功");
+
+        let mut open = true;
+        egui::__run_test_ui(|ui| {
+            app.show_sidebar(ui, &mut open);
+        });
+
+        assert!(
+            handle.line_state_calls().is_empty(),
+            "绘制侧边栏不得向通道投递线状态命令——只有用户真的点了那一下才会发"
+        );
+    }
+
+    /// 常用数据那一行（N2）的四种状态都要能画出来：空列表、有若干条、已满、
+    /// 以及未连接。
+    ///
+    /// 抽成 `ComTool::render_send_presets` 的意义就在这里：它原先写在
+    /// `eframe::App::ui` 里，而 `ui()` 需要一个无头测试构造不出来的
+    /// `eframe::Frame`，等于一次也不会被 `cargo test` 画到。
+    #[test]
+    fn preset_row_renders_without_panic() {
+        let mut app = ComTool::default();
+
+        // ① 空列表 + 未连接（「存为常用」置灰、「还没有常用数据」占位）
+        assert!(app.send_presets.is_empty());
+        egui::__run_test_ui(|ui| {
+            app.render_send_presets(ui);
+        });
+        assert!(app.send_presets.is_empty(), "仅绘制不得改动列表");
+
+        // ② 有几条 + 输入框内容重复（「存为常用」置灰的第三条理由）
+        app.send_presets.add("AT");
+        app.send_presets.add("AT+GMR");
+        app.send_text = "AT".to_string();
+        egui::__run_test_ui(|ui| {
+            app.render_send_presets(ui);
+        });
+        assert_eq!(app.send_presets.len(), 2, "仅绘制不得改动列表");
+
+        // ③ 已满（「存为常用」置灰的第一条理由）
+        for i in 0..crate::send::MAX_SEND_PRESETS {
+            app.send_presets.add(&format!("filler-{i}"));
+        }
+        assert!(app.send_presets.is_full());
+        egui::__run_test_ui(|ui| {
+            app.render_send_presets(ui);
+        });
+        assert!(app.send_presets.is_full(), "仅绘制不得淘汰任何一条");
+
+        // ④ 英文界面（另一列文案，`preset_full` 是带占位符的模板）
+        app.language = Language::En;
+        egui::__run_test_ui(|ui| {
+            app.render_send_presets(ui);
+        });
+    }
+
     /// 面板隐藏时绘制函数必须直接返回，不能借绘制之名改动任何状态。
     #[test]
     fn hidden_chart_panel_draws_nothing() {

@@ -10,4 +10,6 @@ pub mod channel;
 pub mod config;
 
 pub use channel::{SerialChannel, scan_ports};
-pub use config::{BAUD_RATES, DEFAULT_BAUD_RATE, SerialConfig};
+pub use config::{
+    BAUD_RATES, CUSTOM_BAUD_MAX, CUSTOM_BAUD_MIN, DEFAULT_BAUD_RATE, SerialConfig, clamp_baud,
+};

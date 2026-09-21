@@ -19,6 +19,28 @@ pub const BAUD_RATES: [u32; 20] = [
 /// 默认波特率。绝大多数开发板、Bootloader 与 USB 转串口芯片的出厂设置。
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 
+/// 手输波特率的下限（N5）。
+///
+/// **1 而不是 0**：0 不是一个波特率，而 `serialport` 对 0 的处理是交给驱动去拒绝，
+/// 报出来的系统错误远不如界面上一开始就拦掉清楚。
+pub const CUSTOM_BAUD_MIN: u32 = 1;
+
+/// 手输波特率的上限（N5）：12 Mbaud。
+///
+/// 取这个数是因为它高于常见 USB 转串口桥的上限（FTDI 的 12 M 档、CP210x 的 3 M 档），
+/// 再往上没有真实设备。**它不是"保证能用"的承诺**——超出桥片能力的值会在打开端口时
+/// 由驱动报错，那条错误会原样显示给用户（带端口名），比在这里猜一个更小的上限好。
+pub const CUSTOM_BAUD_MAX: u32 = 12_000_000;
+
+/// 把波特率夹回合法区间。
+///
+/// 界面上的输入框已经限制了范围，这里防的是**手改过的存档**（与
+/// `repaint_interval_ms`、`repeat_interval_ms` 的处理是同一条约定：界面上进不来的
+/// 值，存档里可能有，要能自愈）。
+pub fn clamp_baud(baud: u32) -> u32 {
+    baud.clamp(CUSTOM_BAUD_MIN, CUSTOM_BAUD_MAX)
+}
+
 /// 打开一个串口所需的全部参数。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SerialConfig {

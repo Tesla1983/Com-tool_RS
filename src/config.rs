@@ -126,7 +126,7 @@ mod tests {
     use super::*;
     use crate::app::{ConnectionKind, Language, ThemeChoice};
     use crate::receive::{AnsiStyle, ColoredSpan, TextEncoding, TimestampPrefix};
-    use crate::send::{SendFormat, SendHistory, SendLineEnding};
+    use crate::send::{SendFormat, SendHistory, SendLineEnding, SendPresets};
     // 调用 `get_string`/`set_string` 需要 trait 本身在作用域内
     use eframe::Storage as _;
     use serialport::{DataBits, FlowControl, Parity, StopBits};
@@ -202,6 +202,12 @@ mod tests {
                 h
             },
             repeat_interval_ms: 250,
+            send_presets: {
+                let mut p = SendPresets::default();
+                p.add("AT");
+                p.add("AT+GMR");
+                p
+            },
             show_receive_panel: true,
             show_send_panel: false,
             show_chart_panel: true,
@@ -265,6 +271,9 @@ mod tests {
         assert_eq!(restored.text_encoding, original.text_encoding);
         assert_eq!(restored.send_history, original.send_history);
         assert_eq!(restored.send_history.entries(), ["AT+RST", "01 02 03"]);
+        // 常用数据（N2）是用户亲手挑的，必须跟着存档走
+        assert_eq!(restored.send_presets, original.send_presets);
+        assert_eq!(restored.send_presets.entries(), ["AT", "AT+GMR"]);
         assert_eq!(restored.repeat_interval_ms, original.repeat_interval_ms);
         assert_eq!(restored.show_receive_panel, original.show_receive_panel);
         assert_eq!(restored.show_send_panel, original.show_send_panel);
@@ -289,6 +298,23 @@ mod tests {
         });
         saved.chart.push_bytes(b"1,2,3\n", 100);
         assert!(!saved.chart.is_empty(), "先确认确实有图表数据要丢弃");
+        // N1 / N4 的运行时状态：勾选态与计数都只描述"这一次连接"
+        saved.rts = true;
+        saved.dtr = true;
+        saved.tx_bytes = 12_345;
+        saved.was_focused = false;
+
+        let restored = round_trip(&saved);
+
+        assert!(
+            !restored.rts && !restored.dtr,
+            "控制线勾选态不得跨进程延续：下次打开端口时界面会声称线在那个电平上"
+        );
+        assert_eq!(restored.tx_bytes, 0, "发送计数只描述本次连接，不落盘");
+        assert!(
+            restored.was_focused,
+            "焦点判重状态是纯运行时的，必须回到初值"
+        );
 
         let restored = round_trip(&saved);
 

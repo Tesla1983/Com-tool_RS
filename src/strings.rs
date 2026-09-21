@@ -84,6 +84,21 @@ strings! {
     repeat_needs_connection:
         "未连接：连上之后才会开始定时发送",
         "Not connected — repeat send only starts once connected";
+    escape: "转义", "Escape";
+
+    // —— app.rs：常用数据（N2）——
+    presets_header: "常用数据", "Presets";
+    save_preset: "存为常用", "Save as preset";
+    preset_empty:
+        "还没有常用数据：把输入框里的内容存进来，之后点一下就能重发",
+        "No presets yet — save the input box contents, then send them with one click";
+    preset_hint: "点一下发送；右键删除", "Click to send; right-click to delete";
+    preset_full: "上限 {} 条", "Up to {} presets";
+    preset_duplicate: "已在列表中", "Already saved";
+    preset_input_empty: "输入框为空", "Input is empty";
+    preset_count_text: "{} / {} 条", "{} / {} saved";
+    clear_presets: "清空常用数据", "Clear presets";
+    preset_needs_connection: "未连接：连上之后才能发送", "Not connected — cannot send yet";
 
     // —— app.rs / log_file.rs：原生文件对话框 ——
     export_dialog_title: "导出接收数据.txt", "Export received data.txt";
@@ -117,6 +132,10 @@ strings! {
     status_disconnected: "状态: 未连接", "Status: disconnected";
     rx_stats: "接收统计", "Receive stats";
     rx_bytes_label: "接收字节数: {}", "Received bytes: {}";
+    tx_bytes_label: "发送字节数: {}", "Sent bytes: {}";
+    tx_bytes_hover:
+        "自本次连接以来累计送出，断开后归零；与上面「接收字节数」口径不同——那个是当前缓冲区里的字节数，会被上限裁掉",
+        "Counted since this connection and reset on disconnect; note the different meaning from \"Received bytes\" above, which is the size of the current buffer and is trimmed at the cap";
     display_mode_line: "显示模式: {}", "Display mode: {}";
     suffix_color: " + 颜色", " + color";
     suffix_byte_view: " + 字节查看", " + byte view";
@@ -129,6 +148,14 @@ strings! {
     select_port: "请选择端口", "Select a port";
     refresh: "刷新", "Refresh";
     baud_field: "波特率", "Baud rate";
+    baud_custom_hint: "可直接输入任意波特率", "Any baud rate can be typed here";
+    line_state_header: "控制线", "Control lines";
+    line_state_hint:
+        "连接后可手动控制；打开端口本身不会去动这两根线",
+        "Controllable while connected; opening a port never touches these lines";
+    line_state_hover:
+        "勾选表示「我们请求的电平」，不是对引脚的测量——驱动只接受写、不回读，所以硬件把线拉到哪里，界面看不到",
+        "The checkbox is the level we requested, not a measurement — the driver only accepts writes and cannot read the lines back, so the UI cannot show where the hardware actually pulled them";
     open_port_button: "打开串口", "Open";
     close_port_button: "关闭串口", "Close";
     data_bits: "数据位", "Data bits";
@@ -270,6 +297,9 @@ strings! {
     hex_note:
         "HEX 时输入按十六进制解析：允许空格 / 逗号分隔与 0x 前缀；解析失败不会发送，也不会清空输入框",
         "In HEX mode the input is parsed as hexadecimal: spaces/commas and a 0x prefix are allowed; a parse failure sends nothing and does not clear the input";
+    escape_note:
+        "转义时 \\r \\n \\t \\0 \\xNN \\\\ 会变成对应的字节，其余文字仍按上面的编码发送；认不出的转义不会发送，也不会清空输入框",
+        "In escape mode \\r \\n \\t \\0 \\xNN \\\\ become raw bytes and the remaining text is still encoded as above; an unrecognised escape sends nothing and does not clear the input";
     ending_note:
         "追加在字节层：HEX 模式下发出的是 0x0A / 0x0D 0x0A 两个字节，不是字符",
         "Appended at the byte level: in HEX mode this emits the bytes 0x0A / 0x0D 0x0A, not characters";
@@ -511,6 +541,9 @@ mod tests {
             (s.local_port_line, e.local_port_line, 1),
             (s.baud_label, e.baud_label, 1),
             (s.rx_bytes_label, e.rx_bytes_label, 1),
+            (s.tx_bytes_label, e.tx_bytes_label, 1),
+            (s.preset_full, e.preset_full, 1),
+            (s.preset_count_text, e.preset_count_text, 2),
             (s.display_mode_line, e.display_mode_line, 1),
             (s.timestamp_prefix_line, e.timestamp_prefix_line, 1),
             (s.logged_bytes, e.logged_bytes, 1),

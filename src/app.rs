@@ -21,10 +21,10 @@ use crate::receive::{
     AnsiDecoder, AnsiStyle, ColoredSpan, TextEncoding, TimestampPrefix, show_plain_receive,
 };
 use crate::send::{
-    DEFAULT_REPEAT_INTERVAL_MS, HistoryNav, SendFormat, SendHistory, SendLineEnding, build_payload,
-    clamp_repeat_interval, on_first_line, on_last_line,
+    DEFAULT_REPEAT_INTERVAL_MS, HistoryNav, Payload, SendFormat, SendHistory, SendLineEnding,
+    SendPresets, build_payload, clamp_repeat_interval, on_first_line, on_last_line,
 };
-use crate::serial_impl::{DEFAULT_BAUD_RATE, SerialChannel, SerialConfig, scan_ports};
+use crate::serial_impl::{DEFAULT_BAUD_RATE, SerialChannel, SerialConfig, clamp_baud, scan_ports};
 use crate::strings::fill;
 use eframe::egui;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
@@ -175,6 +175,11 @@ pub struct ComTool {
     pub text_encoding: TextEncoding,
     /// 发送历史（最多 [`crate::send::MAX_SEND_HISTORY`] 条，落盘）
     pub send_history: SendHistory,
+    /// 常用数据（最多 [`crate::send::MAX_SEND_PRESETS`] 条，落盘）。
+    ///
+    /// 与发送历史是两回事：历史是"自动记下发过什么"，常用数据是"我挑出来、想一键
+    /// 重发的几条"。所以两者各自一份，互不影响。
+    pub send_presets: SendPresets,
     /// 定时发送的间隔（毫秒，实际使用时夹到 10~600000）。
     ///
     /// 只存间隔不存"是否开启"：开关是 [`ComTool::repeat_send`]，它是运行时状态。
@@ -209,6 +214,37 @@ pub struct ComTool {
     // 上次自动重连尝试时间（用于节流，避免高频重试）
     #[serde(skip)]
     pub last_reconnect_attempt: Option<Instant>,
+
+    // —— 串口控制线的请求状态（N1，不落盘）——
+    /// 我们**请求**把 RTS 拉成什么电平（`true` = 断言 / active）。
+    ///
+    /// 这是"请求"而不是"测量"：[`serialport`] 只提供写、**不提供读**，所以界面上的
+    /// 勾选反映的是"我们最后要求过什么"，不是引脚此刻的真实电平。
+    ///
+    /// **不落盘，且默认 `false`**：Windows 上 serialport-rs 打开端口时显式把 DTR 与
+    /// RTS 都设为 Disable（`serialport/src/windows/dcb.rs` 里
+    /// `set_fDtrControl(DtrControl::Disable)`，以及 `FlowControl::None` 分支的
+    /// `set_fRtsControl(RtsControl::Disable)`），也就是"刚打开时两根都是低"。
+    /// 落盘会把"上次会话的请求"当成"本次的初始状态"，那是假话。
+    #[serde(skip)]
+    pub rts: bool,
+    /// 我们**请求**把 DTR 拉成什么电平。含义与 [`ComTool::rts`] 相同。
+    #[serde(skip)]
+    pub dtr: bool,
+
+    /// 窗口上一帧是否处于聚焦状态（N6 用来识别"重新获得焦点"这一瞬间）。
+    ///
+    /// 初值 `true`：[`ComTool::default`] 已经扫过一次端口列表，置 `true` 可以省掉
+    /// 启动第一帧那次多余的扫描。
+    #[serde(skip)]
+    pub was_focused: bool,
+
+    /// 本次连接已经**成功写出**的字节数（不落盘）。
+    ///
+    /// 只统计确实交给通道且返回 `Ok` 的那些——与「发送后清空输入框」同一条原则：
+    /// "确实发出去了"才算数。排队时计数会显示出一个并不成立的"已发送"。
+    #[serde(skip)]
+    pub tx_bytes: u64,
 
     // —— 发送侧的运行时状态（不落盘）——
     /// 是否正在定时发送。
@@ -312,12 +348,46 @@ impl ComTool {
 }
 
 impl ComTool {
+    /// 手动「刷新」按钮：重扫端口列表，并在**当前所选端口已经消失**时改选第一个。
+    ///
+    /// 只在用户明确点了刷新时做那一步"改选"：它是在帮用户收拾一个已经失效的选择。
     pub fn refresh_ports(&mut self) {
         self.ports = scan_ports();
 
         if !self.ports.contains(&self.selected_port) {
             self.selected_port = self.ports.first().cloned().unwrap_or_default();
         }
+    }
+
+    /// 静默重扫端口列表：**只更新列表，绝不改 `selected_port`**（N6）。
+    ///
+    /// 与 [`ComTool::refresh_ports`] 分成两个函数、而不是加一个 `bool` 参数：调用
+    /// 时机的语义完全不同。这个版本由"窗口重新获得焦点"自动触发，没有人在旁边看着，
+    /// 所以它连"所选端口消失了"都不能顺手处理——用户可能正对着那个刚被拔掉的端口
+    /// 看它的最后几条数据，或者（更糟）**正连着它**，此时改选会让界面与真实通道
+    /// 对不上。`auto_reconnect` 里那句"只刷新列表供 UI 显示"就是同一条规则。
+    pub fn rescan_ports(&mut self) {
+        self.ports = scan_ports();
+    }
+
+    /// 记录窗口焦点变化，并在**重新获得焦点**的那一刻静默重扫端口列表（N6）。
+    ///
+    /// 规则本体放在这里而不是内联进 `ui()`：`ui()` 要收一个 `eframe::Frame`，无头
+    /// 测试构造不出来，内联的写法就等于"这条规则没有测试"。抽出来之后
+    /// `regaining_focus_rescans_ports_without_touching_the_selection` 能直接驱动它。
+    ///
+    /// 刻意**不做定时轮询**：一是白耗 CPU，二是枚举串口要问一遍系统，频率高了本身
+    /// 就是负担。"重新获得焦点"是零空转的等价信号——插拔设备这个动作几乎必然伴随
+    /// 用户切回窗口。用 [`ComTool::rescan_ports`] 而不是 [`ComTool::refresh_ports`]，
+    /// 理由见前者的注释。
+    ///
+    /// 判重靠 `was_focused`：没有它就会**每帧**枚举一次串口，而 `focused` 在绝大多数
+    /// 帧里都是 true。
+    pub fn note_focus(&mut self, focused: bool) {
+        if focused && !self.was_focused {
+            self.rescan_ports();
+        }
+        self.was_focused = focused;
     }
 
     /// 断线后自动重连。**只对串口生效**（F4 起）。
@@ -445,6 +515,15 @@ impl ComTool {
 
         self.event_rx = Some(event_rx);
         self.connected = true;
+
+        // 刚打开时两根控制线都是低的（理由见 `rts` 字段的注释：serialport-rs 在
+        // Windows 上打开端口时显式把 DTR / RTS 都置为 Disable）。**这里只是把勾选态
+        // 复位成事实，不向端口发任何指令**——"一打开就去拉 DTR/RTS"会让 ESP32 那类
+        // 自动下载电路在用户还没反应过来时就把板子复位/带进下载模式，而他会以为
+        // 是程序坏了。要动这两根线，必须由用户显式点。
+        self.rts = false;
+        self.dtr = false;
+
         if self.connection_kind.uses_serial_settings() {
             // `last_opened_port` 只对串口有意义（自动重连的"回到哪个端口"）
             self.last_opened_port = Some(self.selected_port.clone());
@@ -502,7 +581,10 @@ impl ComTool {
             ConnectionKind::Serial => (
                 Box::new(SerialConfig {
                     port: self.selected_port.clone(),
-                    baud_rate: self.baud_rate,
+                    // 夹一下再下发（N5）：界面上的输入框已经限制了范围，这里防的是
+                    // **手改过的存档**。与 `repaint_interval_ms` 在 `ui()` 里的做法
+                    // 是同一条约定——界面上不合法、但存档里存在过的值要能自愈。
+                    baud_rate: clamp_baud(self.baud_rate),
                     data_bits: self.data_bits,
                     stop_bits: self.stop_bits,
                     parity: self.parity,
@@ -580,6 +662,12 @@ impl ComTool {
         self.event_rx = None;
         self.connected = false;
 
+        // 计数与线状态都是"本次连接"的运行时事实，通道没了就没有意义。
+        // （接收字节数不在这里归零：它由 `receive_text.len()` 推导，清空接收区时归零。）
+        self.tx_bytes = 0;
+        self.rts = false;
+        self.dtr = false;
+
         // 通道没了，定时发送必须一起停：否则重连之后它会自己接着发，
         // 而用户并不知道是谁在发。
         self.stop_repeat_send();
@@ -613,7 +701,8 @@ impl ComTool {
         self.push_receive_note(note);
     }
 
-    /// 发送一次。UI 的「发送」按钮、Enter 键、定时发送都走这里——**只有这一条路**。
+    /// 发送一次输入框里的内容。UI 的「发送」按钮、Enter 键、定时发送都走这里——
+    /// **只有这一条路**。
     ///
     /// 返回是否真的把字节交给了通道。UI 的调用点**不需要**看返回值（失败原因已经
     /// 写进接收区了），它存在的意义是让测试能断言"解析失败时确实什么都没发出去"。
@@ -622,12 +711,7 @@ impl ComTool {
             return false;
         }
 
-        let payload = match build_payload(
-            &self.send_text,
-            self.send_format,
-            self.send_line_ending,
-            self.text_encoding,
-        ) {
+        let payload = match self.payload_for(&self.send_text) {
             Ok(payload) => payload,
             Err(reason) => {
                 // 关键：**解析失败时不清空输入框**。这条提示的意思是"你输入的十六进制
@@ -637,13 +721,87 @@ impl ComTool {
                 return false;
             }
         };
-        let data = payload.bytes;
 
         // 输入为空且没有行尾时确实无字节可发：不算失败，也不该进历史。
-        if data.is_empty() {
+        if payload.bytes.is_empty() {
             return false;
         }
 
+        // 历史记的是"**你尝试发过什么**"，所以写失败也记——用户下一步多半是
+        // 连好线再发一遍，而不是重新敲一遍。
+        self.send_history.record(&self.send_text);
+        self.send_history_nav.reset();
+
+        let sent = self.transmit(payload);
+
+        // 「发送后清空」的语义是"**确实发出去了**才清空"。写失败（通道已断开、
+        // 设备长时间不接受数据）时数据根本没出去，清掉等于让用户重打一遍——
+        // 与上面解析失败时不清空是同一条原则。
+        if sent && self.clear_send_after_send {
+            self.send_text.clear();
+        }
+
+        sent
+    }
+
+    /// 发送一条常用数据（N2）。
+    ///
+    /// 与输入框走**完全同一条**通路（同一个 [`ComTool::payload_for`]、同一个
+    /// [`ComTool::transmit`]）：编码、行尾、失败提示、字节计数都只有一处实现。
+    /// 若在按钮回调里自己拼一遍 `write`，"发送字节计数"与"写失败提示"两处都会
+    /// 各漏一次，而且是静默地漏。
+    ///
+    /// 三处刻意的"不做"：
+    ///
+    /// * **不进发送历史**：历史记的是"我敲过什么"，点按钮不产生输入；
+    /// * **不动输入框**：发一条常用数据不等于把用户正在写的内容替换掉；
+    /// * **不受「发送后清空」影响**：那条设置说的是输入框。
+    pub fn send_preset(&mut self, index: usize) -> bool {
+        if !self.connected {
+            return false;
+        }
+        let Some(text) = self.send_presets.entries().get(index).cloned() else {
+            return false;
+        };
+
+        match self.payload_for(&text) {
+            // 空负载（内容为空且行尾为「无」）不算失败，也没什么可发的。
+            Ok(payload) if payload.bytes.is_empty() => false,
+            Ok(payload) => self.transmit(payload),
+            Err(reason) => {
+                self.push_receive_note(format!("发送失败: {reason}\n"));
+                false
+            }
+        }
+    }
+
+    /// 把输入框里现在的内容存成一条常用数据（N2）。
+    ///
+    /// 空内容与已有内容都会被拒绝（界面上的按钮也会先置灰，这里再挡一次——
+    /// "按钮可达"这件事不该只由界面保证）。
+    pub fn save_current_as_preset(&mut self) -> bool {
+        let text = self.send_text.clone();
+        self.send_presets.add(&text)
+    }
+
+    /// 按当前格式 / 行尾 / 编码把一段文本组装成待发字节。
+    ///
+    /// 输入框与常用数据共用它。**唯一入口**：编码与行尾的规则只在这里出现一次
+    /// （见 [`crate::send::build_payload`] 的文档）。
+    fn payload_for(&self, text: &str) -> Result<Payload, String> {
+        build_payload(
+            text,
+            self.send_format,
+            self.send_line_ending,
+            self.text_encoding,
+        )
+    }
+
+    /// 把已经组装好的负载交给通道，并在**成功之后**记账。
+    ///
+    /// 三条发送入口（输入框 / 常用数据 / 定时发送——最后一条走的仍是输入框那条）
+    /// 在这里收口：只管"送出去、报错、计数"，不碰编码与行尾。
+    fn transmit(&mut self, payload: Payload) -> bool {
         // 有字符在当前编码里表示不了（编码器写了 HTML 字符引用之类的替代形式）：
         // 照样发，但必须明说——静默换掉用户要发的字符比直接报错更难排查。
         if payload.had_unmappable {
@@ -653,31 +811,59 @@ impl ComTool {
             ));
         }
 
-        // 历史记的是"**你尝试发过什么**"，所以写失败也记——用户下一步多半是
-        // 连好线再发一遍，而不是重新敲一遍。
-        self.send_history.record(&self.send_text);
-        self.send_history_nav.reset();
+        let len = payload.bytes.len();
 
         // 同 `open_connection`：`channel` 的可变借用还活着时不能调 `push_receive_note`。
         let mut failure: Option<String> = None;
-        if let Some(channel) = &mut self.channel
-            && let Err(e) = channel.write(data)
-        {
-            failure = Some(format!("发送失败: {e}\n"));
+        let mut wrote = false;
+        match &mut self.channel {
+            Some(channel) => match channel.write(payload.bytes) {
+                Ok(()) => wrote = true,
+                Err(e) => failure = Some(format!("发送失败: {e}\n")),
+            },
+            // `connected` 为真时不该走到这里；真走到了也不能算作"发出去了"，
+            // 否则计数会凭空增长、输入框会被清掉。
+            None => failure = Some("发送失败: 通道不存在\n".to_string()),
         }
-        let write_failed = failure.is_some();
+        if let Some(msg) = failure {
+            self.push_receive_note(msg);
+            return false;
+        }
+
+        // 只在返回 `Ok` 之后累加（N4）：排队时计数会显示出一个并不成立的"已发送"。
+        if wrote {
+            self.tx_bytes += len as u64;
+        }
+        wrote
+    }
+
+    /// 手动改变串口控制线的电平（N1）。`None` 表示那一根不动。
+    ///
+    /// 勾选态**先按用户点的改**再投给通道：它是"我们的请求"，不是对引脚的测量
+    /// （`serialport` 只提供写、不提供读，见 [`ComTool::rts`]）。
+    ///
+    /// 两条失败路径都不会把界面判成掉线：这里投递失败只写一条提示；通道侧执行失败
+    /// 则回一条 [`ChannelEvent::Notice`]。
+    pub fn apply_line_state(&mut self, rts: Option<bool>, dtr: Option<bool>) {
+        if let Some(level) = rts {
+            self.rts = level;
+        }
+        if let Some(level) = dtr {
+            self.dtr = level;
+        }
+
+        let mut failure: Option<String> = None;
+        match &mut self.channel {
+            Some(channel) => {
+                if let Err(e) = channel.set_line_state(rts, dtr) {
+                    failure = Some(format!("设置 RTS/DTR 失败: {e}\n"));
+                }
+            }
+            None => failure = Some("设置 RTS/DTR 失败: 通道未打开\n".to_string()),
+        }
         if let Some(msg) = failure {
             self.push_receive_note(msg);
         }
-
-        // 「发送后清空」的语义是"**确实发出去了**才清空"。写失败（通道已断开、
-        // 设备长时间不接受数据）时数据根本没出去，清掉等于让用户重打一遍——
-        // 与上面 HEX 解析失败时不清空是同一条原则。
-        if self.clear_send_after_send && !write_failed {
-            self.send_text.clear();
-        }
-
-        !write_failed
     }
 
     /// 停掉定时发送。
@@ -773,11 +959,16 @@ impl Default for ComTool {
             send_line_ending: SendLineEnding::default(),
             text_encoding: TextEncoding::default(),
             send_history: SendHistory::default(),
+            send_presets: SendPresets::default(),
             repeat_interval_ms: DEFAULT_REPEAT_INTERVAL_MS,
             channel: None,
             channel_kind: None,
             event_rx: None,
             last_reconnect_attempt: None,
+            rts: false,
+            dtr: false,
+            was_focused: true,
+            tx_bytes: 0,
             repeat_send: false,
             last_repeat_send: None,
             send_history_nav: HistoryNav::default(),
@@ -813,6 +1004,102 @@ impl Default for ComTool {
     }
 }
 
+impl ComTool {
+    /// 发送区下面的「常用数据」一行（N2）：存为常用 / 一键重发 / 右键删除。
+    ///
+    /// 从 [`ComTool::ui`] 里抽出来的，与 [`ComTool::render_chart_panel`]、
+    /// [`ComTool::render_color_receive`] 同一套写法。抽出来不是为了好看，是为了
+    /// **可测**：`ui()` 要收一个 `eframe::Frame`，无头测试构造不出那个参数，写在
+    /// 里面的控件等于一次也不会被 `cargo test` 画到；这个方法只收 `&mut Ui`，
+    /// `egui::__run_test_ui` 就能把它整条走一遍（见
+    /// `panels::tests::preset_row_renders_without_panic`）。
+    ///
+    /// 与调用方没有隐式约定：进出都只靠 `self`。
+    pub(crate) fn render_send_presets(&mut self, ui: &mut egui::Ui) {
+        let s = self.language.strings();
+
+        // 条目先拷成 `Vec<String>` 再画。闭包里既要读条目、又要触发发送与删除
+        // （后两个都是 `&mut self`），直接借 `self.send_presets` 会与那几个调用
+        // 撞借用。列表上限 16 条，这一次拷贝的开销可以忽略。
+        //
+        // 动作攒在局部变量里、画完再执行：与发送区「发送 / 清空」用
+        // `do_send` / `do_clear` 的写法一致——闭包内不直接改状态，改由闭包外统一
+        // 派发，出了问题只看一处。
+        let preset_entries: Vec<String> = self.send_presets.entries().to_vec();
+        let presets_empty = self.send_presets.is_empty();
+        let can_save_preset = self.send_presets.can_add(&self.send_text);
+        let preset_full = self.send_presets.is_full();
+        let preset_duplicate = self.send_presets.contains(&self.send_text);
+        let connected = self.connected;
+        let mut preset_to_send: Option<usize> = None;
+        let mut preset_to_remove: Option<usize> = None;
+        let mut do_save_preset = false;
+
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(s.presets_header);
+            ui.separator();
+
+            let save_button = ui.add_enabled(can_save_preset, egui::Button::new(s.save_preset));
+            if save_button.clicked() {
+                do_save_preset = true;
+            } else if !can_save_preset {
+                // 置灰的原因**必须**说出来，否则用户只看到"按钮亮不起来 / 点了没
+                // 反应"，只会以为程序坏了。三种拒绝理由各说各的，判定见
+                // [`SendPresets::can_add`]——按钮的置灰条件与 `add` 的实际规则是同
+                // 一处，不会出现"按钮亮着、点了没反应"。
+                save_button.on_disabled_hover_text(if preset_full {
+                    fill(s.preset_full, &[&crate::send::MAX_SEND_PRESETS])
+                } else if preset_duplicate {
+                    s.preset_duplicate.to_string()
+                } else {
+                    s.preset_input_empty.to_string()
+                });
+            }
+
+            if !connected {
+                // 与发送按钮同一条约定：按钮不置灰（点一下什么都不发生），理由用
+                // 一行弱提示挂在旁边。
+                ui.weak(s.preset_needs_connection);
+            }
+
+            ui.separator();
+
+            if presets_empty {
+                ui.weak(s.preset_empty);
+            } else {
+                for (index, entry) in preset_entries.iter().enumerate() {
+                    // 按钮上只放**短的**标签，完整内容挂在悬停里：一条几十字节的
+                    // 指令直接把按钮撑爆，把整行挤成一条。
+                    let button = ui.button(crate::send::preset_label(
+                        entry,
+                        crate::send::PRESET_LABEL_CHARS,
+                    ));
+                    // 左键发、右键删。不做右键菜单：只有"删"一个动作，为它弹一层
+                    // 菜单要用户多点一次，还没有任何好处。
+                    if button.clicked() {
+                        preset_to_send = Some(index);
+                    } else if button.secondary_clicked() {
+                        preset_to_remove = Some(index);
+                    }
+                    button.on_hover_text(entry);
+                }
+                ui.weak(s.preset_hint);
+            }
+        });
+
+        if do_save_preset {
+            self.save_current_as_preset();
+        }
+        if let Some(index) = preset_to_remove {
+            self.send_presets.remove(index);
+        }
+        if let Some(index) = preset_to_send {
+            self.send_preset(index);
+        }
+    }
+}
+
 impl eframe::App for ComTool {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // 检查串口接收数据
@@ -823,6 +1110,12 @@ impl eframe::App for ComTool {
 
         // 串口意外断开时自动重连（节流 500ms）
         self.auto_reconnect();
+
+        // 窗口重新获得焦点时静默重扫端口列表（N6）：插上 USB 转串口、切回窗口就能
+        // 看见新端口，不必手点「刷新」。规则本体在 `note_focus` 里，这里只负责把
+        // 当前的焦点态交给它。
+        let focused = ui.ctx().input(|i| i.focused);
+        self.note_focus(focused);
 
         // 定时发送的节拍（只在自己请求重绘的前提下工作，见该方法注释）
         self.tick_repeat_send(ui.ctx());
@@ -1115,6 +1408,8 @@ impl eframe::App for ComTool {
                     self.send_text.clear();
                     self.send_history_nav.reset();
                 }
+
+                self.render_send_presets(ui);
             }
         });
     }
@@ -1594,5 +1889,301 @@ mod tests {
         app.auto_reconnect();
 
         assert!(!app.connected, "TCP 不该自动重连");
+    }
+
+    // —— N1：RTS / DTR ——
+
+    /// 打开端口**不碰**控制线。
+    ///
+    /// 这条比"能不能设电平"更重要：上电瞬间把 DTR 拉高会把相当多的开发板直接拽进
+    /// 复位，而用户只是想打开端口看看。`serialport` 在 Windows 上打开时把两根线都
+    /// 置为 Disable，我们也不补任何命令，所以这里的断言是"一条 `set_line_state` 都
+    /// 没发生过"，而不是"设成了某个电平"。
+    #[test]
+    fn opening_a_port_never_touches_the_control_lines() {
+        let (app, handle) = connected_app();
+
+        assert!(!app.rts && !app.dtr, "打开端口后勾选态必须是未勾选");
+        assert!(
+            handle.line_state_calls().is_empty(),
+            "打开端口不该向通道投递任何线状态命令"
+        );
+    }
+
+    /// 勾选只改**点的那一根**，并且原样传到通道。
+    #[test]
+    fn line_state_requests_reach_the_channel_one_line_at_a_time() {
+        let (mut app, handle) = connected_app();
+
+        app.apply_line_state(Some(true), None);
+
+        assert!(app.rts);
+        assert!(!app.dtr, "只动 RTS 时 DTR 必须原样不动");
+        assert_eq!(handle.line_state_calls(), vec![(Some(true), None)]);
+
+        app.apply_line_state(None, Some(true));
+
+        assert!(app.dtr);
+        assert!(app.rts, "只动 DTR 时 RTS 必须原样不动");
+        assert_eq!(
+            handle.line_state_calls(),
+            vec![(Some(true), None), (None, Some(true))]
+        );
+    }
+
+    /// 线状态设置失败是**非致命**的：界面继续显示"已连接"，数据照样收发。
+    ///
+    /// 判成掉线的后果是"拉不动一根控制线 → 界面跳到未连接 → 用户去重连"，而通道
+    /// 其实一直是好的。所以这条路径走 `Notice` 而不是 `Failed`。
+    #[test]
+    fn failing_to_set_line_state_is_a_notice_not_a_disconnect() {
+        let (mut app, handle) = connected_app();
+        handle.reject_line_state(true);
+
+        app.apply_line_state(Some(true), None);
+
+        assert!(app.connected, "拉不动控制线不等于掉线");
+        assert!(
+            app.receive_text.contains("设置 RTS/DTR 失败"),
+            "失败必须留下可见的提示：{}",
+            app.receive_text
+        );
+        assert!(
+            app.rts,
+            "勾选态表达的是「我们请求的电平」，投递失败也照样记下来"
+        );
+    }
+
+    /// 断开后两根线的勾选态归位。留着上次的勾选会让下一次打开端口时界面
+    /// 与实际电平对不上——那是"界面在说谎"，比丢一个勾选更糟。
+    #[test]
+    fn control_line_state_resets_on_teardown() {
+        let (mut app, _handle) = connected_app();
+        app.apply_line_state(Some(true), Some(true));
+        assert!(app.rts && app.dtr);
+
+        app.close_connection();
+
+        assert!(!app.rts && !app.dtr, "断开后勾选态必须归位");
+    }
+
+    /// `Notice` 是**非致命**事件：只显示一条提示，不动 `connected`、也不停定时发送。
+    ///
+    /// 与 `failing_to_set_line_state_is_a_notice_not_a_disconnect` 是一对——那条从
+    /// 发送侧看，这条从接收侧的事件循环看。两条都要有：事件循环里把 `Notice` 归进
+    /// `Failed` 那一支，症状就是"拉不动一根控制线，界面跳到未连接并停掉定时发送"，
+    /// 而数据其实一直收得到。
+    #[test]
+    fn notice_event_does_not_look_like_a_disconnect() {
+        let (mut app, handle) = connected_app();
+        app.repeat_send = true;
+
+        handle.emit(ChannelEvent::Notice(
+            "设置 RTS 失败: 设备不支持".to_string(),
+        ));
+        app.receive_data();
+
+        assert!(app.connected, "非致命通知不得把界面判成掉线");
+        assert!(app.repeat_send, "非致命通知不得停掉定时发送");
+        assert!(
+            app.receive_text.contains("设置 RTS 失败"),
+            "提示必须显示出来：{}",
+            app.receive_text
+        );
+    }
+
+    // —— N4：发送字节计数 ——
+
+    /// 计数只在**确实写出去**之后累加。
+    ///
+    /// 三种"没发出去"各测一遍：解析失败、写失败、以及恢复之后继续累加。排队时就
+    /// 记账会显示出一个并不成立的"已发送"，用户拿它对账就永远对不上。
+    #[test]
+    fn tx_bytes_counts_only_writes_that_succeeded() {
+        let (mut app, handle) = connected_app();
+        app.send_text = "abc".to_string();
+        assert!(app.send_data());
+        assert_eq!(app.tx_bytes, 3);
+
+        // ① 解析失败（HEX 位数是奇数）
+        app.send_format = SendFormat::Hex;
+        app.send_text = "4".to_string();
+        assert!(!app.send_data());
+        assert_eq!(app.tx_bytes, 3, "解析失败什么都没发出去，计数不能动");
+
+        // ② 通道写失败
+        app.send_format = SendFormat::Text;
+        app.send_text = "de".to_string();
+        handle.reject_writes(true);
+        assert!(!app.send_data());
+        assert_eq!(app.tx_bytes, 3, "写失败不算发送");
+
+        // ③ 恢复之后接着累加
+        handle.reject_writes(false);
+        assert!(app.send_data());
+        assert_eq!(app.tx_bytes, 5);
+    }
+
+    /// 计数只描述**本次连接**：断开后归零，否则它会跨连接一直涨下去，
+    /// 变成一个"这次到底发了多少"回答不了的数字。
+    #[test]
+    fn tx_bytes_resets_on_teardown() {
+        let (mut app, _handle) = connected_app();
+        app.send_text = "abcd".to_string();
+        assert!(app.send_data());
+        assert_eq!(app.tx_bytes, 4);
+
+        app.close_connection();
+
+        assert_eq!(app.tx_bytes, 0);
+    }
+
+    // —— N2：常用数据 ——
+
+    /// 常用数据与输入框走**同一条**通路：编码、行尾、计数都只有一处实现。
+    ///
+    /// 三处"不做"一并锁住：不动输入框、不进历史、不受「发送后清空」影响。
+    #[test]
+    fn sending_a_preset_reuses_the_normal_send_path() {
+        let (mut app, handle) = connected_app();
+        app.send_line_ending = SendLineEnding::Crlf;
+        app.send_text = "hello".to_string();
+        assert!(app.save_current_as_preset());
+
+        // 用户手上正在写别的东西
+        app.send_text = "draft".to_string();
+        assert!(app.send_preset(0));
+
+        assert_eq!(
+            handle.written_bytes(),
+            b"hello\r\n",
+            "常用数据必须走 build_payload：行尾与编码都在那里"
+        );
+        assert_eq!(app.send_text, "draft", "发一条常用数据不该动输入框");
+        assert_eq!(app.send_history.len(), 0, "点按钮不产生输入，不该进历史");
+        assert_eq!(app.tx_bytes, 7, "常用数据发送同样要计数（含行尾两个字节）");
+    }
+
+    /// 未连接时不发；越界下标也不发（界面不该给出越界下标，但这层不能只靠界面）。
+    #[test]
+    fn preset_send_is_refused_when_there_is_no_channel() {
+        let (mut app, handle) = connected_app();
+        app.send_text = "cmd".to_string();
+        assert!(app.save_current_as_preset());
+        app.close_connection();
+
+        assert!(!app.send_preset(0), "没有通道就发不出去");
+        assert!(!app.send_preset(99), "越界下标不该 panic");
+        assert_eq!(handle.write_count(), 0);
+    }
+
+    /// 空内容与重复内容都进不去；满了之后也不淘汰旧的（这些是用户亲手挑的）。
+    #[test]
+    fn presets_reject_empty_duplicate_and_overflow() {
+        let mut app = ComTool::default();
+
+        // 默认输入框就是空的：空内容存进去只会得到一个点不动的按钮
+        assert!(app.send_text.is_empty());
+        assert!(
+            !app.save_current_as_preset(),
+            "空内容存进去只会得到一个点不动的按钮"
+        );
+        assert!(app.send_presets.is_empty());
+
+        app.send_text = "cmd".to_string();
+        assert!(app.save_current_as_preset());
+        assert!(!app.save_current_as_preset(), "一字不差的重复项要拒绝");
+        assert_eq!(app.send_presets.len(), 1);
+
+        // 填到满
+        for i in 0..crate::send::MAX_SEND_PRESETS {
+            app.send_text = format!("filler-{i}");
+            app.save_current_as_preset();
+        }
+        assert!(app.send_presets.is_full());
+        assert_eq!(app.send_presets.len(), crate::send::MAX_SEND_PRESETS);
+
+        app.send_text = "one-more".to_string();
+        assert!(
+            !app.save_current_as_preset(),
+            "满了必须拒绝，而不是淘汰第一条"
+        );
+        assert_eq!(
+            app.send_presets.len(),
+            crate::send::MAX_SEND_PRESETS,
+            "拒绝之后条数不该变"
+        );
+        assert_eq!(
+            app.send_presets.entries()[0],
+            "cmd",
+            "第一条必须还在：常用数据是用户亲手挑的，静默淘汰会让人以为程序丢了数据"
+        );
+    }
+
+    // —— N5 / N6 ——
+
+    /// 自定义波特率越界由 `clamp_baud` 兜住（界面上拖不出界，但存档是手改得动的）。
+    #[test]
+    fn baud_rate_is_clamped_when_building_the_channel_config() {
+        assert_eq!(clamp_baud(0), crate::serial_impl::CUSTOM_BAUD_MIN);
+        assert_eq!(clamp_baud(u32::MAX), crate::serial_impl::CUSTOM_BAUD_MAX);
+        assert_eq!(clamp_baud(921_600), 921_600, "合法值必须原样保留");
+    }
+
+    /// 重新获得焦点才重扫；一直有焦点时**不重复枚举串口**。
+    ///
+    /// 最后一条断言是这条测试的重点：没有 `was_focused` 判重的话，每帧都会枚举一次
+    /// 系统的串口列表，而 `focused` 在绝大多数帧里都是 true。
+    #[test]
+    fn regaining_focus_rescans_ports_without_touching_the_selection() {
+        let mut app = ComTool {
+            selected_port: "NOT_A_REAL_PORT".to_string(),
+            was_focused: false,
+            ..ComTool::default()
+        };
+
+        app.note_focus(true);
+
+        assert_eq!(
+            app.selected_port, "NOT_A_REAL_PORT",
+            "热插拔重扫只换列表，绝不能动用户选的那个端口"
+        );
+        assert!(app.was_focused);
+
+        // 没丢过焦点：不该重扫
+        app.ports = vec!["SENTINEL".to_string()];
+        app.note_focus(true);
+        assert_eq!(
+            app.ports,
+            vec!["SENTINEL".to_string()],
+            "没丢焦点就不该重扫"
+        );
+
+        // 真丢了再回来：必须重扫
+        app.note_focus(false);
+        app.note_focus(true);
+        assert!(
+            !app.ports.contains(&"SENTINEL".to_string()),
+            "丢了焦点再回来必须重扫，而不是沿用旧列表"
+        );
+    }
+
+    /// 手动「刷新」是另一条规则：它要顺带修正一个已经失效的选择。
+    ///
+    /// 与上一条配对存在——两者一旦被合并成一个函数，要么是"切回窗口偷偷改掉用户
+    /// 选着的端口"，要么是"点了刷新却还留着一个已经拔掉的端口"。
+    #[test]
+    fn manual_refresh_corrects_a_stale_selection() {
+        let mut app = ComTool {
+            selected_port: "NOT_A_REAL_PORT".to_string(),
+            ..ComTool::default()
+        };
+
+        app.refresh_ports();
+
+        assert_ne!(
+            app.selected_port, "NOT_A_REAL_PORT",
+            "手动刷新要修掉失效的选择，否则点「打开串口」只会失败"
+        );
     }
 }

@@ -69,41 +69,45 @@ src/
 ├── main.rs                 入口；字体回退链；eframe::run_native；APP_TITLE 常量；挂 `app_icon` 到窗口图标
 ├── app_icon.rs   (540)     256×256 圆角方波图标，代码绘制、零资源文件、11 条单元测试
 │                           （外加 1 条默认跳过的 ASCII 预览测试）
-├── app.rs       (1598)     ComTool 状态 + Default + 连接生命周期（串口 / TCP / UDP 三选一）
+├── app.rs       (2189)     ComTool 状态 + Default + 连接生命周期（串口 / TCP / UDP 三选一）
 │                           + eframe::App 编排（含 F4 连接类型分叉与发送链路测试）
-├── receive.rs   (1808)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
+│                           + F5：控制线 RTS/DTR（apply_line_state）、发送计数（tx_bytes）、
+│                             常用数据区（render_send_presets）、端口热插拔（rescan_ports/note_focus）
+├── receive.rs   (1814)     接收链路：四份镜像状态 + AnsiDecoder + 字节可视化
 │                           + 可选时间戳前缀（TimestampPrefix）+ 三种渲染
-│                           + 显示模式互斥（resolve_display_mode）+ FIFO 淘汰（39 测试）
+│                           + 显示模式互斥（resolve_display_mode）+ FIFO 淘汰（48 测试）
 ├── chart.rs      (485)     实时图表数据层：多通道数值流解析 + 跨包分片
 │                           + 样本 FIFO 淘汰 + 通道上限（20 测试）
 ├── log_file.rs   (802)     实时文件日志：后台写盘线程 + 文件名模板渲染
 │                           + 同名防截断 + 待写队列上限（14 测试）
-├── sidebar.rs    (433)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
+├── sidebar.rs    (507)     右侧边栏；返回 SidebarAction 而非在绘制中改状态
 │                           + 连接类型单选与「串口参数 / 网络参数」双分支（F4）
-├── send.rs       (654)     发送侧纯逻辑：HEX 解析 / 行尾 / 编码 / 历史浏览（27 测试）
-├── strings.rs    (690)     界面文案表（中英同宏臂）+ fill（9 测试，含源码级守卫）
-├── config.rs     (595)     持久化策略 + 启动不变量修复（15 测试）
+│                           + F5：发送字节计数行、波特率自由输入、控制线 RTS/DTR 一行
+├── send.rs      (1014)     发送侧纯逻辑：HEX 解析 / 行尾 / 编码 / 历史浏览
+│                           + F5：转义解析（parse_escapes/EscItem）、常用数据（SendPresets）（37 测试）
+├── strings.rs    (723)     界面文案表（中英同宏臂）+ fill（9 测试，含源码级守卫）
+├── config.rs     (621)     持久化策略 + 启动不变量修复（16 测试）
 ├── panels/
-│   ├── mod.rs     (208)    面板模块出口（6 条无头 UI 冒烟测试，含英文界面）
-│   ├── menu_bar.rs(257)    顶部菜单栏；返回 MenuAction；主题/时间戳/编码/发送格式单选共用入口
-│   ├── settings.rs(244)    设置窗口（含实时图表与文件日志区块）
+│   ├── mod.rs     (283)    面板模块出口（8 条无头 UI 冒烟测试，含英文界面与已连接侧边栏）
+│   ├── menu_bar.rs(263)    顶部菜单栏；返回 MenuAction；主题/时间戳/编码/发送格式单选共用入口
+│   ├── settings.rs(275)    设置窗口（含实时图表与文件日志区块）
 │   ├── chart.rs   (224)    实时图表面板：egui_plot 绘制 + 绘制点抽样（5 测试）
 │   └── info.rs    (52)     信息窗口
-├── communicationtrait.rs (248)  ByteChannel trait（open/close/is_active/write/configure/local_addr）
-│                           + ChannelEvent + 三者共用的后台线程脚手架 `worker`
-│                           + `#[cfg(test)] mod fake` 替身
+├── communicationtrait.rs (310)  ByteChannel trait（open/close/is_active/write/configure/
+│                           set_line_state/local_addr）+ ChannelEvent（Bytes/Failed/Closed/Notice）
+│                           + 三者共用的后台线程脚手架 `worker` + `#[cfg(test)] mod fake` 替身
 ├── serial_impl/
-│   ├── channel.rs (336)    串口后台线程实现（6 测试）
-│   ├── config.rs  (46)     SerialConfig + 波特率档位
-│   └── mod.rs     (13)     出口
+│   ├── channel.rs (364)    串口后台线程实现（6 测试）
+│   ├── config.rs  (68)     SerialConfig + 波特率档位 + 任意波特率区间（CUSTOM_BAUD_MIN/MAX、clamp_baud）
+│   └── mod.rs     (15)     出口
 └── net_impl/               F4 新增：网络通道（与 serial_impl 平级，同一套 ByteChannel 契约）
     ├── config.rs  (145)    NetConfig（远端地址 / 端口 / UDP 本地端口）+ 自检（3 测试）
-    ├── tcp.rs     (441)    TcpChannel：**同步 connect**、对端关闭走 ChannelEvent::Closed（8 测试）
-    ├── udp.rs     (410)    UdpChannel：只绑定不连接、零长度数据报不是 EOF（7 测试）
+    ├── tcp.rs     (450)    TcpChannel：**同步 connect**、对端关闭走 ChannelEvent::Closed（8 测试）
+    ├── udp.rs     (419)    UdpChannel：只绑定不连接、零长度数据报不是 EOF（7 测试）
     └── mod.rs      (41)    出口
 ```
 
-测试函数合计 **208**（`cargo test` 报 207 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
+测试函数合计 **231**（`cargo test` 报 230 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
 需要目视时用 `cargo test app_icon::tests::ascii_preview -- --ignored --nocapture`）。
 
 **权威约定文档**（改代码前先读）：
@@ -129,12 +133,12 @@ src/
 
 ### 质量门禁（P0/P1 改动前 → 改动后）
 
-| 命令 | 前 | P0/P1 后 | P4 后 | P5 后 | P6 第 1 批后 | P6 第 2 批 / P3 后 | 本轮（显示模式互斥修复）后 | F1~F3 后 | F4 后 |
-|---|---|---|---|---|---|---|---|---|---|
-| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
-| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed** | **109 passed**（1 ignored，为图标 ASCII 预览） | **115 passed**（1 ignored） | **179 passed**（1 ignored） | **207 passed**（1 ignored） |
-| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** |
-| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（逐条同上） | **8 warning**（逐条同上） | **8 warning**（逐条同上；本次改动 0 新增） | **8 warning**（逐条同上；F1~F3 共 0 新增） | **8 warning**（逐条同上；F4 期间新增过 1 条 `field_reassign_with_default`，改掉后回到 8 条） |
+| 命令 | 前 | P0/P1 后 | P4 后 | P5 后 | P6 第 1 批后 | P6 第 2 批 / P3 后 | 本轮（显示模式互斥修复）后 | F1~F3 后 | F4 后 | **F5 后** |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `cargo check --all-targets` | 0 error / **12 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** | 0 error / **0 warning** |
+| `cargo test` | 7 passed | **19 passed** | **50 passed** | **79 passed** | **90 passed** | **109 passed**（1 ignored，为图标 ASCII 预览） | **115 passed**（1 ignored） | **179 passed**（1 ignored） | **207 passed**（1 ignored） | **230 passed**（1 ignored） |
+| `cargo fmt --check` | 2 处差异 | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** | **干净** |
+| `cargo clippy --all-targets` | 未测量 | 9 warning | **8 warning** | **8 warning**（与上轮逐条相同，全在我未改动的既有代码里：`derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`） | **8 warning**（逐条同上） | **8 warning**（逐条同上） | **8 warning**（逐条同上；本次改动 0 新增） | **8 warning**（逐条同上；F1~F3 共 0 新增） | **8 warning**（逐条同上；F4 期间新增过 1 条 `field_reassign_with_default`，改掉后回到 8 条） | **8 warning**（逐条同上；F5 期间同样新增过 1 条 `field_reassign_with_default`，改掉后回到 8 条） |
 
 跑法：
 
@@ -143,17 +147,25 @@ cd E:/Downloads/Zed/AI_comtool-rs
 cargo fmt && cargo check --all-targets && cargo test
 ```
 
-207 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
-一条把字节经事件通道注入后核对日志文件内容的集成测试、六条用
+230 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
+一条把字节经事件通道注入后核对日志文件内容的集成测试、八条用
 `egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图、
-侧边栏、图表面板、英文界面），11 条对应用图标做纯断言的单元测试（尺寸、透明度、渐变、
+侧边栏、**已连接状态的侧边栏**、图表面板、**常用数据一行**、英文界面），
+11 条对应用图标做纯断言的单元测试（尺寸、透明度、渐变、
 前景笔画、越界检查、确定性），17 条 P3 时间戳前缀测试（格式、三种模式下
 的插入位置、跨批次不重复、程序提示不加前缀、清空后重新标注、不进图表），
 F1~F3 带来的 64 条（`send.rs` 发送侧、`app.rs` 用 `FakeChannel` 驱动的发送链路、
 `receive.rs` 的编码矩阵、`strings.rs` 的文案表不变量与源码守卫），
-以及 F4 带来的 28 条（`net_impl` 的 18 条：配置自检、TCP 的"连上 → 收发 → 对端关闭 →
+F4 带来的 28 条（`net_impl` 的 18 条：配置自检、TCP 的"连上 → 收发 → 对端关闭 →
 状态复位"集成测试、UDP 的绑定与零长度数据报语义；`app.rs` 的 10 条：连接类型分叉、
-通道复用与重建、提示行名词、UDP 不许说"已连接"、TCP 不自动重连）。
+通道复用与重建、提示行名词、UDP 不许说"已连接"、TCP 不自动重连），
+以及 **F5 带来的 23 条**（`send.rs` 的 8 条：转义解析的片段切分 / 六种转义 / 三种非法形式 /
+`\xNN` 绕过编码 / 字面文本仍走编码 / 行尾仍在字节层、常用数据标签与增删上限；
+`app.rs` 的 13 条：打开端口不碰控制线、单根控制线请求原样到达通道、设置失败走
+非致命提示、断开后勾选态归位、`Notice` 事件不像掉线、发送计数三种口径、断开归零、
+常用数据复用同一通路且不动输入框、未连接/越界拒绝、空与重复与超限拒绝、波特率夹取、
+焦点重扫不动所选端口、手动刷新才修正失效选择；`panels::mod` 的 2 条：已连接侧边栏与
+常用数据四种状态的无头渲染）。
 显示模式的互斥规则另有 6 条测试（两个点击方向、启动修复方向、合法组合不被改动、
 冲突存档往返后被修好）。
 
@@ -524,6 +536,41 @@ UDP 的 `local_port` 允许配 0（系统分配），用户**必须**能看见�
 但"用 `nc -l 1234` 手工收一遍"这条验收标准**只能由所有者亲手做**：§4② 的手工验证
 清单已加入 TCP / UDP 两项。TCP Server（多客户端）、命名管道、TLS/SSH 均不在本项内。
 
+### 3.9 增量（2026-09-21：F5 — N1~N6 六项小额改进）
+
+**零新依赖**，六项都是"顺手的活"（详见 `FUTURE_ROADMAP.md` §13.6 的逐项设计与 6 处偏离）：
+
+| 项 | 一句话 | 关键约定 |
+|---|---|---|
+| **N1** RTS / DTR 手动控制 | 侧边栏「串口参数」下多一行两个复选框 | 打开端口**一条命令都不发**（serialport-rs 在 Windows 上打开时本就把两根线置为 Disable）；勾选态是"**我们请求的电平**"，不是对引脚的测量（驱动只写不读）；失败走**非致命**的新事件 `ChannelEvent::Notice`，不判掉线 |
+| **N2** 常用数据 | 发送按钮下方一行：存为常用 / 一键重发 / 右键删除 | 与输入框走**同一条**通路（`payload_for` → `transmit`）；只存内容不存标签（标签由 `preset_label()` 现推）；**满了不淘汰**（与发送历史的 FIFO 相反）；设置窗口里有计数与一键清空 |
+| **N3** 转义字符 | 发送格式的第三档 | `parse_escapes()` 返回 `Vec<EscItem>{Literal, Bytes}`——`\xNN` **绕过编码**，字面文本仍走所选编码；非法转义同样"不发、不清空输入框" |
+| **N4** 发送字节计数 | 侧边栏「接收统计」里多一行 | 只在 `write` 返回 `Ok` **之后**累加；断开归零；悬停里点明它与「接收字节数」口径不同（那个是当前缓冲区长度，会被上限裁掉） |
+| **N5** 任意波特率 | 波特率下拉旁跟着一个可拖可键入的数字框 | 两个控件改的是**同一个** `baud_rate`；`clamp_baud()` 作为第二道防线（存档手改得动） |
+| **N6** 端口热插拔 | 切回窗口时静默重扫端口列表 | 规则抽成 `ComTool::note_focus()`（`ui()` 造不出无头测试需要的 `Frame`）；用 `rescan_ports()` 而非 `refresh_ports()`——**连接中不许自动改 `selected_port`**；刻意不做定时轮询 |
+
+**新增的运行时字段**（全部 `#[serde(skip)]`）：`rts` `dtr` `tx_bytes` `was_focused`。
+**新增的持久化字段**：`send_presets`（旧存档缺这个键，靠容器级 `#[serde(default)]` 拿默认值）。
+
+**新增的 trait 面**：`ByteChannel::set_line_state()`（带默认实现，返回 `Unsupported`，仅
+`SerialChannel` 覆盖）+ `WorkerCommand::SetLineState` + `ChannelEvent::Notice`。
+TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
+
+**一处顺带的重构**：常用数据那一行从 `eframe::App::ui` 里抽成了
+`ComTool::render_send_presets()`（`pub(crate)`）。理由不是好看，是**可测**——
+`ui()` 需要一个无头测试构造不出来的 `eframe::Frame`，写在里面等于一次也不会被
+`cargo test` 画到。抽出来之后 `panels::tests::preset_row_renders_without_panic`
+能把它四种状态都画一遍。
+
+**门禁**：`cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** ·
+`cargo test` **230 passed / 1 ignored** · clippy **8 条**（与之前逐条相同；期间同样新增过
+1 条 `field_reassign_with_default`，改掉后回到既有 8 条）。
+
+**未做 / 未验证**：F5 同样**没有实机运行过**，六项全部只经 `cargo test` 验证。其中三项
+**只能由所有者实机确认**（已加入 §4② 清单）：控制线能否真的复位板子、硬件流控档下手动
+改 RTS 是否被驱动覆盖、非标波特率驱动是否接受；另外 N6 的焦点跳变在真实窗口上是否
+一定产生一次 `false → true` 也未实测。界面外观同样只过了无头渲染的"画得出来不 panic"。
+
 ---
 
 ## 4. 未决事项
@@ -645,6 +692,46 @@ UDP 的 `local_port` 允许配 0（系统分配），用户**必须**能看见�
 43. **F4 不碰串口**：全程不打开任何串口；把「连接类型」切回「串口」后，
     串口那六项参数应原样回来，行为与 F4 之前一致
 
+**同一趟也可以把 F5 的 N1~N6 验掉**（见 §3.9）。**这一组里有三条只能实机确认**（N1 的
+实机行为、N5 的非标波特率、N6 的焦点跳变），其余都是"看得见就说明对"：
+
+44. **N1 打开不拉线**（关键风险项）：拿一块带自动复位电路、且**不**想被复位的板子 →
+    点「打开串口」→ 板子**不该**复位；此时侧边栏「控制线」的两个勾选框都应是**未勾选**
+45. **N1 手动控制**（关键风险项）：勾上 RTS → 用万用表/示波器看对应引脚应变高（或对
+    一块 ESP32 手动走一遍下载时序：拉 DTR → 动 RTS → 松开，看能否进下载模式）；
+    取消勾选应变低。**注意勾选框表达的是"我们请求的电平"，不是引脚测量值**
+46. **N1 硬件流控档**：把流控改成「硬件」再勾/取消 RTS → 观察是否被驱动覆盖
+    （`serialport` 在 Windows 上取 `RtsControl::Enable`，理论上手动 `EscapeCommFunction`
+    仍生效，但**没有硬件验证过**，这一条就是去确认它）
+47. **N1 断开归位**：勾上两根线后点「关闭串口」→ 下次打开时两个勾选框都应回到未勾选
+48. **N2 常用数据**：输入框写 `AT+RST` → 点「存为常用」→ 出现一个按钮（标签 `AT+RST`，
+    悬停显示完整内容）；点它 → 应发出**与直接点发送完全一样**的字节（含当前行尾与编码）；
+    但**输入框内容不变**、也不该进发送历史
+49. **N2 置灰理由**：输入框清空 → 「存为常用」置灰，悬停说「输入框为空」；
+    输入框内容与某条重复 → 悬停说「已在列表中」；存满 16 条 → 悬停说「上限 16 条」
+50. **N2 右键删 / 满不淘汰**：右键某个条目 → 该条消失；存满 16 条后再点「存为常用」→
+    设置窗口里计数停在 `16 / 16`，**第一条不会消失**
+51. **N2 落盘**：存两条后退出程序再打开 → 按钮还在（设置窗口里的计数也对）
+52. **N3 转义**：格式选「转义」，输入 `AT\r\n` → 预览应是 **4 字节**（`41 54 0D 0A`），
+    不是 6 个字符；输入 `\xC4\xE3` + GBK → 用字节查看确认发出的就是 `C4 E3` **两个**字节
+    （没有被 GBK 再编码一遍）
+53. **N3 非法转义**：输入 `\q` 或 `\x4` 或末尾孤立的 `\` → 预览显示红色错误，
+    点「发送」**不发也不清空**输入框
+54. **N4 发送计数**：侧边栏「接收统计」→「发送字节数」；发一次 `AT`（2 字节 + 行尾）→
+    数字应按实际发出字节数增长；清空输入框或解析失败时**数字不动**；点「关闭串口」→ 归零
+55. **N4 与接收口径不同**：接收字节数会随着日志上限被裁而变小/停止增长，发送字节数只增不减
+    ——悬停提示里写明了这一点
+56. **N5 任意波特率**（需实机确认）：下拉里选 9600，然后在旁边的数字框里直接敲 `250000`
+    → 发送区的数值应跟着变（两个控件是同一个值）；打开串口后设备应能正常通信
+57. **N5 越界夹取**：把数字框拖到 0 以下 / 拖到很大 → 应停在 1 与 12000000 之间，界面上
+    不会出现 0
+58. **N6 热插拔**（需真实窗口确认）：程序开着、鼠标点到别处（或最小化）→ 插上一个 USB 转
+    串口 → 切回程序窗口 → 「可用串口」列表**自动**出现新端口，**且你原先选中的端口没被改掉**
+59. **N6 手动刷新仍会修正**：在「端口」里选一个已经拔掉的端口 → 点「刷新」→
+    这时才应该自动改选到第一个可用端口（与上一条的差别是刻意的）
+60. **N3 的一处一致性**：设置窗口里选「转义」时，下面显示的应是**转义**的说明而不是 HEX 的
+    （三档的说明互不相容，只显示当前那一档）
+
 ### ③ 仓库状态
 
 `AI_comtool-rs` 的 `ai-refactor` 分支工作区是干净的。
@@ -713,7 +800,7 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
 ③ §5 里那 8 条既有 clippy 警告的清理（`cargo clippy --fix` 一键，建议单独一次提交）；
 ④ §5 里「颜色 + 字节查看同时勾选」的界面行为决策（后者被盖住；已不丢内容，属同类小问题）。
 
-### 6.2 新线（F1~F4，相对 `Neutree/COMTool`）
+### 6.2 新线（F1~F5，相对 `Neutree/COMTool`）
 
 见 **`FUTURE_ROADMAP.md`**（含逐项设计约束、验收标准、排除说明）。按性价比排序：
 
@@ -723,13 +810,18 @@ P2 完成约 75%（可日常使用）；P4 完成约 80%；P5 完成约 88%（�
 | **F2** | 编码选择（GBK / GB18030） | 2~3 天 | ✅ **已完成**（`e2039ff`）。新增依赖 `encoding_rs`；走增量解码，未退化成 lossy |
 | **F3** | 多语言真接线 | 2~3 天 | ✅ **已完成**。新增 `src/strings.rs`（中英同宏臂，漏翻译写不出来）+ 源码级守卫测试；接收区/日志内的提示行**不翻译** |
 | **F4** | TCP / UDP 客户端 | 3~5 天 | ✅ **已完成**。新增 `src/net_impl/{config,tcp,udp}.rs`（零新依赖，只用 `std::net`）+ `communicationtrait::worker` 共用脚手架；`ChannelEvent::Closed` 的 `#[allow(dead_code)]` 已消掉（TCP 真的会发）；`app.rs` 的 `serial` 字段改名 `channel`，连接生命周期改为三类型分叉 |
+| **F5** | N1~N6 六项小额改进 | 2~3 天 | ✅ **已完成**。零新依赖。N1 RTS/DTR 手动控制（新增 `ChannelEvent::Notice` 承载"非致命失败"）、N2 常用数据（`SendPresets`，满了不淘汰）、N3 转义档（`SendFormat::Escape` + `parse_escapes`）、N4 发送字节计数（`Ok` 之后才累加）、N5 任意波特率（下拉旁 `DragValue` + `clamp_baud`）、N6 焦点触发重扫端口。逐项设计与 6 处偏离见 `FUTURE_ROADMAP.md` §13.6 |
 | ~~⑤~~ | ~~插件架构（**扩展机制本身**）~~ | — | **明确不做**：与"单 binary、全部行为可单测"的形态互斥 |
 | **D1~D3** | SSH / terminal 插件 / 协议脚本 | — | ⏸️ **待定开发（未排期）**：不是被否决而是时机未到，各自有明确的触发条件。SSH 复用 F4 的连接类型分叉框架；协议脚本建议先试"配置化协议预设表" |
 
-**F 线已全部落地（F1~F4）**。另有 2 条**既有缺陷**仍留着（不在任何阶段内）：
+**F 线已全部落地（F1~F5）**。另有 2 条**既有缺陷**仍留着（不在任何阶段内）：
 `connected` 假阳性（只影响串口：`open()` 只拉起线程，真正的失败要等 `Failed` 事件；
 网络侧已通过同步 connect 绕开）、自动重连无退避（与 F4 同路径，F4 未动它）。
 F1 的「发送文件」仍未做，前置条件是**待发队列上限**（背压）。
+
+**F5 之后 COMTool 差距线的三条主结论**：① 串口参数一整轴已经没有可补的格子；
+② 接收侧 8 项全满且两项超出 COMTool；③ 剩下的缺口集中在"平台化"（TCP/UDP 服务端、
+插件机制、SSH）与"发布工程"（打包 CI、自动更新）——**都不适合与串口助手本体挤在一起做**。
 
 本文件未列出的新功能（例如图表按通道显示/隐藏、x 轴改成真实时间基准）仍不在任何计划内。
 
@@ -741,7 +833,7 @@ F1 的「发送文件」仍未做，前置条件是**待发队列上限**（背�
 
 0. **⛔ 未经项目所有者逐次批准，禁止运行本项目（`cargo run` / 直接跑 exe），禁止以任何方式
    占用或打断 COM3。** 开发阶段只用 `cargo fmt` / `cargo check --all-targets` / `cargo test`
-   验证（179 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
+   验证（230 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
    完整条文在 `AGENTS.md` 顶部与 `DEVELOPMENT_GUIDE.md` §0。
    **该规则已配置机器级硬拦截**：PreToolUse 钩子 `~/.workbuddy/hooks/comtool-run-guard.sh`
    （注册于 `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json`），命中即拒绝工具调用，
@@ -871,7 +963,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 207 passed / 1 ignored / fmt 干净）
+# 3. 建立门禁基线（应为 0 warning / 230 passed / 1 ignored / fmt 干净）
 cargo fmt && cargo check --all-targets && cargo test
 
 # 4. 看清两个版本的差异
@@ -880,9 +972,9 @@ git diff master ai-refactor --stat
 # 5. 读这三份文档再动手
 #    AGENTS.md / DEVELOPMENT_GUIDE.md / REFACTOR_REPORT.md
 
-# 6. 计划内的功能项已全部落地（P0~P6 与 F1~F4）。下一件活从 §4② 的实机验证清单
-#    （磁盘持久化 + F2 的 GBK 回显 + F4 的 nc 收发，都需所有者亲手跑）或 §5 里那 8 条
-#    既有 clippy 警告的清理开始；GPLv3 合规已降为最低优先级（§4①）
+# 6. 计划内的功能项已全部落地（P0~P6 与 F1~F5）。下一件活从 §4② 的实机验证清单
+#    （磁盘持久化 + F2 的 GBK 回显 + F4 的 nc 收发 + F5 的 N1/N5/N6 三条，都需所有者
+#    亲手跑）或 §5 里那 8 条既有 clippy 警告的清理开始；GPLv3 合规已降为最低优先级（§4①）
 ```
 
 如果你要对照原版行为：`git -C E:\Downloads\Zed\comtool-rs log -1`（原版停在 `04dc007`），
