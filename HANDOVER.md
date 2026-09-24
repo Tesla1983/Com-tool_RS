@@ -108,12 +108,12 @@ src/
     └── mod.rs      (41)    出口
 ```
 
-测试函数合计 **231**（`cargo test` 报 230 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
+测试函数合计 **253**（`cargo test` 报 252 passed、1 ignored；1 条 ignored 是图标 ASCII 预览，
 需要目视时用 `cargo test app_icon::tests::ascii_preview -- --ignored --nocapture`）。
 
 **权威约定文档**（改代码前先读）：
 - `AGENTS.md` — 给 AI/协作者的模块地图与硬性约束（简短，必读）
-- `DEVELOPMENT_GUIDE.md` — 中文开发参考：四层架构、数据流、新增功能的完整流程、注意事项 28 条
+- `DEVELOPMENT_GUIDE.md` — 中文开发参考：四层架构、数据流、新增功能的完整流程、注意事项 49 条
 
 ---
 
@@ -598,6 +598,22 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
   与需求重新实现 `serial_impl/channel.rs`。这个抽象本身只有 5 个方法，独立重写完全可行，约 1~2 天。
 
 ### ② 磁盘级持久化**从未实测**（**当前最高优先的待办**）
+
+> **⚠️ 让用户实机 / 目视之前的强制前置条件（用户明确要求，2026-09-24）**
+>
+> 本节及 `§4②` 下列各项都是"请人工跑一遍"的清单。**在向用户提出这些请求之前，
+> 必须先跑 `cargo build --release`**——`fmt` / `check` / `test` / `clippy` 都**不产出
+> 可执行文件**，只跑这四样时用户双击到的可能是**不含本次改动**的旧 exe，他会看着旧
+> 界面找新功能，然后得出"没做出来"的结论。
+>
+> - 判定"编译过没有"的唯一依据是**时间戳比对**：`target/release/comtool-rs.exe` 的时间戳
+>   须晚于最后一次 `src/` 改动，且与 `git log -1 --format=%cd --date=iso` 对得上。
+> - exe 在 `.gitignore` 里、**不随仓库走**：清过 `target/` 或换机器后都要现场重建。
+> - 禁止话术："你自己 build 一下" / "跑过测试了可以看了"。
+> - 另注：清单里的 `cargo run --release` 属**运行本项目**，按 §7 第 0 条仍需用户本人批准，
+>   由用户自己执行；`cargo build --release` 则在默认允许清单内，不需要批准。
+>
+> 详见 `DEVELOPMENT_GUIDE.md` §6 约定 49。
 
 单元测试走的是内存版 `eframe::Storage`，覆盖了 `save → set_value → RON → get_value → load`
 全路径，但**真实文件读写没验证过**。原因：这是 GUI 程序，`save()` 只在退出或周期性自动保存时触发，
