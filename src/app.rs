@@ -311,8 +311,22 @@ pub struct ComTool {
     pub net_local_port: u16,
 
     // 是否已经打开串口（活不过进程边界）
+    //
+    // 语义是"**已经发起过一次打开**"，不是"通道当前确实通着"。后者由
+    // [`ComTool::channel_is_ready`] 回答——串口的 `open()` 只拉起后台线程，端口
+    // 要到那里才真正打开，所以这两件事在串口上会短暂不一致（那一小段叫"正在
+    // 打开"，见 [`ComTool::opening`]）。**任何"该不该放行"的判断都必须看就绪**，
+    // 只看这个字段就是把 `connected` 假阳性缺陷换个地方复现。
     #[serde(skip)]
     pub connected: bool,
+
+    /// "已打开 / 已连接"那条提示是否已经补过（活不过进程边界）。
+    ///
+    /// 只有串口用得上：它的就绪发生在 `open_connection` **返回之后**，那条成功
+    /// 提示只能延后到 [`ComTool::settle_connection_state`] 里补。没有这个记账位，
+    /// 补提示会因为"通道一直就绪"而每帧说一遍。
+    #[serde(skip)]
+    pub announced_open: bool,
 
     // 接收区（无长度上限，不落盘；见 crate::config 的模块说明）
     #[serde(skip)]
@@ -370,6 +384,16 @@ pub struct ComTool {
     // 上次自动重连尝试时间（用于节流，避免高频重试）
     #[serde(skip)]
     pub last_reconnect_attempt: Option<Instant>,
+
+    /// 连续失败次数，用于指数退避（**纯运行时状态，不落盘**）。
+    ///
+    /// 旧实现是"每 500 ms 定时重试一次、永不放弃"：串口被别的程序占用时，
+    /// 它会以每秒约 2 次的频率反复新建后台线程，日志与界面提示被刷屏，
+    /// 而重试本身注定失败。改为"间隔随连续失败次数指数增长 + 有上限次数"。
+    ///
+    /// **连接成功即清零**——它描述的是"这一轮失败连着几次"，不是累计故障数。
+    #[serde(skip)]
+    pub reconnect_failures: u32,
 
     // —— 串口控制线的请求状态（N1，不落盘）——
     /// 我们**请求**把 RTS 拉成什么电平（`true` = 断言 / active）。
@@ -495,6 +519,47 @@ pub struct ComTool {
     pub chart: ChartData,
 }
 
+/// 自动重连的首次退避间隔。
+///
+/// 与旧实现保持一致（500 ms）：第一次失败后仍然很快重试一次，覆盖"对端只是
+/// 慢了一拍"这种最常见的情况——一上来就等好几秒会让正常重连的体感明显变差。
+const RECONNECT_BASE_DELAY: Duration = Duration::from_millis(500);
+
+/// 自动重连退避的上限。
+///
+/// 30 s 是"仍然算自动重连"与"还不如用户自己点一下"之间的折中：再长的话，
+/// 用户盯着一个不动的界面等重连不如自己按按钮。
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// 自动重连的最大连续失败次数。
+///
+/// 取 6：按下面的指数退避，从 500 ms 累加到停手总计约 30 s 量级的重试窗口
+/// （0.5 + 1 + 2 + 4 + 8 + 16 ≈ 31.5 s），足够覆盖"设备复位中 / 驱动还在初始化"，
+/// 又不至于让用户对着一个徒劳的重试过程干等。到顶后彻底停手并留一条提示。
+///
+/// `pub(crate)`：`receive.rs` 在收到 `Failed` 时要判断"是不是刚好撞到上限"，
+/// 以便只提示一次"自动重连已停止"。
+pub(crate) const MAX_RECONNECT_ATTEMPTS: u32 = 6;
+
+/// 第 `failures` 次连续失败之后，下一次重连前应等待多久（**纯函数**）。
+///
+/// `failures` 的含义是"**已经**连续失败了这么多次"，因此首轮重试（`failures == 0`）
+/// 得到 [`RECONNECT_BASE_DELAY`]（500 ms），之后按 2 的幂增长，封顶
+/// [`RECONNECT_MAX_DELAY`]。
+///
+/// 抽成纯函数是为了能被单测直接驱动——重连的实际时序依赖时钟与真实串口，
+/// 在门禁里造不出；而"第 n 次该等多久"这件事本身与时钟无关，可以钉死。
+///
+/// 用 `saturating_mul` 与 `min` 双重保护：`failures` 理论上不会很大（到
+/// [`MAX_RECONNECT_ATTEMPTS`] 就停手），但纯函数不该依赖调用方守规矩——
+/// 一个手改过的存档或将来放宽的上限都不该让它 panic 或溢出。
+fn reconnect_backoff(failures: u32) -> Duration {
+    let factor = 1u32 << failures.min(16);
+    RECONNECT_BASE_DELAY
+        .saturating_mul(factor)
+        .min(RECONNECT_MAX_DELAY)
+}
+
 impl ComTool {
     /// 从 `eframe` 存储恢复上次会话。
     ///
@@ -554,6 +619,18 @@ impl ComTool {
     /// `last_opened_port`（"上次那个端口"），那是串口语义；对 TCP 而言，
     /// 对端没启动时反复重试只会产生一批半死不活的 socket，而用户完全看不出
     /// 它在重试（界面已经是"未连接"）。
+    ///
+    /// # 指数退避 + 上限次数
+    ///
+    /// 旧实现是固定 500 ms、永不放弃：串口被别的程序占用时每秒重试两次、
+    /// 每次都新建一个后台线程，注定失败还刷屏。改为
+    ///
+    /// * 间隔按连续失败次数指数增长（见 [`reconnect_backoff`]），最长 30 s；
+    /// * 连续失败达到 [`MAX_RECONNECT_ATTEMPTS`] 次后**彻底停手**，并在接收区
+    ///   留一条说明——继续重试只会浪费 CPU，用户需要知道"它不会再试了"。
+    ///
+    /// 停手之后只要用户重新点「连接」，[`ComTool::open_connection`] 会把
+    /// `reconnect_failures` 清零，自动重连也随之恢复。
     pub fn auto_reconnect(&mut self) {
         // 只有串口曾经打开过、现在断开时才尝试自动重连
         if self.connection_kind != ConnectionKind::Serial {
@@ -563,10 +640,16 @@ impl ComTool {
             return;
         }
 
+        // 连续失败到顶就停手。判定放在节流之前：它是一次性决定，不该被时间门挡着。
+        if self.reconnect_failures >= MAX_RECONNECT_ATTEMPTS {
+            return;
+        }
+
         let now = Instant::now();
+        let wait = reconnect_backoff(self.reconnect_failures);
         let need_retry = self
             .last_reconnect_attempt
-            .map_or(true, |t| now.duration_since(t).as_millis() >= 500);
+            .map_or(true, |t| now.duration_since(t) >= wait);
         if !need_retry {
             return;
         }
@@ -623,9 +706,24 @@ impl ComTool {
     /// 是**硬要求**：`TcpChannel` / `UdpChannel` 的 `open()` 会当场把 connect /
     /// bind 做完再返回，所以这里的 `Ok` 就是"确实连上了"。
     ///
-    /// 串口通道的 `open()` 只负责拉起后台线程，真正的打开失败要等 `Failed` 事件
-    /// 回来才知道——那是既有的 `connected` 假阳性缺陷（见 `FEATURE_GAP_AND_PLAN.md`
-    /// §4），本次未动：修它要引入"正在打开"这个中间状态，属独立课题。
+    /// # 串口：不再乐观置位，而是"按通道的实际状态结算"
+    ///
+    /// 旧实现在最后无条件 `connected = true`，于是打开一个**不存在**的端口时，
+    /// 界面会先亮一下"已连接"，等 `Failed` 事件回来再跳回"未连接"——用户在亮着
+    /// 的那一瞬点「发送」，数据会交给一个不存在的端口。这就是
+    /// `FEATURE_GAP_AND_PLAN.md` §4 记的 `connected` 假阳性。
+    ///
+    /// 现在改为在最后调一次 [`ComTool::settle_connection_state`]：是否算连上**由
+    /// 通道自己说了算**（`is_active()`）。串口的 `open()` 只拉起后台线程，端口在
+    /// 后台线程里才打开，因此刚返回时状态是 [`ComTool::opening`]（界面显示"正在
+    /// 打开"，发送按钮照旧不生效），下一帧由 `settle_connection_state` 结算；
+    /// 真失败则走 `Failed` 事件回到"未连接"。TCP / UDP 同一步会当场判定为已连接，
+    /// 行为与从前完全一致。
+    ///
+    /// ⚠️ **串口的 `settle_connection_state()` 之前，`connected` 为 `true` 而通道
+    /// 未就绪**——那正是"正在打开"。任何"该不该放行"的判断都必须看
+    /// [`ComTool::channel_is_ready`]，不能只看 `connected`，否则这个缺陷只是换了个
+    /// 地方复现（见 `connected` 字段的文档）。
     pub fn open_connection(&mut self) {
         // 前置条件不满足（没选端口 / 没填目标地址）时**什么都不做**——尤其不能
         // 乐观置位 `connected`。
@@ -672,7 +770,11 @@ impl ComTool {
         }
 
         self.event_rx = Some(event_rx);
+        // `connected` 在这里的含义是"**已经发起过一次打开**"（记账位）。
+        // 真正的"通没通"由 `channel_is_ready()` 回答，界面据此显示"正在打开"。
         self.connected = true;
+        // 新的连接发起 ⇒ 成功提示要重新补一次（见 `settle_connection_state`）。
+        self.announced_open = false;
 
         // 刚打开时两根控制线都是低的（理由见 `rts` 字段的注释：serialport-rs 在
         // Windows 上打开端口时显式把 DTR / RTS 都置为 Disable）。**这里只是把勾选态
@@ -688,11 +790,20 @@ impl ComTool {
         }
 
         // 成功的措辞按传输类型分叉：UDP 说"绑定"而不是"连接"——它没有连接。
+        //
+        // 串口那句有个必须点明的差别：`open()` 返回 `Ok` 只表示"后台线程起来了"，
+        // 端口**还没有**打开。写"已打开"会和紧接着可能到来的 `Failed` 自相矛盾
+        // （用户看到"已打开"下一行就是"打开失败: 拒绝访问"）。所以串口写"正在
+        // 打开"，由 [`ComTool::settle_connection_state`] 确认后再补一条"已打开"。
         let open_msg = match self.connection_kind {
-            ConnectionKind::Serial => format!("已打开 {target}\n"),
+            ConnectionKind::Serial => format!("正在打开 {target}\n"),
             ConnectionKind::TcpClient => format!("已连接 {target}\n"),
             ConnectionKind::Udp => format!("UDP 已绑定，目标 {target}\n"),
         };
+        // 网络通道此刻**确实**已经就绪（`open()` 同步做完了 connect / bind），
+        // 上面那句就是最终的成功提示，不需要结算再补——把记账位置真以免重复说。
+        // 串口此刻还没就绪（`is_ready` 为假），留假，等端口真的打开时由结算补。
+        self.announced_open = self.channel_is_ready();
         self.display_spans.push(ColoredSpan {
             text: open_msg.clone(),
             style: AnsiStyle {
@@ -701,6 +812,69 @@ impl ComTool {
             },
         });
         self.push_receive_note(open_msg);
+    }
+
+    /// 把"通道已经就绪"这件事落成一条"已打开"的提示。每帧调用一次。
+    ///
+    /// 存在的唯一理由是串口：它的 `open()` 只拉起后台线程，端口要到后台线程里
+    /// 才真正打开。`open_connection` 返回时通道可能还没就绪，"正在打开"就是
+    /// 那一小段的呈现；等后台线程把状态推到就绪，这里补一条"已打开"。
+    ///
+    /// # 判定为什么是"通道就绪 且 提示还没补过"
+    ///
+    /// 不是"`connected` 为假才动手"——`connected` 现在的含义是"**已经发起过一次
+    /// 打开**"（见字段文档），`open_connection` 在返回前就把它置真了。用它当门
+    /// 会让本函数在串口这条路上**一次也不执行**。
+    ///
+    /// 去重的落点是 `announced_open` 这个**一次性记账位**：通道就绪可能持续很多
+    /// 帧，没有它，"已打开"会每帧刷一条。而 `announced_open` 只在连接发起时清零，
+    /// 所以"连上 → 掉线 → 重连"这条路径每次都能重新补一条。
+    ///
+    /// 三条硬约束：
+    ///
+    /// * **只升不降**。通道不就绪不等于掉线——那要由 `Failed` / `Closed` 事件说了算
+    ///   （只有它们知道"为什么"）。这里主动降会与事件重复报错，还会把 `close` 时
+    ///   说过的"连接已关闭"再说一遍。
+    /// * **按类型选词**：`connection_kind` 而不是 `channel_kind`。复用同一条通道
+    ///   对象时两者相等、看不出差别，但类型切换的那一帧只有前者是对的。
+    /// * **不对网络通道说第二遍**：它们的 `open_connection` 已经当场报过"已连接"，
+    ///   所以发起时就把 `announced_open` 置真（见 `open_connection`）。
+    pub fn settle_connection_state(&mut self) {
+        if self.announced_open || !self.channel_is_ready() {
+            return;
+        }
+        self.announced_open = true;
+        // 只有串口会走到这里（网络通道在 `open_connection` 里就说了）。
+        // 措辞按类型分叉，免得将来某个网络通道也变成异步打开时这里说错话。
+        let noun = self.transport_noun();
+        self.push_receive_note(format!("{noun}已打开\n"));
+    }
+    /// 通道当前是否**确实**是通的。
+    ///
+    /// 与 [`ComTool::connected`] 的分工是这次修缺陷的核心：
+    ///
+    /// * 结论来自**通道自己**（[`ByteChannel::is_ready`]，直读状态位），不是应用猜的；
+    /// * 串口的 `open()` 只拉起后台线程，端口要到后台线程里才真正打开，所以
+    ///   `open()` 返回后的**一小段时间里**它就是假——这段时间在界面上显示为
+    ///   "正在打开"（见 [`ComTool::opening`]），而不是"已连接"。
+    ///
+    /// `channel` 为 `None` 时返回 `false`。
+    ///
+    /// ⚠️ **不要再加"串口特殊处理"**（例如"串口拿不到就绪态就沿用 `connected`"）：
+    /// 那正是把这次修的缺陷原样请回来。串口那三态由
+    /// [`crate::serial_impl::SerialChannel`] 覆盖 [`ByteChannel::is_ready`] 提供，
+    /// 网络通道走 trait 的默认实现（等价于 `is_active()`），分叉点**只有一处**。
+    fn channel_is_ready(&self) -> bool {
+        self.channel.as_ref().is_some_and(|c| c.is_ready())
+    }
+
+    /// 是否正处在"已经发起打开、通道还没就绪"的中间态。
+    ///
+    /// 只有串口会有这一档：TCP / UDP 的 `open()` 在调用线程里就把 connect / bind
+    /// 做完，返回 `Ok` 时通道必然已就绪。判定必须同时看 `connected`——它是
+    /// "已经发起过一次打开"的记账位，断开之后就不该再自称"正在打开"。
+    pub fn opening(&self) -> bool {
+        self.connected && !self.channel_is_ready()
     }
 
     /// 建连接的前置条件是否满足。
@@ -819,6 +993,9 @@ impl ComTool {
         self.channel_kind = None;
         self.event_rx = None;
         self.connected = false;
+        // 提示记账位与"是否连上"同生共死：通道没了，下一次打开要重新说一遍
+        // "已打开"。不清它的话，掉线重连之后那句成功提示永远不会再出现。
+        self.announced_open = false;
 
         // 计数与线状态都是"本次连接"的运行时事实，通道没了就没有意义。
         // （接收字节数不在这里归零：它由 `receive_text.len()` 推导，清空接收区时归零。）
@@ -840,6 +1017,9 @@ impl ComTool {
         // （断线走的是另一条路：`receive_data` 只置 `connected = false`）。
         self.last_opened_port = None;
         self.last_reconnect_attempt = None;
+        // 退避计数一并清零：它是"这一轮连续失败了几次"，用户主动断开就是这一轮的
+        // 结束；下次再连应当是干干净净的一次尝试，而不是继承上一次失败后的长等待。
+        self.reconnect_failures = 0;
 
         if !had_channel {
             return;
@@ -865,7 +1045,10 @@ impl ComTool {
     /// 返回是否真的把字节交给了通道。UI 的调用点**不需要**看返回值（失败原因已经
     /// 写进接收区了），它存在的意义是让测试能断言"解析失败时确实什么都没发出去"。
     pub fn send_data(&mut self) -> bool {
-        if !self.connected {
+        // 判据是 [`ComTool::channel_is_ready`] 而不是 `connected`：串口在"正在
+        // 打开"的那一小段里 `connected` 已经是真，但端口还没打开，这时发出去的
+        // 字节没有去处。只看 `connected` 就是那个假阳性缺陷换个地方复现。
+        if !self.channel_is_ready() {
             return false;
         }
 
@@ -915,7 +1098,8 @@ impl ComTool {
     /// * **不动输入框**：发一条常用数据不等于把用户正在写的内容替换掉；
     /// * **不受「发送后清空」影响**：那条设置说的是输入框。
     pub fn send_preset(&mut self, index: usize) -> bool {
-        if !self.connected {
+        // 与 `send_data` 同一条判据，见那里的注释。
+        if !self.channel_is_ready() {
             return false;
         }
         let Some(text) = self.send_presets.entries().get(index).cloned() else {
@@ -1042,7 +1226,9 @@ impl ComTool {
     /// `request_repaint_after(10ms)`，设置里的「重绘间隔」就被架空了——用户把它调到
     /// 500ms 省电，界面却仍在 10ms 空转。
     pub fn tick_repeat_send(&mut self, ctx: &egui::Context) {
-        if !self.repeat_send || !self.connected {
+        // 与 `send_data` 同一条判据（通道确实就绪）。这里额外保留 `connected`：
+        // 用户在"正在打开"时勾上定时发送，计时也要先起步，不能等连上才开始计。
+        if !self.repeat_send || !self.connected || !self.channel_is_ready() {
             return;
         }
 
@@ -1156,6 +1342,7 @@ impl Default for ComTool {
             net_remote_port: DEFAULT_REMOTE_PORT,
             net_local_port: 0,
             connected: false,
+            announced_open: false,
             receive_text: String::new(),
             send_text: String::new(),
             send_format: SendFormat::default(),
@@ -1168,6 +1355,7 @@ impl Default for ComTool {
             channel_kind: None,
             event_rx: None,
             last_reconnect_attempt: None,
+            reconnect_failures: 0,
             rts: false,
             dtr: false,
             was_focused: true,
@@ -1369,6 +1557,12 @@ impl eframe::App for ComTool {
 
         // 写日志线程可能已经报错退出：每帧检查一次，不能让界面继续显示「记录中」
         self.poll_log_events();
+
+        // 串口"正在打开"→"已打开"的结算（见 `settle_connection_state`）。
+        //
+        // 放在 `receive_data` **之后**：这一帧新到的 `Failed` / `Closed` 已经落笔，
+        // 结算只会把真正就绪的通道认成已连接，不会把刚报错的又拉回来。
+        self.settle_connection_state();
 
         // 串口意外断开时自动重连（节流 500ms）
         self.auto_reconnect();
@@ -1761,7 +1955,14 @@ mod tests {
     fn disconnected_app_writes_nothing() {
         let (mut app, handle) = connected_app();
         app.send_text = "ping".to_string();
-        app.connected = false;
+        // 造一个**真的**断开：只把 `connected` 置假而通道仍就绪，是"记账位与通道
+        // 不一致"的非法状态（现实中不存在——断开要嘛走 `close_connection`、要嘛
+        // 有 `Failed`/`Closed` 事件把通道一起带下来）。发送闸门看的是通道是否就绪
+        // （见 `channel_is_ready` 的注释），所以这里也必须让通道跟着断开。
+        app.close_connection();
+        app.send_text = "ping".to_string();
+        // `close_connection` 会往接收区留一条提示，清掉以免干扰下面的断言。
+        app.receive_text.clear();
 
         assert!(!app.send_data());
         assert_eq!(handle.write_count(), 0);
@@ -2035,6 +2236,185 @@ mod tests {
         assert_eq!(handle.write_count(), 0, "重新打开不该顺手发数据");
     }
 
+    /// ⭐ **串口打开请求返回后，界面不得自称"已连接"**——本次修的缺陷本体。
+    ///
+    /// 用替身的"异步就绪"模式扮串口：`open()` 只是拉起线程，端口还没打开。
+    /// 旧实现在这里会无条件 `connected = true`，于是界面先亮一下"已连接"、等
+    /// `Failed` 回来才跳回"未连接"——用户在那一瞬点发送，字节交给一个不存在的
+    /// 端口。这条断言的是**那一刻的判定口径**，不是最终状态。
+    #[test]
+    fn serial_open_does_not_claim_connected_before_the_port_is_ready() {
+        let (channel, handle) = FakeChannel::new();
+        // 必须在 open 之前置位：`open()` 读它决定初始的 active。
+        handle.defer_ready();
+        let mut app = ComTool {
+            channel: Some(Box::new(channel)),
+            channel_kind: Some(ConnectionKind::Serial),
+            connection_kind: ConnectionKind::Serial,
+            selected_port: "COM_TEST".to_string(),
+            send_text: "A5".to_string(),
+            ..ComTool::default()
+        };
+
+        app.open_connection();
+        assert!(
+            app.opening(),
+            "串口 open 返回时端口还没打开，必须处于「正在打开」而不能是「已连接」"
+        );
+        assert!(
+            !app.send_data(),
+            "「正在打开」期间不得放行发送——这正是假阳性缺陷会造成的数据丢失"
+        );
+        assert_eq!(app.tx_bytes, 0, "没就绪就不该记账已发送字节");
+
+        // 后台线程随后把端口打开了。
+        handle.signal_ready();
+        app.settle_connection_state();
+        assert!(
+            !app.opening() && app.connected,
+            "端口就绪之后结算应当把它认成已连接"
+        );
+        assert!(
+            app.receive_text.contains("已打开"),
+            "结算时要补一条「已打开」，实际接收区：{}",
+            app.receive_text
+        );
+    }
+
+    /// 「正在打开」期间**不得**放行发送，且不得记账。
+    ///
+    /// 与上一条是一对：那条看状态口径，这条看**发送闸门**。把闸门留在
+    /// `if !self.connected` 上时，这个测试会红——`connected` 在"正在打开"时已经是真。
+    #[test]
+    fn sending_is_blocked_while_the_port_is_still_opening() {
+        let (channel, handle) = FakeChannel::new();
+        handle.defer_ready();
+        let mut app = ComTool {
+            channel: Some(Box::new(channel)),
+            channel_kind: Some(ConnectionKind::Serial),
+            connection_kind: ConnectionKind::Serial,
+            selected_port: "COM_TEST".to_string(),
+            send_text: "A5".to_string(),
+            ..ComTool::default()
+        };
+
+        app.open_connection();
+        assert!(app.opening(), "前提：此刻应当处于「正在打开」");
+
+        assert!(
+            !app.send_data(),
+            "「正在打开」时发送必须返回 false——端口还没打开，字节没有去处"
+        );
+        assert_eq!(handle.write_count(), 0, "一个字节都不该交给通道");
+        assert_eq!(app.tx_bytes, 0, "没发出去就不该记账");
+        assert!(
+            !app.send_preset(0),
+            "常用数据走同一条闸门，也不能在「正在打开」时放行"
+        );
+    }
+
+    /// 通道**不就绪**绝不等于"掉线"——结算只升不降。
+    ///
+    /// 这条防的是最省事的错误实现：把 `settle_connection_state` 写成"每帧把
+    /// `connected` 对齐成 `channel.is_active()`"。那样一来，任何一次通道状态
+    /// 波动都会让界面跳成"未连接"、还会停掉定时发送，而 `Failed` / `Closed`
+    /// 事件紧接着再报一次"连接已关闭"——同一次掉线被说了两遍。
+    #[test]
+    fn settling_never_downgrades_an_established_connection() {
+        let (mut app, handle) = connected_app();
+
+        // 造一个"通道报已就绪、界面也认已连接"的稳态。
+        assert!(app.connected && !app.opening());
+
+        // 通道挂了，但**事件还没到**（这正是事件通道的意义：只有它知道为什么）。
+        handle.emit(ChannelEvent::Failed("模拟".to_string()));
+        // 先不谈事件，直接结算：不许把 connected 拉下来。
+        app.settle_connection_state();
+        assert!(
+            app.connected,
+            "结算只该升不该降：降了就会与随后到来的 Failed 事件重复报告同一次掉线"
+        );
+    }
+
+    /// 通道类型与连接类型**不一致**时，结算的用词按 `connection_kind`。
+    ///
+    /// 复用同一条通道对象时 `channel_kind` 与 `connection_kind` 恒等，看不出差别；
+    /// 这条故意造出不一致，钉住"结算说哪种传输"的依据。用 `transport_noun()`
+    /// 反查最省事：它读的就是 `connection_kind`。
+    ///
+    /// 不调 `open_connection`（那会因为类型不一致而把替身拆掉、换成真 TCP 通道），
+    /// 而是把状态摆成"已发起打开 + 带替身的通道 + 另一个连接类型"——这正是结算
+    /// 函数唯一需要的三个前提。
+    #[test]
+    fn settle_wording_follows_the_connection_kind_not_the_channel_kind() {
+        let (channel, handle) = FakeChannel::new();
+        handle.defer_ready();
+        let mut app = ComTool {
+            channel: Some(Box::new(channel)),
+            // 通道对象是"按串口造的"，但当前选择的传输是 TCP。
+            channel_kind: Some(ConnectionKind::Serial),
+            connection_kind: ConnectionKind::TcpClient,
+            net_remote_host: "127.0.0.1".to_string(),
+            net_remote_port: 1234,
+            ..ComTool::default()
+        };
+
+        // 已发起打开、提示还没补过——结算的进入条件。
+        app.connected = true;
+        app.announced_open = false;
+        // 端口就绪。
+        handle.signal_ready();
+        app.settle_connection_state();
+
+        assert_eq!(app.transport_noun(), "TCP");
+        assert!(
+            app.receive_text.contains("TCP已打开"),
+            "结算的措辞必须按 connection_kind（TCP），而不是 channel_kind（串口），\
+             实际接收区：{}",
+            app.receive_text
+        );
+        assert!(
+            !app.receive_text.contains("串口已打开"),
+            "用错了依据就会把 TCP 说成串口，实际接收区：{}",
+            app.receive_text
+        );
+    }
+
+    /// 结算那条提示**不能每帧刷**。
+    ///
+    /// 通道就绪是一个持续状态（会为真很多帧），没有记账位的话"已打开"会被反复
+    /// 写进接收区。这条连调两次，断言第二次不再追加。
+    #[test]
+    fn settle_announces_open_only_once_per_connection() {
+        let (channel, handle) = FakeChannel::new();
+        handle.defer_ready();
+        let mut app = ComTool {
+            channel: Some(Box::new(channel)),
+            channel_kind: Some(ConnectionKind::Serial),
+            connection_kind: ConnectionKind::Serial,
+            selected_port: "COM_TEST".to_string(),
+            ..ComTool::default()
+        };
+
+        app.open_connection();
+        handle.signal_ready();
+
+        app.settle_connection_state();
+        let after_first = app.receive_text.matches("已打开").count();
+
+        // 再结算两帧。
+        app.settle_connection_state();
+        app.settle_connection_state();
+        let after_more = app.receive_text.matches("已打开").count();
+
+        assert!(after_first > 0, "第一次结算应当补一条「已打开」");
+        assert_eq!(
+            after_first, after_more,
+            "通道就绪会持续很多帧，结算不能每帧都补一条「已打开」（接收区：{}）",
+            app.receive_text
+        );
+    }
+
     /// 换传输类型必须**拆掉重建**：旧对象是另一种传输，留着它就会留下一个
     /// 没人管的后台线程。
     ///
@@ -2130,6 +2510,104 @@ mod tests {
         app.auto_reconnect();
 
         assert!(!app.connected, "TCP 不该自动重连");
+    }
+
+    // —— 自动重连退避 ——
+
+    /// 纯函数的退避曲线：首轮 500 ms，之后翻倍，封顶 30 s。
+    ///
+    /// 断言的是**绝对值**而不是"后者不小于前者"——只看单调性的话，把基准从
+    /// 500 ms 改成 5 s 也会通过，而那会让正常重连的体感明显变差。
+    #[test]
+    fn reconnect_backoff_doubles_until_capped() {
+        assert_eq!(reconnect_backoff(0), Duration::from_millis(500));
+        assert_eq!(reconnect_backoff(1), Duration::from_millis(1000));
+        assert_eq!(reconnect_backoff(2), Duration::from_millis(2000));
+        assert_eq!(reconnect_backoff(3), Duration::from_millis(4000));
+        assert_eq!(reconnect_backoff(4), Duration::from_millis(8000));
+        assert_eq!(reconnect_backoff(5), Duration::from_millis(16000));
+        // 第 6 次会算到 32 s，被上限截到 30 s。
+        assert_eq!(reconnect_backoff(6), RECONNECT_MAX_DELAY);
+        assert_eq!(reconnect_backoff(30), RECONNECT_MAX_DELAY, "再大也只到上限");
+        // 极端值不得 panic 或溢出。
+        assert_eq!(reconnect_backoff(u32::MAX), RECONNECT_MAX_DELAY);
+    }
+
+    /// `Failed` 事件必须让连续失败计数递增——退避的输入就是它。
+    ///
+    /// 若这条计数不涨，退避会永远停在首轮 500 ms，等于退避根本没生效。
+    #[test]
+    fn channel_failure_increments_reconnect_failures() {
+        let (mut app, handle) = connected_app();
+
+        assert_eq!(app.reconnect_failures, 0, "刚连上时应为 0");
+        handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
+        app.receive_data();
+        assert_eq!(app.reconnect_failures, 1, "一次失败应记一次");
+
+        handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
+        app.receive_data();
+        assert_eq!(app.reconnect_failures, 2, "两次失败应累加");
+    }
+
+    /// 收到数据 = 连接真的通了，连续失败计数必须清零。
+    ///
+    /// 这是"串口乐观置位"下唯一可靠的**成功**证据：`connected` 在串口侧是
+    /// 提前置 true 的，光看它无法区分"打开了"与"待会儿才失败"。
+    #[test]
+    fn receiving_bytes_resets_reconnect_failures() {
+        let (mut app, handle) = connected_app();
+
+        handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
+        app.receive_data();
+        assert_eq!(app.reconnect_failures, 1);
+
+        handle.emit(ChannelEvent::Bytes(b"hello".to_vec()));
+        app.receive_data();
+        assert_eq!(
+            app.reconnect_failures, 0,
+            "收到数据即证明连接可用，计数应清零"
+        );
+    }
+
+    /// 连续失败到上限后，自动重连**彻底停手**，且恰好在跨过阈值时提示一次。
+    #[test]
+    fn reconnect_gives_up_after_max_attempts() {
+        let (mut app, handle) = connected_app();
+
+        for _ in 0..MAX_RECONNECT_ATTEMPTS {
+            handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
+            app.receive_data();
+        }
+        assert_eq!(app.reconnect_failures, MAX_RECONNECT_ATTEMPTS);
+        assert!(
+            app.receive_text.contains("自动重连已停止"),
+            "到顶时必须明确告诉用户不再自动重试：{}",
+            app.receive_text
+        );
+
+        // 再失败一次也不再多提示（提示只在跨过阈值那一刻出现一次）。
+        let note_count_before = app.receive_text.matches("自动重连已停止").count();
+        handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
+        app.receive_data();
+        assert_eq!(
+            app.receive_text.matches("自动重连已停止").count(),
+            note_count_before,
+            "「已停止」提示不应每帧重复刷屏"
+        );
+    }
+
+    /// 用户主动断开应把退避计数清零——下一轮连接从干净的 500 ms 开始。
+    #[test]
+    fn explicit_close_resets_reconnect_failures() {
+        let (mut app, handle) = connected_app();
+
+        handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
+        app.receive_data();
+        assert!(app.reconnect_failures > 0);
+
+        app.close_connection();
+        assert_eq!(app.reconnect_failures, 0, "主动断开后应清零");
     }
 
     // —— N1：RTS / DTR ——

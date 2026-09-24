@@ -81,8 +81,15 @@ pub(crate) struct ConnectionIndicator {
     /// 这里存**语义**（亮/灭）而不是颜色值：颜色是"亮/灭"的一种表现，将来若换成
     /// 灰/绿、或加第三态，判据这层不用动。真颜色由 [`ConnectionIndicator::color`] 给。
     pub is_on: bool,
-    /// 圆点右边的文字（已连接 / 未连接 / 已绑定 / 未绑定）。
+    /// 圆点右边的文字（已连接 / 未连接 / 已绑定 / 未绑定 / 正在打开）。
     pub label: &'static str,
+    /// 「已经发起打开、通道还没就绪」。
+    ///
+    /// 单独一个字段而不是把颜色写死成第三种：**亮度**与**文案**是两个维度——
+    /// "正在打开"的灯在语义上是"还没亮"，而它的文案又与"未连接"完全不同。
+    /// 把两者挤进一个 `label` 字段的写法，会让"恰好三种颜色"变成隐含约定，
+    /// 多一档就崩。
+    pub is_pending: bool,
 }
 
 impl ConnectionIndicator {
@@ -95,6 +102,11 @@ impl ConnectionIndicator {
             // 与 `Color32::GREEN` 不同，这里用略深一点的绿：纯 `#00FF00` 在浅色主题的
             // 白底上偏刺眼，`#22C55E` 这类更接近常见状态灯。
             Color32::from_rgb(0x22, 0xC5, 0x5E)
+        } else if self.is_pending {
+            // 「正在打开」用琥珀色：既不是"通"（绿）也不是"不通"（红）。用红会让
+            // 用户以为已经失败；用绿等于谎报已经连上（这正是要修的缺陷）。琥珀是
+            // 交通灯里"准备/等待"的那一档，语义上最贴切。
+            Color32::from_rgb(0xF5, 0xA6, 0x23)
         } else {
             // 同理，不用 `Color32::RED`（#FF0000），用饱和度略低的红。
             Color32::from_rgb(0xEF, 0x44, 0x44)
@@ -107,27 +119,44 @@ impl ConnectionIndicator {
 /// **UDP 单独一档**：UDP 是无连接的，`connected == true` 只表示"套接字绑定成功"，
 /// 并不代表对端在线。把它显示成"已连接"会让用户以为掉线会被发现——见
 /// `ConnectionKind` 的文档与 `sidebar.rs` 里同一个分叉。
+///
+/// **`opening` 这一档只有串口会有**（判定见 `ComTool::opening`）。它必须与
+/// "未连接"分开显示：串口打开失败时，界面上先出现的是"正在打开"、随后才是
+/// "未连接"+ 一条失败说明；两者合并会让用户以为"刚才根本没试过"。
 pub(crate) fn connection_indicator(
     connected: bool,
+    opening: bool,
     kind: ConnectionKind,
     s: &Strings,
 ) -> ConnectionIndicator {
+    if connected && opening {
+        // 与侧边栏的 `status_opening` 同源（那个带"状态:"前缀，这个是短词）。
+        return ConnectionIndicator {
+            is_on: false,
+            label: s.statusbar_opening,
+            is_pending: true,
+        };
+    }
     match (connected, kind) {
         (true, ConnectionKind::Udp) => ConnectionIndicator {
             is_on: true,
             label: s.statusbar_bound,
+            is_pending: false,
         },
         (true, _) => ConnectionIndicator {
             is_on: true,
             label: s.statusbar_connected,
+            is_pending: false,
         },
         (false, ConnectionKind::Udp) => ConnectionIndicator {
             is_on: false,
             label: s.statusbar_unbound,
+            is_pending: false,
         },
         (false, _) => ConnectionIndicator {
             is_on: false,
             label: s.statusbar_disconnected,
+            is_pending: false,
         },
     }
 }
@@ -152,7 +181,8 @@ impl ComTool {
     /// 外框仍由操作系统/egui 保留，无法也不应由这里去掉。
     pub(crate) fn show_status_bar(&mut self, ui: &mut Ui) {
         let s = self.language.strings();
-        let indicator = connection_indicator(self.connected, self.connection_kind, s);
+        let indicator =
+            connection_indicator(self.connected, self.opening(), self.connection_kind, s);
 
         // 本帧要显示的读数快照。与侧边栏一样，在绘制前统一取值，避免同一行里
         // 几个数字来自不同时刻（虽然这里读的都是即时值，但把口径写在一处更好维护）。
@@ -285,25 +315,25 @@ fn draw_status_dot(ui: &mut Ui, indicator: ConnectionIndicator) {
 mod tests {
     use super::*;
 
-    /// 四态各自显示什么，逐条钉住。
+    /// 五态各自显示什么，逐条钉住。
     ///
     /// 断言的是**标签文字**（来自文案表）而不是"画出了什么"——文案表本身就带着
     /// 中英两列，所以这一条顺带覆盖了英文界面。
     #[test]
-    fn indicator_covers_all_four_states() {
+    fn indicator_covers_all_five_states() {
         let zh = crate::app::Language::Zh.strings();
 
         // 串口 / TCP：连上就是"已连接"，断开就是"未连接"
-        let on = connection_indicator(true, ConnectionKind::Serial, zh);
+        let on = connection_indicator(true, false, ConnectionKind::Serial, zh);
         assert_eq!(on.label, zh.statusbar_connected);
         assert!(on.is_on, "连接成功时灯必须是亮的");
 
-        let off = connection_indicator(false, ConnectionKind::Serial, zh);
+        let off = connection_indicator(false, false, ConnectionKind::Serial, zh);
         assert_eq!(off.label, zh.statusbar_disconnected);
         assert!(!off.is_on, "断开时灯必须是灭的");
 
         // UDP 单独一档：绑定成功≠对端在线，措辞必须避开"已连接"
-        let udp_on = connection_indicator(true, ConnectionKind::Udp, zh);
+        let udp_on = connection_indicator(true, false, ConnectionKind::Udp, zh);
         assert_eq!(
             udp_on.label, zh.statusbar_bound,
             "UDP 绑定成功不能显示成「已连接」——那会让用户以为对端在线、掉线会被发现"
@@ -313,26 +343,54 @@ mod tests {
             "UDP 那一档必须与串口/TCP 的措辞不同，否则这个分叉等于没做"
         );
 
-        let udp_off = connection_indicator(false, ConnectionKind::Udp, zh);
+        let udp_off = connection_indicator(false, false, ConnectionKind::Udp, zh);
         assert_eq!(udp_off.label, zh.statusbar_unbound);
         assert_ne!(udp_off.label, zh.statusbar_disconnected);
+
+        // 第三档「正在打开」：`connected` 已经是真、通道还没就绪。
+        let pending = connection_indicator(true, true, ConnectionKind::Serial, zh);
+        assert_eq!(pending.label, zh.statusbar_opening);
+        assert!(
+            !pending.is_on,
+            "「正在打开」不能把灯点亮——点亮就是在说「已经连上」，而那正是要修的假阳性"
+        );
+        assert_ne!(
+            pending.label, zh.statusbar_connected,
+            "「正在打开」必须与「已连接」措辞不同，否则用户仍然以为已经连上、点了发送才发现发不出去"
+        );
+        assert_ne!(
+            pending.label, zh.statusbar_disconnected,
+            "「正在打开」不能与「未连接」同词：串口打开失败时界面会先出现「正在打开」、\
+             随后才是「未连接」+ 失败说明；合并成一档会让用户以为刚才根本没试过"
+        );
     }
 
     /// 灯的颜色必须跟着状态走，而不是写死一种。
     ///
     /// 这是最容易被写错的地方：把 `color()` 固定成绿色，其余全对——文字对、
-    /// 开关对，只有灯永远绿着。所以这条**单独**断言两个状态的颜色互不相同，
-    /// 并钉住"亮=偏绿、灭=偏红"这个方向（不是随便两种颜色都算过）。
+    /// 开关对，只有灯永远绿着。所以这条**单独**断言三个状态的颜色互不相同，
+    /// 并钉住方向（不是随便三种颜色都算过）。
     #[test]
     fn the_dot_changes_colour_with_the_state() {
         let zh = crate::app::Language::Zh.strings();
-        let on = connection_indicator(true, ConnectionKind::Serial, zh);
-        let off = connection_indicator(false, ConnectionKind::Serial, zh);
+        let on = connection_indicator(true, false, ConnectionKind::Serial, zh);
+        let off = connection_indicator(false, false, ConnectionKind::Serial, zh);
+        let pending = connection_indicator(true, true, ConnectionKind::Serial, zh);
 
         assert_ne!(
             on.color(),
             off.color(),
             "连接与断开必须用**不同**的颜色，否则灯是个装饰、不指示任何东西"
+        );
+        assert_ne!(
+            pending.color(),
+            on.color(),
+            "「正在打开」必须与「已连接」用不同颜色——同色等于谎报已经连上"
+        );
+        assert_ne!(
+            pending.color(),
+            off.color(),
+            "「正在打开」必须与「未连接」用不同颜色——同色会让用户以为已经失败"
         );
 
         // 方向断言：只断言"两色不同"会被"亮=红、灭=绿"这种反色实现骗过。
@@ -346,20 +404,28 @@ mod tests {
             red.r() > red.g() && red.r() > red.b(),
             "「灭」的圆点必须是红的（当前 {red:?}）"
         );
+        // 琥珀：红与绿都高、蓝低。这样"顺手复用红"或"顺手复用绿"都会被拦下。
+        let amber = pending.color();
+        assert!(
+            amber.r() > amber.b() && amber.g() > amber.b() && amber.r() != amber.g(),
+            "「正在打开」的圆点必须是琥珀色（红绿都高、蓝低，且红绿不等），当前 {amber:?}"
+        );
     }
 
     /// 英文界面下文案必须换成英文，但颜色不随语言变。
     #[test]
     fn indicator_follows_the_language() {
         let en = crate::app::Language::En.strings();
-        let on = connection_indicator(true, ConnectionKind::Serial, en);
-        let off = connection_indicator(false, ConnectionKind::Serial, en);
+        let on = connection_indicator(true, false, ConnectionKind::Serial, en);
+        let off = connection_indicator(false, false, ConnectionKind::Serial, en);
+        let pending = connection_indicator(true, true, ConnectionKind::Serial, en);
 
         assert_eq!(on.label, "Connected");
         assert_eq!(off.label, "Not connected");
+        assert_eq!(pending.label, "Opening");
 
         // 颜色是通用视觉信号，不该随界面语言变
-        let zh_on = connection_indicator(true, ConnectionKind::Serial, zh_strings());
+        let zh_on = connection_indicator(true, false, ConnectionKind::Serial, zh_strings());
         assert_eq!(
             on.color(),
             zh_on.color(),
@@ -382,7 +448,7 @@ mod tests {
         let zh = crate::app::Language::Zh.strings();
 
         for connected in [true, false] {
-            let bar = connection_indicator(connected, ConnectionKind::Udp, zh);
+            let bar = connection_indicator(connected, false, ConnectionKind::Udp, zh);
             // 侧边栏在 UDP 下用的是 status_bound / status_unbound；
             // 那两条是 "状态: 已绑定" 这种带前缀的长句，所以只能比"是否含绑定字样"。
             let sidebar_says_bound = bar.label == zh.statusbar_bound;
@@ -397,6 +463,32 @@ mod tests {
                 "UDP 下状态栏的绑定措辞与连接位不符"
             );
         }
+    }
+
+    /// **「正在打开」这一档必须在侧边栏与状态栏同时存在且同源**。
+    ///
+    /// 与上面那条 UDP 的守卫是同一个套路，防的也是同一类错：只给一边加档位、
+    /// 另一边照旧说"已连接"。判定用**两侧都必须有独立文案**这条硬事实：
+    /// 状态栏那个是短词、侧边栏那个带"状态:"前缀，两者不可能共用同一条。
+    ///
+    /// 之所以单独一条而不是并进 UDP 那条：`opening` 只与串口有关，而 UDP 那条
+    /// 的循环只跑 UDP，两者覆盖的场景不相交。
+    #[test]
+    fn status_bar_agrees_with_the_sidebar_on_opening() {
+        let zh = crate::app::Language::Zh.strings();
+
+        let bar = connection_indicator(true, true, ConnectionKind::Serial, zh);
+        assert_eq!(bar.label, zh.statusbar_opening);
+
+        assert_ne!(
+            zh.statusbar_opening, zh.status_opening,
+            "状态栏用短词、侧边栏带「状态:」前缀——两条现在一样了，说明有人把其中一处\
+             改成了另一处的值，两套措辞的分工就没了"
+        );
+        assert!(
+            zh.status_opening.contains("正在打开") && zh.statusbar_opening.contains("正在打开"),
+            "两侧的「正在打开」措辞必须都含这四个字，否则两处指示的语义会漂成两种说法"
+        );
     }
 
     /// 状态栏真的把状态词画了出来。
@@ -494,6 +586,7 @@ mod tests {
     fn status_dot_is_painted_as_a_filled_circle_in_the_right_colour() {
         let mut app = ComTool::default();
         let expected = connection_indicator(
+            false,
             false,
             ConnectionKind::Serial,
             crate::app::Language::Zh.strings(),

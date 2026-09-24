@@ -880,6 +880,147 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 **未验证**：顶部那一行只剩一颗侧边栏开关后，右侧会留白（原先那里是那颗按钮），
 观感需实机看一眼（见 §4② 第 68 项）。设置窗口的打开方式少了**一个**入口，功能未少。
 
+### 3.15 增量（2026-09-24：修掉 §5 的「既有缺陷三连」）
+
+**用户指令**：「把123该做的就做了吧，实施」——`GAP_ANALYSIS_VS_COMTOOL.md` §0 里
+列为「真正值得做的 4 项」中的前三项（第四项「发送文件」的硬前置就是①，留待下轮）。
+三项是一条**依赖链**，一起做最便宜。
+
+#### ① 待发队列背压（`src/communicationtrait.rs` + 三个通道实现）
+
+**问题**：串口 / TCP 的 `outgoing` 是**无界** `VecDeque`。设备长期不可写
+（驱动缓冲满 / 硬件流控掐住 / 对端不读）时用户每点一次发送就追加一段，只增不减，
+最终吃光内存；「定时发送」10 ms 一包会把这个过程加速到分钟级。
+
+**做法**：把上限与判定放进**共享的** `worker` 模块，三个实现都调它——各写一份
+迟早有一份走偏，而且偏的那份不会有人发现。
+
+| 新增 | 说明 |
+|---|---|
+| `worker::MAX_PENDING_BYTES = 1024 * 1024` | 1 MiB。串口工具的现实负载是"几十字节的指令 + 偶发几百 KB 的固件块" |
+| `worker::push_bounded(&mut VecDeque<(Vec<u8>, usize)>, Vec<u8>) -> Result<(), usize>` | 纯函数。**满了直接拒绝、不改动队列**；返回 `Err(在队字节数)` 供调用方拼消息 |
+| `worker::accept_transmit(queue, bytes, &Sender<ChannelEvent>)` | 包一层：拒绝时发一条 `ChannelEvent::Notice` |
+
+**两个判据上的取舍**：
+
+* **按合计字节限流，不按条数**。一条 4 MiB 报文与四千条 1 KiB 指令对内存的压力相同，
+  按条数会放过前者、误伤后者（`push_bounded_counts_total_bytes_not_entries` 钉住）。
+* **走 `Notice` 而不是 `Failed`**。队列满只说明"这一下没排上队"，通道本身好好的；
+  判成掉线会让界面从"已连接"跳走、还会把定时发送静默关掉。测试里
+  `accept_transmit_reports_notice_on_overflow` **见到 `Failed` 直接 panic**。
+
+#### ② 自动重连退避（`src/app.rs::auto_reconnect` + `src/receive.rs`）
+
+**问题**：固定 500 ms、永不放弃。串口被别的程序占用时每秒重试两次、每次新建一个
+后台线程，注定失败还刷屏。
+
+**做法**：
+
+* 纯函数 `reconnect_backoff(failures) -> Duration`：`500ms × 2^failures`，封顶 30 s。
+  抽成纯函数是为了能断言**绝对时长**（500/1000/2000/4000/8000/16000/30s/30s），
+  只断言"单调递增"会被"每次 +1ms"骗过。
+* 新字段 `reconnect_failures: u32`（`#[serde(skip)]`，**纯运行时不落盘**）。
+  在 `receive_data` 的 `Failed` 分支 `saturating_add(1)`，在 `Bytes` 分支**清零**
+  ——收到的字节是**不可伪造**的成功证据（串口 `open()` 是乐观的，`connected`
+  区分不了"打开了"和"待会儿才失败"）。
+* `MAX_RECONNECT_ATTEMPTS = 6`（`pub(crate)`，`receive.rs` 要引用）。到顶后
+  `auto_reconnect` 彻底停手，`receive_data` 在**刚跨过阈值那一帧**留一条
+  「自动重连已停止（连续失败 6 次），请手动点「连接」重试」——只在跨线时提示一次。
+* `close_connection` 把计数清零：主动断开是这一轮的结束，下次该是干干净净的一次尝试。
+* `Closed`（对端**正常**关闭）**不计**失败：它多半是用户主动关的或设备正常下线，
+  算进去会让"关掉再开"一次比一次慢。
+
+用户重新点「连接」即可恢复（`open_connection` 里……实际是 `close_connection` 清，
+断线路径则由 `Bytes` 清）。
+
+#### ③ `connected` 假阳性（串口侧）——本次最核心的一改
+
+**问题**：串口 `open()` 只要把后台线程 `spawn` 起来就返回 `Ok`，`open_connection`
+随即无条件 `connected = true`。打开一个**不存在**的端口时，界面先亮一下「已连接」、
+等 `Failed` 回来再跳回「未连接」；用户在亮着的那一瞬点发送，字节交给一个不存在的
+端口。`FEATURE_GAP_AND_PLAN.md` §4 标为「高」，一直挂着"要引入'正在打开'这个中间
+状态，属独立课题"。
+
+**做法**：中间状态**落到现有的三态位**上（`AtomicU8` 当初就是为此用 `u8` 而非 `bool`）。
+
+| 新增/改动 | 说明 |
+|---|---|
+| `worker::OPENING = 2` | 第三态：「后台线程已拉起，端口还没打开」 |
+| `SerialChannel::open()` | **先置 `OPENING` 再 spawn**。顺序即契约：UI 置位必须先于 spawn（否则 `open()` 返回后的空档看着像 `IDLE` = "没在跑" = "失败了"），也必须先于 worker 的 `ACTIVE`（否则端口开得快时会被踩回 `OPENING`） |
+| `worker_main` | `open_port()` **成功之后**才 `state.store(ACTIVE)`；失败直接 `Failed` 返回，`StateGuard` 归 `IDLE` |
+| `ByteChannel::is_ready()` | 新 trait 方法，**默认转发 `is_active()`**，**只有 `SerialChannel` 覆盖**。网络通道的 `open()` 在调用线程里就做完 connect / bind，返回 `Ok` 即已就绪，两者恒等——给它们各编一个实现没有意义，还会多出漂移点 |
+| `ComTool::channel_is_ready()` | 唯一判据：`self.channel.as_ref().is_some_and(\|c\| c.is_ready())`。**不按具体类型 downcast**——`is_ready` 就是那唯一的岔口 |
+| `ComTool::opening()` | `self.connected && !self.channel_is_ready()` |
+| `ComTool::settle_connection_state()` | 每帧一次（`ui()` 里紧跟 `receive_data()` 之后）。**只升不降**：通道变为不就绪 ≠ 掉线，那要由 `Failed`/`Closed` 说（只有它们知道"为什么"）。幂等靠 `announced_open` 一次性记账位 |
+| `announced_open: bool`（`#[serde(skip)]`） | "已打开/已连接那条提示是否补过"。通道就绪会持续很多帧，没它提示每帧刷一条。凡是 `connected` 变假的地方（`teardown_channel` / `Failed` / `Closed`）都清它，好让重连再补一次 |
+| `open_connection()` | 串口那句成功提示改成「**正在打开** …」，真"已打开"交给结算补。网络通道仍在当场报"已连接"，并把 `announced_open` 置真 |
+
+**发送闸门全部改看"通道就绪"**（`send_data` / `send_preset` / `tick_repeat_send`）
+——继续看 `connected` 就是把同一个缺陷挪到下一层：界面显示"已连接"、用户点发送、
+字节没有去处。`connected` 的语义收窄为"**已经发起过一次打开**"的记账位
+（决定 `close_connection` 有没有活干、`auto_reconnect` 要不要动、断线提示怎么分叉）。
+
+**界面新增第三档「正在打开」**：
+
+| 位置 | 呈现 |
+|---|---|
+| 侧边栏状态行 | `status_opening`（「状态: 正在打开」）——与 `status_connected` 并列的新一档 |
+| 侧边栏按钮旁 | `opening_hint`（「正在打开…」）。**与「请先选择端口」是两回事**：那个说"点下去不会有反应"，这个说"点了、正在等" |
+| 侧边栏连接按钮 | 「正在打开」归到**已发起**那一侧（显示「关闭串口」）——否则按钮读作「打开串口」却执行关闭，又一次"文案与动作相反" |
+| 状态栏 | `statusbar_opening`（短词「正在打开」）+ **琥珀色**圆点（`ConnectionIndicator::is_pending`） |
+
+`ConnectionIndicator` 新增 `is_pending` 字段（不是把颜色挤进 `label`）：**亮度**与
+**文案**是两个维度——"正在打开"的灯语义上是"还没亮"，而文案又与"未连接"完全不同。
+`color()` 三态：绿（通）/ 琥珀（等待）/ 红（不通）。
+
+**为什么「正在打开」必须单独一档**：并进"已连接"就是缺陷本身；并进"未连接"则会让
+一次失败的打开看起来像"根本没试过"（界面上是先「正在打开」、随后「未连接」+ 失败说明）。
+
+**新增测试 19 条**（272 → 291 passed / 1 ignored）：
+
+| 文件 | 测试 |
+|---|---|
+| `communicationtrait.rs::worker_tests`（+5） | `push_bounded_accepts_within_capacity` / `..._rejects_over_capacity_without_mutating`（断言**队列未被改动**，"先 push 再报错"的半吊子实现过不了）/ `..._boundary_is_inclusive` / `..._counts_total_bytes_not_entries` / `accept_transmit_reports_notice_on_overflow` |
+| `serial_impl/channel.rs`（+3） | `is_ready_is_false_until_the_port_is_actually_open` / `open_transitions_through_the_opening_state`（**直接读状态位**并禁止 `ACTIVE`——只看结果的版本会被"存 `IDLE` 而不是 `OPENING`"骗过）/ `is_ready_agrees_with_is_active_outside_the_opening_window` |
+| `app.rs`（+6） | `reconnect_backoff_doubles_until_capped`（断言绝对时长）/ `channel_failure_increments_reconnect_failures` / `receiving_bytes_resets_reconnect_failures` / `reconnect_gives_up_after_max_attempts` / `explicit_close_resets_reconnect_failures` / `serial_open_does_not_claim_connected_before_the_port_is_ready` / `sending_is_blocked_while_the_port_is_still_opening` / `settling_never_downgrades_an_established_connection` / `settle_wording_follows_the_connection_kind_not_the_channel_kind` / `settle_announces_open_only_once_per_connection` |
+| `status_bar.rs`（改写 1 条 + 新增 1 条） | `indicator_covers_all_four_states` → **`indicator_covers_all_five_states`**；`status_bar_agrees_with_the_sidebar_on_opening` |
+
+**测试替身新增"异步就绪"模式**：`FakeHandle::defer_ready()` / `signal_ready()`，
+让替身能扮**串口**（`open()` 后仍不就绪）。没有这一档，替身一律同步就绪，
+串口与 TCP 的行为不可区分，"UI 不得乐观置位"这条约定永远测不到。
+
+**空转验证（5 个注入，每个至少命中一条）**：
+
+| 注入 | 变红的测试 |
+|---|---|
+| 串口 `open()` 存 `ACTIVE` 而不是 `OPENING` | `is_ready_is_false_until_...`、`open_transitions_through_the_opening_state` |
+| 发送闸门回退成 `if !self.connected` | `sending_is_blocked_while_the_port_is_still_opening` |
+| `opening()` 恒为 `false` | `serial_open_does_not_claim_connected_...`、`sending_is_blocked_...` |
+| 结算去掉 `announced_open` 记账位 | `settle_announces_open_only_once_per_connection` |
+| 状态栏去掉 `opening` 那一档 | `indicator_covers_all_five_states` |
+
+⚠️ **一条诚实的记录**：第一个注入**不**命中那两个 app 层测试——因为替身的
+`is_ready()` 故意镜像它自己的 `active` 标志、与 `SerialChannel` 的内部实现无关。
+这是**设计如此**：那两条测的是"app 如何处置一个未就绪的通道"，`SerialChannel`
+自己的状态机由 serial 那三条覆盖。**不是漏测，但值得写明**，免得后来人以为
+"注入没全红 = 探针坏了"。
+
+**探针脚本踩到的坑（值得记）**：`shutil.copy2` 会连 mtime 一起复原，还原后若内容
+与注入前逐字节相同，**cargo 判定未变化 → 不重编 → 后续测试跑的是带注入的旧二进制**，
+于是"还原后仍绿"这条复核假红。修法是还原后显式 `touch` 一次源文件。
+
+**门禁**：`cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** ·
+`cargo test` **291 passed / 1 ignored** · clippy **8 条既有**（0 新增）·
+`cargo build --release` 后 exe 时间戳（16:18:04）**晚于**最后一次 `src/` 改动（16:17:08）。
+
+**未验证（需实机 · 见 §4② 新增第 69~71 项）**：串口打开失败的**那一瞬**是否
+确实先显示「正在打开」再跳「未连接」（而不跳过中间态）；琥珀色圆点的观感；
+以及"打开极快时是否根本不闪中间态"（预期：正常端口几乎看不到「正在打开」，
+这是**对的**——它只在真的等的时候出现）。
+
+**顺带的影响**：`GAP_ANALYSIS_VS_COMTOOL.md` §0 里「真正值得做 4 项」已完成 3 项，
+只剩「发送文件」（其硬前置①已完成，可以立项了）。
+
 ## 4. 未决事项
 
 ### ① GPLv3 合规（**已降为最低优先级**）
@@ -1214,6 +1355,53 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
     两者都做过**注入验证**：加回按钮 / 那一行整个不画 / 删掉「设置」菜单 / 删掉「文本」菜单，
     四种破坏各自都让对应测试**变红**。**但它们证明不了"右侧留白好不好看"**——只能人眼看。
 
+69. **「正在打开」这一档真的会出现吗（2026-09-24 加；本次③ 的核心目视项）**：
+    自动化只能证明状态机的**取值**对（`open_transitions_through_the_opening_state`），
+    证明不了**用户看得见**。请这样看：
+    - **正常端口**：点「连接」。预期**几乎看不到**「正在打开」——端口打开极快，
+      中间态一闪就过（或者压根没渲染到那一帧）。**这是对的**，不是缺陷；
+      界面应当直接显示「已连接」，圆点是绿的。
+    - **打开一个会被拒绝的端口**（被别的程序占有，或拔掉设备后留着的那个 COM 号）：
+      预期先看到「**正在打开**」（状态栏短词 + 侧边栏「状态: 正在打开」，
+      圆点**琥珀色**、不是绿也不是红），随后跳成「未连接」（红）+ 接收区一条
+      「串口错误: 打开 COMx 失败: …」。**关键是：全程不该出现绿色「已连接」**。
+      若闪了一下绿，说明 ③ 没修干净，请立刻回报。
+    - **按钮文案**：在「正在打开」的那一刻，侧边栏按钮应当已经读作「**关闭串口**」
+      （不是「打开串口」），旁边挂一句「正在打开…」。若按钮还是「打开串口」，
+      说明文案与动作又反了。
+    - **发送闸门**：在「正在打开」那一刻点「发送」，**不该**有任何字节出去、
+      「发送字节数」**不该**增长、输入框**不该**被清空。这是本次修的核心行为。
+    - **琥珀色的观感**：圆点颜色与绿/红是否区分得开、在浅色与深色主题下是否都看得清。
+    自动化部分由 5 条测试覆盖（serial 三条 + app 两条），并做过 5 个注入验证
+    （详见 §3.15）。**它们证明不了"用户看得见这一档"**——只能人眼看。
+
+70. **自动重连退避与"停手提示"（2026-09-24 加；行为可用假设备验，观感需人看）**：
+    - **退避**：让串口断开（拔线 / 关设备）后不手动重连，观察接收区：
+      重试不该再是"每秒两次"的刷屏，而应当**一次比一次稀疏**（0.5s → 1s → 2s → 4s → 8s → 16s）。
+      重试本身**不产生接收区文字**（旧实现也没有），所以判据是"界面没有变慢变卡"与
+      "插回去之后能在合理时间（≤ 退避间隔）内自动连上"。
+    - **停手**：连续失败 6 次后，接收区应当出现**恰好一条**
+      「自动重连已停止（连续失败 6 次），请手动点「连接」重试」，
+      此后**不再有任何重连尝试**（界面上看不出来，但 CPU 应当安静下来）。
+      若这条提示**重复出现多次**，说明"只在跨线那一帧提示"没做对。
+    - **恢复**：停手之后手动点「连接」并让它连上，之后**再**拔线，
+      应当重新开始自动重连（计数已清零）。
+    - **正常关闭不算失败**：TCP 下对端正常关闭走 `Closed`，**不该**被算进退避
+      （这条只能在 TCP 上验，见下）。
+
+71. **待发队列背压（2026-09-24 加；需要"设备侧不收数据"的场景）**：
+    - **怎么造这个场景**：把串口打开到一个**不会读数据**的设备（或让硬件流控
+      把发送掐住），然后反复点「发送」或开「定时发送」（10 ms 一包）。
+    - **预期**：攒到 1 MiB 之后，接收区出现一条
+      「串口: 待发队列已满（在队 … 字节，上限 1048576 字节），本条未发送」。
+      **关键：它是灰色的非致命提示，界面**不该**跳成「未连接」、定时发送**不该**被停掉**
+      （那是 `Notice` 与 `Failed` 的区别，也正是本次刻意选 `Notice` 的理由）。
+    - **不该看到**：程序内存持续增长（背压之前会一直涨）；也不该静默丢数据
+      （队列没满时排队、满了明确报错，两者都不丢）。
+    - 这条**比较难手工造**（要一个真的"只写不读"的对端），若不方便可以跳过，
+      但自动化已覆盖（`worker_tests` 5 条 + `accept_transmit_reports_notice_on_overflow`
+      断言收到的是 `Notice` 而非 `Failed`）。
+
 ### ③ 仓库状态
 
 `AI_comtool-rs` 的 `ai-refactor` 分支工作区是干净的。
@@ -1226,10 +1414,10 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 | 严重度 | 问题 | 位置 | 说明 |
 |---|---|---|---|
 | ~~**高**~~ **已修** | ~~**接收缓冲无上限**~~ | `receive.rs` 的 `trim_receive_logs` | 已于 2026-09-21 修复：新增 `max_log_chars`（默认 30000，0 = 不限）FIFO 淘汰，四份镜像各自按同一字符预算裁剪，支持从句中切开 `ColoredSpan`。接收日志仍不参与持久化（退出时保存大日志只会变慢，无明确需求） |
-| **高** | **`connected` 假阳性**（**只剩串口**） | `app.rs::open_connection` | 串口通道的 `open()` 只要把后台线程 spawn 起来就返回 `Ok`，随即 `connected = true`；真正打开失败要等 `Failed` 事件回来才置 false，UI 会闪一下「已连接」。网络侧（F4）**没有这个问题**：`TcpChannel` / `UdpChannel` 的 `open()` 会当场做完 connect / bind 再返回。修串口那一份要引入"正在打开"这个中间状态，属独立课题 |
-| 中 | 自动重连无退避 | `app.rs::auto_reconnect` | 每 500 ms 失败一次就新建线程，串口被占用时会持续重试。**只对串口生效**（F4 起对 TCP / UDP 直接返回，见约定 19 附近） |
-| 中 | 待发队列无上限 | `channel.rs::worker_main` 的 `outgoing` | 设备长期不可写 + 用户持续点发送时队列增长。原实现用 unbounded mpsc 同样无上限，未引入新问题，但应加背压 |
-| 中 | 写路径瞬态错误静默重试 | `channel.rs::worker_main` | `WouldBlock` / `Interrupted` 直接重试是合理的，但设备长期不接受数据时用户得不到提示。建议侧边栏显示「待发字节数」 |
+| ~~**高**~~ **已修** | ~~**`connected` 假阳性**（串口）~~ | `app.rs::open_connection` / `serial_impl::channel` | **已于 2026-09-24 修复**：串口通道引入第三态 `worker::OPENING`——`SerialChannel::open()` 先置 `OPENING` 再 spawn，后台线程**真正打开端口之后**才升到 `ACTIVE`。新增 `ByteChannel::is_ready()`（默认转发 `is_active()`，只有串口覆盖），`ComTool` 据此新增 `opening()` 与 `channel_is_ready()`；`open_connection` 不再无条件置位，发送闸门（`send_data` / `send_preset` / `tick_repeat_send`）全部改看"通道就绪"而不是 `connected`。界面新增第三档「正在打开」（侧边栏 `status_opening` + 状态栏 `statusbar_opening`，琥珀色圆点）。成功提示延后到 `settle_connection_state()` 补（一次性记账位 `announced_open`）。见 §3.15 |
+| ~~中~~ **已修** | ~~自动重连无退避~~ | `app.rs::auto_reconnect` | **已于 2026-09-24 修复**：新增 `reconnect_backoff(failures)` 纯函数（500 ms 起、指数翻倍、封顶 30 s）+ `reconnect_failures` 计数（`#[serde(skip)]`）+ `MAX_RECONNECT_ATTEMPTS = 6` 上限；到顶后彻底停手并在接收区留一条说明。**只对串口生效**（F4 起对 TCP / UDP 直接返回）。见 §3.15 |
+| ~~中~~ **已修** | ~~待发队列无上限~~ | `communicationtrait::worker` | **已于 2026-09-24 修复**：新增共享上限 `MAX_PENDING_BYTES = 1 MiB` 与纯函数 `push_bounded` / `accept_transmit`，串口 / TCP / UDP 三个 `worker_main` 统一走它。满了**拒绝入队**并报一条 `Notice`（非致命，不判掉线、不停定时发送），而不是继续吃内存或静默丢弃。见 §3.15 |
+| 中 | 写路径瞬态错误静默重试 | `channel.rs::worker_main` | `WouldBlock` / `Interrupted` 直接重试是合理的，但设备长期不接受数据时用户得不到提示。背压修好后已有"队列已满"的 `Notice` 兜底，但队列**未满而长期写不动**时仍无提示。建议侧边栏显示「待发字节数」 |
 | ~~低~~ **已清理** | ~~2 个未使用依赖~~ | `Cargo.toml` | 已于 P6 第 1 批移除：`tokio`（features = `["full"]`，零调用，明显拖慢编译）与 `egui-chinese-font`（零调用，中文字体已由 `main.rs::setup_fonts` 读系统字体实现）。`chrono` / `egui_plot` / `rfd` / `serde` / `serialport` 仍是活跃依赖 |
 | ~~低~~ **已修** | ~~侧边栏连接按钮的**文案与动作是反的**~~ | `sidebar.rs` | **已于 2026-09-21（F4）修复**：原来「已连接」时按钮显示「打开串口」、点下去却执行关闭，从上游继承而来（`e2039ff:src/sidebar.rs:157` 即在）。F4 重写这段时一并改成同向，并按传输类型分叉文案。见 §3.8 |
 | 低 | 8 条 clippy 风格警告 | `app.rs` / `receive.rs` | `derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`。全部位于**本任务未触及**的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写）。`cargo clippy --fix` 可一键清掉，但那会改动范围之外的代码，因此留作一次专门的"清警告"提交（P6 收尾不再处理） |

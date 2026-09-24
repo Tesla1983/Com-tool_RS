@@ -42,7 +42,9 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::communicationtrait::worker::{ACTIVE, IDLE, StateGuard, WorkerCommand, is_transient};
+use crate::communicationtrait::worker::{
+    ACTIVE, IDLE, StateGuard, WorkerCommand, accept_transmit, is_transient,
+};
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::net_impl::config::NetConfig;
 
@@ -125,7 +127,12 @@ fn worker_main(
         // ———— 接收指令 ————
         loop {
             match commands.try_recv() {
-                Ok(WorkerCommand::Transmit(bytes)) => outgoing.push_back((bytes, 0)),
+                // 与串口 / TCP 共用同一个带背压的入队函数（上限见
+                // `worker::MAX_PENDING_BYTES`）。多播 / 广播场景下内核发送缓冲
+                // 更容易满，无界队列同样会把内存吃光；满了拒绝并报一条 `Notice`。
+                Ok(WorkerCommand::Transmit(bytes)) => {
+                    let _ = accept_transmit(&mut outgoing, bytes, &events);
+                }
                 // 网络通道没有 RTS / DTR：`ByteChannel::set_line_state` 的默认实现
                 // 直接报 `Unsupported`，所以这条指令到不了这里。写出来只是让 match
                 // 穷尽——顺带说明"三个实现共用同一个指令枚举"是编译期强制同步的。

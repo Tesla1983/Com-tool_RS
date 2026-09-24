@@ -104,6 +104,8 @@ impl ComTool {
         // 参数，已画出的信息区也仍是本帧开始时的状态，不会前后矛盾。
         let port_name = self.selected_port.clone();
         let is_connected = self.connected;
+        // "已经发起打开、但通道还没就绪"——只有串口会有这一档。
+        let is_opening = self.opening();
         let current_baud = self.baud_rate;
         let hex_mode = self.hex_view;
         let color_mode = self.color_view;
@@ -130,11 +132,17 @@ impl ComTool {
 
         // 状态词按类型分叉：UDP 没有连接，说"已连接"会让用户以为对端在线、
         // 以为掉线会被发现（见 `ConnectionKind` 的文档）。
-        let status_text = match (is_connected, kind) {
-            (true, ConnectionKind::Udp) => s.status_bound,
-            (true, _) => s.status_connected,
-            (false, ConnectionKind::Udp) => s.status_unbound,
-            (false, _) => s.status_disconnected,
+        //
+        // 第三档「正在打开」只有串口会有（`is_opening` 的判定见 `ComTool::opening`）：
+        // 串口的 `open()` 只拉起后台线程，端口要到那里才真正打开。这一档**必须**
+        // 说出来——否则界面在那一小段里显示"已连接"，用户点「发送」才发现消息发不
+        // 出去，看起来就像程序坏了（那正是 FEATURE_GAP_AND_PLAN.md §4 记的假阳性）。
+        let status_text = match (is_connected, is_opening, kind) {
+            (true, true, _) => s.status_opening,
+            (true, false, ConnectionKind::Udp) => s.status_bound,
+            (true, false, _) => s.status_connected,
+            (false, _, ConnectionKind::Udp) => s.status_unbound,
+            (false, _, _) => s.status_disconnected,
         };
 
         // 「显示模式」那一行由「HEX / 文本」+「+ 颜色」+「+ 字节查看」拼成。也在这里
@@ -256,6 +264,10 @@ impl ComTool {
                     // 显示"打开串口"、点下去却是关闭）。类型不同则用不同的词——
                     // 串口说"打开/关闭"，TCP 说"连接/断开"，UDP 说"绑定/断开"
                     // （UDP 没有连接，说"已连接"会让人以为对端在线）。
+                    //
+                    // 「正在打开」也归到"已发起"那一侧：此时再显示「打开串口」会让
+                    // 用户以为刚才那下没生效而重复点，而按下去实际是**关闭**
+                    // （`self.connected` 为真）——又一次"文案与动作相反"。
                     ui.horizontal(|ui| {
                         let label = if is_connected {
                             if kind.uses_serial_settings() {
@@ -279,9 +291,14 @@ impl ComTool {
                             }
                         }
 
-                        // 参数没填全时按钮点下去会"没反应"（`connection_ready`
-                        // 拦下），所以要把原因摆出来。
-                        if !is_connected && !self.connection_ready() {
+                        // 「正在打开」要单独说一句。它与下面那条"参数没填全"是两回事：
+                        // 那个是**点下去不会有反应**，这个是**已经点了、正在等**，
+                        // 共用一条提示会把两件事说成一件事。
+                        if is_opening {
+                            ui.weak(s.opening_hint);
+                        } else if !is_connected && !self.connection_ready() {
+                            // 参数没填全时按钮点下去会"没反应"（`connection_ready`
+                            // 拦下），所以要把原因摆出来。
                             ui.weak(if kind.uses_serial_settings() {
                                 s.need_port_to_connect
                             } else {

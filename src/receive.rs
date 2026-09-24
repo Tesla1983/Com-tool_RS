@@ -977,16 +977,45 @@ impl ComTool {
                 match event {
                     ChannelEvent::Bytes(data) => {
                         received.extend_from_slice(&data);
+                        // 真正收到数据 = 连接确实是通的：把自动重连的"连续失败次数"
+                        // 清零。串口的 `open()` 是乐观置位（`connected = true` 先于
+                        // 真实打开结果），只看 `connected` 无法区分"打开了"与"待会儿
+                        // 才失败"，而收到字节是**不可伪造**的成功证据。
+                        self.reconnect_failures = 0;
                     }
                     ChannelEvent::Failed(msg) => {
                         notes.push(format!("{noun}错误: {msg}\n"));
                         self.connected = false;
+                        // 掉线了 ⇒ 后继重连若成功要重新补一条"已打开"。
+                        // 不清它的话，"连上→掉线→自动重连"之后那句成功提示永远不会
+                        // 再出现（记账位还停在上一轮的"已说过"）。
+                        self.announced_open = false;
                         channel_down = true;
+                        // 记一次失败，供指数退避使用（见 `ComTool::auto_reconnect`）。
+                        // 用 `saturating_add` 防溢出：纯计数器不该在极端情况下 panic。
+                        let before = self.reconnect_failures;
+                        self.reconnect_failures = self.reconnect_failures.saturating_add(1);
+                        // 刚好撞到上限的那一刻**留一条说明**：此后 `auto_reconnect`
+                        // 会彻底停手，用户必须知道"它不会再自动试了"，否则会一直
+                        // 盯着界面等一个不会发生的重连。只在"刚跨过阈值"时提示一次。
+                        if before < crate::app::MAX_RECONNECT_ATTEMPTS
+                            && self.reconnect_failures >= crate::app::MAX_RECONNECT_ATTEMPTS
+                            && self.connection_kind == crate::app::ConnectionKind::Serial
+                        {
+                            notes.push(format!(
+                                "自动重连已停止（连续失败 {} 次），请手动点「连接」重试\n",
+                                self.reconnect_failures
+                            ));
+                        }
                     }
                     ChannelEvent::Closed => {
                         notes.push(format!("{noun}连接已关闭\n"));
                         self.connected = false;
+                        self.announced_open = false;
                         channel_down = true;
+                        // 对端**正常**关闭不是"重连失败"——它多半是用户主动关的或
+                        // 设备正常下线，不该被算进退避次数里（算进去会让正常的
+                        // "关掉再开"变得一次比一次慢）。
                     }
                     ChannelEvent::Notice(msg) => {
                         // 非致命：只显示，**不动** `connected`、也不停定时发送。

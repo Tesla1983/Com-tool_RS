@@ -970,6 +970,42 @@ strings! {
         "(yok)",
         "(нет)",
         "(brak)";
+    // 侧边栏那一行状态词：串口已发起打开、但端口还没真正打开。
+    //
+    // 与「已连接」分开写是本条缺陷（`connected` 假阳性）的**呈现落点**：分开之前
+    // 用户在这一小段里看到的是"已连接"，点发送才发现发不出去。
+    status_opening: "状态: 正在打开", "Status: opening",
+        "狀態: 正在開啟",
+        "状態: 開いています",
+        "Estado: abriendo",
+        "Stato: apertura",
+        "Status: abrindo",
+        "Status: membuka",
+        "État : ouverture",
+        "Status: wird geöffnet",
+        "상태: 여는 중",
+        "Trạng thái: đang mở",
+        "Durum: açılıyor",
+        "Состояние: открывается",
+        "Stan: otwieranie";
+    // 连接按钮旁边那句"已经点了、正在等"的弱提示。
+    //
+    // 与「请先选择端口」是两回事，不能共用：那条说"点下去不会有反应"，这条说
+    // "点了，正在等结果"。
+    opening_hint: "正在打开…", "Opening…",
+        "正在開啟…",
+        "開いています…",
+        "Abriendo…",
+        "Apertura…",
+        "Abrindo…",
+        "Membuka…",
+        "Ouverture…",
+        "Wird geöffnet…",
+        "여는 중…",
+        "Đang mở…",
+        "Açılıyor…",
+        "Открывается…",
+        "Otwieranie…";
 
     // —— status_bar.rs：底部状态栏 ——
     // 这里刻意是**短词**（"已连接" / "未连接"），与侧边栏那套 "状态: 已连接" 分开写：
@@ -1032,6 +1068,23 @@ strings! {
         "Bağlı değil",
         "Не привязано",
         "Niepowiązano";
+    // 状态栏的短词版「正在打开」——与上面 `status_opening` 的唯一区别是没有
+    // "状态:"前缀（状态栏是常驻指示，前缀是噪音；这条口径与
+    // `statusbar_connected` 对 `status_connected` 完全一致）。
+    statusbar_opening: "正在打开", "Opening",
+        "正在開啟",
+        "開いています",
+        "Abriendo",
+        "Apertura",
+        "Abrindo",
+        "Membuka",
+        "Ouverture",
+        "Wird geöffnet",
+        "여는 중",
+        "Đang mở",
+        "Açılıyor",
+        "Открывается",
+        "Otwieranie";
     // 圆点**不是一个字符**，是用 `Color32` 画的实心圆（见 `status_bar.rs`）。
     // 早期版本用 🟢/🔴 两个 emoji，但 egui 的文本管线只光栅化字体的**矢量轮廓**，
     // 拿不到 COLR/CPAL 彩色图层，结果是两个大小不一、颜色灰黑的圆——不是字体选错，
