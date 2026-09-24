@@ -512,6 +512,100 @@ mod tests {
         }
     }
 
+    /// 中央区顶部那一行**不再有**「⚙ 设置」按钮（2026-09-24 用户要求删除）。
+    ///
+    /// 删它的理由：它与顶部菜单栏的「设置」菜单功能重复——两者都只是把
+    /// `show_settings` 置 true，点开的是同一个窗口。用户要求**保留顶部的**。
+    ///
+    /// ⚠️ 与 `menu_bar_has_no_send_menu` 同一个坑：**不能**断言"整个界面里不含
+    /// 「设置」二字"——菜单栏顶层菜单标题就叫「设置」（`s.settings_title`），
+    /// 设置窗口自己的标题也是它。所以这里只驱动**顶部那一行**
+    /// （`render_top_toolbar`），判据落在那块自己的落笔文字上。
+    ///
+    /// ⚠️ 用 `settings_button` 的**字面量**做判据，而不是引用字段——那个字段已经
+    /// 随这次的删除从文案表里删掉了，引用不到。字面量同时钉住"文案表里没有把
+    /// 按钮加回来"这层：若有人只把按钮加回 `render_top_toolbar`、又顺手把
+    /// `settings_button` 条目加回 `strings.rs`，两处都会撞在这条上。
+    #[test]
+    fn top_toolbar_has_no_settings_button() {
+        // 三个语种各来一遍：判据取自我们**知道**的按钮文案（中文一种），
+        // 其余两种是英文，用来验证按钮无论如何都不出现。
+        for language in [Language::Zh, Language::En] {
+            let mut app = ComTool {
+                language,
+                ..ComTool::default()
+            };
+            let s = app.language.strings();
+
+            let texts = top_toolbar_texts(&mut app);
+
+            // ① 删除的对象：那一行里不能再出现「设置」按钮（含齿轮符号那版）。
+            for ghost in ["⚙ 设置", "⚙ Settings"] {
+                assert!(
+                    !texts.iter().any(|t| t == ghost),
+                    "中央区顶部的「{ghost}」按钮又被画出来了——它与菜单栏「设置」菜单\
+                     功能重复，应当保持删除。实际画出的文字：{texts:?}"
+                );
+            }
+
+            // ② 活着的控件必须还在：侧边栏显隐开关。缺了它这一行就空了，
+            //    而"删干净"不该把另一边也删掉。
+            assert!(
+                texts.iter().any(|t| t == s.sidebar_toggle),
+                "顶部那一行少了侧边栏开关 {:?}——删除设置按钮不应连累它。实际：{texts:?}",
+                s.sidebar_toggle
+            );
+        }
+    }
+
+    /// 菜单栏的「设置」菜单**仍然提供**打开设置窗口的入口。
+    ///
+    /// 与 [`top_toolbar_has_no_settings_button`] 配对：那条证明"重复的那颗按钮删了"，
+    /// 这条证明"剩下的那一个还在"。只删不查的话，把菜单栏入口一起删掉也会全绿，
+    /// 用户就再也打不开设置窗口了。
+    #[test]
+    fn menu_bar_still_offers_settings() {
+        for language in [Language::Zh, Language::En] {
+            let mut app = ComTool {
+                language,
+                ..ComTool::default()
+            };
+            let s = app.language.strings();
+
+            let texts = menu_bar_texts(&mut app);
+
+            assert!(
+                texts.iter().any(|t| t == s.settings_title),
+                "菜单栏少了「设置」菜单——那是打开设置窗口的唯一入口了。实际：{texts:?}"
+            );
+            // 顺带钉住顶层菜单的整体集合：删按钮不该动这一行。
+            for kept in [s.menu_file, s.menu_view, s.text] {
+                assert!(
+                    texts.iter().any(|t| t == kept),
+                    "菜单栏少了 {kept:?}。实际：{texts:?}"
+                );
+            }
+        }
+    }
+
+    /// 驱动**中央区顶部那一行**并取出其中落笔的所有文字。
+    fn top_toolbar_texts(app: &mut ComTool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.render_top_toolbar(ui);
+        });
+
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                texts.push(text_shape.galley.text().to_owned());
+            }
+        }
+
+        out.textures_delta.clear();
+        texts
+    }
+
     /// 驱动**菜单栏自身**并取出其中落笔的所有文字。
     ///
     /// 与 [`painted_texts`]（驱动设置窗口）是两份不同的驱动入口：菜单栏的

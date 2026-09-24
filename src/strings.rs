@@ -160,20 +160,6 @@ strings! {
         "☰ Kenar çubuğu",
         "☰ Боковая панель",
         "☰ Pasek boczny";
-    settings_button: "⚙ 设置", "⚙ Settings",
-        "⚙ 設定",
-        "⚙ 設定",
-        "⚙ Ajustes",
-        "⚙ Impostazioni",
-        "⚙ Configurações",
-        "⚙ Pengaturan",
-        "⚙ Paramètres",
-        "⚙ Einstellungen",
-        "⚙ 설정",
-        "⚙ Cài đặt",
-        "⚙ Ayarlar",
-        "⚙ Настройки",
-        "⚙ Ustawienia";
 
     // —— app.rs：接收设置行 ——
     receive_settings: "接收设置:", "Receive:",

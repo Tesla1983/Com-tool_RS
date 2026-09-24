@@ -1342,6 +1342,24 @@ impl ComTool {
             self.send_history_menu(ui);
         });
     }
+
+    /// 中央区最上面那一行：侧边栏显隐开关（左）+ 「⚙ 设置」按钮（右）。
+    ///
+    /// 从 [`ComTool::ui`] 里抽出来的理由与 [`ComTool::render_send_presets`] 相同：
+    /// `ui()` 要收一个无头测试构造不出的 `eframe::Frame`，写死在里面等于永不被
+    /// `cargo test` 画到。这个方法只收 `&mut Ui`，可以整行走一遍
+    /// （见 `panels::tests::top_toolbar_opens_the_settings_window`）。
+    ///
+    /// ⚠️ **右侧那一颗「⚙ 设置」按钮已经在 2026-09-24 删除**：它与顶部菜单栏的
+    /// 「设置」菜单功能重复（两者都只是把 `show_settings` 置 true），按用户要求
+    /// **保留顶部的**。这里现在只画左侧那颗侧边栏显隐开关。要打开设置请走菜单栏，
+    /// 或在代码里置 `self.show_settings = true`。
+    pub(crate) fn render_top_toolbar(&mut self, ui: &mut egui::Ui) {
+        let s = self.language.strings();
+        ui.horizontal(|ui| {
+            ui.toggle_value(&mut self.sidebar_open, s.sidebar_toggle);
+        });
+    }
 }
 
 impl eframe::App for ComTool {
@@ -1427,15 +1445,7 @@ impl eframe::App for ComTool {
             self.show_settings_window(ui);
             self.show_info_window(ui);
 
-            ui.horizontal(|ui| {
-                ui.toggle_value(&mut self.sidebar_open, s.sidebar_toggle);
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(s.settings_button).clicked() {
-                        self.show_settings = true;
-                    }
-                });
-            });
+            self.render_top_toolbar(ui);
 
             ui.separator();
 
