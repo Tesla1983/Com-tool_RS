@@ -466,6 +466,123 @@ mod tests {
         texts
     }
 
+    /// 顶部菜单栏**不再提供「发送」菜单**（2026-09-24 用户要求删除）。
+    ///
+    /// 删它的理由：它的内容（发送格式 / 行尾 / 定时发送 + 间隔 / 发送历史）与
+    /// 「发送区」表头那一行右侧的控件**逐项重复**，连排列顺序都一样。同一批设置
+    /// 摆两套入口，用户改了一处会怀疑另一处是否同步。
+    ///
+    /// ⚠️ 为什么不能断言"画出的文字里不含 `send_title`"——**那会是空转的**。
+    /// `send_title`（「发送」）在别处还要用：中央区那颗发送按钮、设置窗口的分节标题
+    /// 都写这个字。这些文字**不在菜单栏这一帧里**，但一旦将来有人把菜单加回来、
+    /// 再把断言写成"整帧不含"就恒真了——它证明不了菜单栏的状态。这里刻意只
+    /// **驱动菜单栏**（`show_menu_bar`），断言的就是它的顶层按钮集合。
+    ///
+    /// ⚠️ 第二个坑：菜单是**折叠**的，未点击时子项（格式、行尾……）根本不落笔。
+    /// 所以"子项没画出来"同样证明不了菜单被删——真正能区分的是**顶层按钮那一行**
+    /// 里还有没有「发送」这个按钮。
+    #[test]
+    fn menu_bar_has_no_send_menu() {
+        let app_langs = [Language::Zh, Language::En];
+        for language in app_langs {
+            let mut app = ComTool {
+                language,
+                ..ComTool::default()
+            };
+            let s = app.language.strings();
+
+            let texts = menu_bar_texts(&mut app);
+
+            // ① 删除的对象：顶层不能再出现「发送」这个菜单标题。
+            assert!(
+                !texts.iter().any(|t| t == s.send_title),
+                "菜单栏顶层又画出了「发送」菜单 ({:?})——它的内容与发送区表头重复，\
+                 应当保持删除。实际画出的文字：{texts:?}",
+                s.send_title
+            );
+
+            // ② 活着的菜单必须还在（证明"删干净"不是"整个菜单栏都空了"）。
+            //    缺了这几个同样会漏掉功能，只是漏的是另一边。
+            for kept in [s.menu_file, s.settings_title, s.menu_view, s.text] {
+                assert!(
+                    texts.iter().any(|t| t == kept),
+                    "菜单栏少了 {kept:?}——删除「发送」不应连累其它菜单。实际：{texts:?}"
+                );
+            }
+        }
+    }
+
+    /// 驱动**菜单栏自身**并取出其中落笔的所有文字。
+    ///
+    /// 与 [`painted_texts`]（驱动设置窗口）是两份不同的驱动入口：菜单栏的
+    /// 「有没有某个菜单」只能在菜单栏这一帧里判定，不能拿整帧输出代替——整帧里
+    /// 混着中央区的发送按钮（同样写着「发送」），会把判据污染成恒真。
+    fn menu_bar_texts(app: &mut ComTool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.show_menu_bar(ui);
+        });
+
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                texts.push(text_shape.galley.text().to_owned());
+            }
+        }
+
+        out.textures_delta.clear();
+        texts
+    }
+
+    /// 发送区表头那一行右侧**仍然是**这四项设置的唯一入口。
+    ///
+    /// 与 [`menu_bar_has_no_send_menu`] 配对：那条证明"菜单删了"，这条证明
+    /// "功能没丢"。只删不查的话，把发送区表头一起删掉也会全绿。
+    ///
+    /// 做法是把发送区那一行画出来，断言其中同时出现 格式 / 行尾 这两组单选按钮的
+    /// 选项（三档格式与三档行尾各自取一个代表），以及"定时发送"这一项。它们都是
+    /// 文案表里的条目，因此中英各测一遍。
+    #[test]
+    fn send_area_header_keeps_the_send_settings() {
+        for language in [Language::Zh, Language::En] {
+            let mut app = ComTool {
+                language,
+                ..ComTool::default()
+            };
+            let s = app.language.strings();
+
+            let texts = send_area_header_texts(&mut app);
+
+            // 格式三档：至少要能看到 HEX 与 Escape 这两个选项（Text 与其它词重名，
+            // 不拿它当判据）。
+            for expected in [s.hex, s.escape, s.ending_lf, s.ending_crlf, s.repeat_send] {
+                assert!(
+                    texts.iter().any(|t| t == expected),
+                    "发送区表头少了 {expected:?}——删掉菜单栏「发送」时把功能也删掉了。\
+                     实际：{texts:?}"
+                );
+            }
+        }
+    }
+
+    /// 驱动**发送区表头那一行**（格式 / 行尾 / 定时 / 历史所在处）并取出文字。
+    fn send_area_header_texts(app: &mut ComTool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.render_send_settings_row(ui);
+        });
+
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                texts.push(text_shape.galley.text().to_owned());
+            }
+        }
+
+        out.textures_delta.clear();
+        texts
+    }
+
     /// 字体档位必须真的作用于**设置窗口自己**，而不只是接收区。
     ///
     /// 这条把两半接起来测：界面实际用的字号应当等于当前档位的字号。如果哪天有人把

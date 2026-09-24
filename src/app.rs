@@ -1302,6 +1302,46 @@ impl ComTool {
             self.send_preset(index);
         }
     }
+
+    /// 发送区表头那一行：格式 / 行尾 / 定时发送 + 间隔 / 发送历史。
+    ///
+    /// 从 [`ComTool::ui`] 里抽出来的理由与 [`ComTool::render_send_presets`] 相同：
+    /// `ui()` 要收一个无头测试构造不出的 `eframe::Frame`，写死在里面等于永不被
+    /// `cargo test` 画到。这个方法只收 `&mut Ui`，可以整行走一遍
+    /// （见 `panels::tests::send_area_header_keeps_the_send_settings`）。
+    ///
+    /// ⚠️ 这一行是**发送格式 / 行尾 / 定时 / 历史四项设置的唯一入口**
+    /// （2026-09-24 删掉菜单栏「发送」菜单之后）。删任何一项之前先想清楚用户去哪改。
+    pub(crate) fn render_send_settings_row(&mut self, ui: &mut egui::Ui) {
+        let s = self.language.strings();
+        ui.horizontal(|ui| {
+            ui.label(s.send_area);
+            ui.separator();
+            ui.label(s.format);
+            send_format_radios(ui, &mut self.send_format, s);
+            ui.separator();
+            ui.label(s.line_ending);
+            send_line_ending_radios(ui, &mut self.send_line_ending, s);
+            ui.separator();
+            if ui.checkbox(&mut self.repeat_send, s.repeat_send).changed() && self.repeat_send {
+                // 勾上的那一刻只起步计时，不立刻发一包（见 `tick_repeat_send`）
+                self.last_repeat_send = None;
+            }
+            if self.repeat_send {
+                ui.add(
+                    egui::DragValue::new(&mut self.repeat_interval_ms)
+                        .range(
+                            crate::send::MIN_REPEAT_INTERVAL_MS
+                                ..=crate::send::MAX_REPEAT_INTERVAL_MS,
+                        )
+                        .speed(10.0)
+                        .suffix(" ms"),
+                );
+            }
+            ui.separator();
+            self.send_history_menu(ui);
+        });
+    }
 }
 
 impl eframe::App for ComTool {
@@ -1455,35 +1495,7 @@ impl eframe::App for ComTool {
 
             if self.show_send_panel {
                 // 发送区
-                ui.horizontal(|ui| {
-                    ui.label(s.send_area);
-                    ui.separator();
-                    ui.label(s.format);
-                    send_format_radios(ui, &mut self.send_format, s);
-                    ui.separator();
-                    ui.label(s.line_ending);
-                    send_line_ending_radios(ui, &mut self.send_line_ending, s);
-                    ui.separator();
-                    if ui.checkbox(&mut self.repeat_send, s.repeat_send).changed()
-                        && self.repeat_send
-                    {
-                        // 勾上的那一刻只起步计时，不立刻发一包（见 `tick_repeat_send`）
-                        self.last_repeat_send = None;
-                    }
-                    if self.repeat_send {
-                        ui.add(
-                            egui::DragValue::new(&mut self.repeat_interval_ms)
-                                .range(
-                                    crate::send::MIN_REPEAT_INTERVAL_MS
-                                        ..=crate::send::MAX_REPEAT_INTERVAL_MS,
-                                )
-                                .speed(10.0)
-                                .suffix(" ms"),
-                        );
-                    }
-                    ui.separator();
-                    self.send_history_menu(ui);
-                });
+                self.render_send_settings_row(ui);
 
                 let send_edit_id = egui::Id::new("send_input");
 

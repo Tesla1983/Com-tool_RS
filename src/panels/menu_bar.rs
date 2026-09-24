@@ -1,4 +1,8 @@
-//! 顶部菜单栏：文件（信息 / 退出）· 设置（设置窗口 / 主题）· 视图（面板显隐 / 显示模式）。
+//! 顶部菜单栏：文件（信息 / 退出）· 设置（设置窗口 / 主题）· 视图（面板显隐 / 显示模式）·
+//! 文本（编码）。
+//!
+//! **没有「发送」菜单**：它的内容与「发送区」表头那一行完全重复，2026-09-24 按用户
+//! 要求删除。发送格式 / 行尾 / 定时发送 / 发送历史都在发送区里，功能一个没少。
 //!
 //! 菜单栏必须先于其它面板绘制：egui 的面板是"抢占"布局的，先画的先占用整幅宽度，
 //! 顶部栏放在最前才能横跨整个窗口。
@@ -81,35 +85,19 @@ impl ComTool {
                     ui.weak(s.encoding_gbk_note_menu);
                 });
 
-                ui.menu_button(s.send_title, |ui| {
-                    ui.label(s.format);
-                    send_format_radios(ui, &mut self.send_format, s);
-                    ui.separator();
-                    ui.label(s.line_ending);
-                    send_line_ending_radios(ui, &mut self.send_line_ending, s);
-                    ui.separator();
-                    if ui.checkbox(&mut self.repeat_send, s.repeat_send).changed()
-                        && self.repeat_send
-                    {
-                        // 勾上的那一刻只起步计时，不立刻发一包（见 `ComTool::tick_repeat_send`）
-                        self.last_repeat_send = None;
-                    }
-                    if self.repeat_send {
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::DragValue::new(&mut self.repeat_interval_ms)
-                                    .range(
-                                        crate::send::MIN_REPEAT_INTERVAL_MS
-                                            ..=crate::send::MAX_REPEAT_INTERVAL_MS,
-                                    )
-                                    .speed(10.0)
-                                    .suffix(" ms"),
-                            );
-                        });
-                    }
-                    ui.separator();
-                    self.send_history_menu(ui);
-                });
+                // 这里**故意没有**「发送」菜单（2026-09-24 用户要求删除）。
+                //
+                // 它原先装的是：发送格式单选、行尾单选、定时发送 + 间隔、发送历史——
+                // 与「发送区」表头那一行右侧的控件**逐项重复**（格式 / 行尾 / 定时 /
+                // 历史一个不少，连排列顺序都一样）。同一批设置摆两套入口，用户改了一处
+                // 会怀疑另一处是否同步，而两处改的其实是**同一份字段**（直接绑 `self.*`），
+                // 从不存在不同步——既然如此，多出来的那套就只剩干扰。
+                //
+                // **被删掉的是什么**：只有菜单栏这个入口。发送格式 / 行尾 / 定时 / 历史
+                // 这四项功能**一个没少**，全都在发送区表头那一行里。想改这些设置请去那里。
+                //
+                // 复活条件：若将来发送区被整体隐藏（`show_send_panel == false`）时仍希望
+                // 能改发送格式，再考虑加回来——但那时应先想清楚"没有发送区时改格式给谁用"。
             });
         });
 
