@@ -898,28 +898,41 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 | 新增 | 说明 |
 |---|---|
 | `worker::MAX_PENDING_BYTES = 1024 * 1024` | 1 MiB。串口工具的现实负载是"几十字节的指令 + 偶发几百 KB 的固件块" |
-| `worker::push_bounded(&mut VecDeque<(Vec<u8>, usize)>, Vec<u8>) -> Result<(), usize>` | 纯函数。**满了直接拒绝、不改动队列**；返回 `Err(在队字节数)` 供调用方拼消息 |
-| `worker::accept_transmit(queue, bytes, &Sender<ChannelEvent>)` | 包一层：拒绝时发一条 `ChannelEvent::Notice` |
+| `worker::PendingLedger` | **两侧共享**的在队字节数（`Arc<AtomicUsize>`）。上限判定就落在这里：`reserve` 用 CAS 循环，边界闭（恰好等于上限接受），拒绝时把在队字节数带出来拼消息 |
+| `worker::submit(ledger, &Sender<WorkerCommand>, bytes, noun)` | 三个通道的 `write()` 共用：**先预约额度 → 再投递 → 投递失败退还** |
+| `worker::retire_finished_chunk(&mut queue, finished, &ledger)` | 队首整段写完后**出队 + 归还额度**——两件事必须一起做，合成一处 |
+| 三个 `worker_main` | `Transmit` 只做 `push_back`，**不再判上限**（判定只有一处实现；判两遍迟早分叉成两套口径） |
 
 **两个判据上的取舍**：
 
 * **按合计字节限流，不按条数**。一条 4 MiB 报文与四千条 1 KiB 指令对内存的压力相同，
-  按条数会放过前者、误伤后者（`push_bounded_counts_total_bytes_not_entries` 钉住）。
-* **走 `Notice` 而不是 `Failed`**。队列满只说明"这一下没排上队"，通道本身好好的；
-  判成掉线会让界面从"已连接"跳走、还会把定时发送静默关掉。测试里
-  `accept_transmit_reports_notice_on_overflow` **见到 `Failed` 直接 panic**。
+  按条数会放过前者、误伤后者（`ledger_counts_total_bytes_not_entries` 钉住）。
+* **数的是"交出去、但一个字节都还没写出去"的那一段**（含还在 mpsc 里没被取走的），
+  不是"后台队列里的"——压着没发出去的就是压着。
 
-**⚠️ 读码时发现的新问题（2026-09-24，未修，已记入 §5）**：队列满的判定在**后台线程**
-里做，而 `SerialChannel::write()` 只把命令投进 mpsc 就直接返回 `Ok`。于是 app 层
-`transmit()` 照常执行 `tx_bytes += len` —— **接收区的提示说"本条未发送"、状态栏的发送
-字节数却涨了**，与 `push_bounded` 注释里"界面上的『发送字节计数』也才不会记账"的意图
-直接矛盾（也与 `transmit` 注释里 N4 那句"排队时计数会显示出一个并不成立的『已发送』"
-矛盾：异步投递下 `Ok` 本身就只是"已排队"）。
-两条修法，**各有代价，待定**：
-① **判定前移**到调用线程（通道里放一个共享的"在队字节数"，`write()` 直接返回 `Err`）
-—— 计数天然正确，但会架空 worker 里那条 `Notice` 路径（刚为它写过测试与理由）；
-② **由后台线程上报实际写出的字节**（新增一个事件），app 只按上报计数 —— 更贴合 N4
-"数据确实出去了才计数"的原意，队列里的 `Notice` 设计原样保留，代价是多一个事件。
+#### ①附 背压的判定从后台线程挪到调用线程（同日第二轮，亦即本节初版的订正）
+
+初版把上限判在**后台线程的队列**上（`push_bounded` / `accept_transmit`，拒绝时发一条
+`Notice`）。当天读码就发现**信息回路是单向的**：判定结果回不到调用线程，`write()`
+一律返回 `Ok`，于是 `app::ComTool::transmit` 照常 `tx_bytes += len`、`send_data` 照常
+清空输入框——用户会看到「本条未发送」的提示与**仍在增长**的发送计数并存，刚敲的内容
+还被清掉。这与 `transmit` 注释里 N4 那句"排队时计数会显示出一个并不成立的『已发送』"
+直接矛盾（异步投递下 `Ok` 本身只是"已排队"）。
+
+**改成账本之后两个症状一起消失，而且 `app.rs` 一行都不用改**——它本来就是"`Ok` 才记账、
+`Ok` 才清空"。`push_bounded` / `accept_transmit` 及其 5 条测试已删除，换成 `worker_tests`
+的 9 条账本测试。
+
+**`Notice` 那条路随之退场**：队列满不再由后台线程报，而是 `write()` **当场**返回
+`Err(待发队列已满（在队 N 字节，上限 1048576 字节），本条未发送)`，走 `app` 既有的
+"发送失败"通路显示在接收区。文案刻意与原来逐字一致（同一个判据不该长出两种说法），
+差别只在**当场说**。`ChannelEvent::Notice` 本身仍在用（串口设置 RTS / DTR 失败那条
+非致命提示）。
+
+⚠️ **一处必须记住的耦合**：`open()` 里必须 `ledger.reset()`。通道对象在连接类型不变时
+会被**就地复用**（重连 = 同一个句柄再 `open` 一次），而 `close()` 时队列里那些**确实没
+写出去**的数据的额度不会被归还——不清的话，用户第二次连上会"什么都没发就报队列满"。
+三个实现各有一条 `reopening_the_channel_clears_the_stale_quota` 钉住。
 
 #### ② 自动重连退避（`src/app.rs::auto_reconnect` + `src/receive.rs`）
 
@@ -992,9 +1005,9 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 
 | 文件 | 测试 |
 |---|---|
-| `communicationtrait.rs::worker_tests`（+5） | `push_bounded_accepts_within_capacity` / `..._rejects_over_capacity_without_mutating`（断言**队列未被改动**，"先 push 再报错"的半吊子实现过不了）/ `..._boundary_is_inclusive` / `..._counts_total_bytes_not_entries` / `accept_transmit_reports_notice_on_overflow` |
+| `communicationtrait.rs::worker_tests`（+5） | ~~`push_bounded_accepts_within_capacity` / `..._rejects_over_capacity_without_mutating`（断言**队列未被改动**，"先 push 再报错"的半吊子实现过不了）/ `..._boundary_is_inclusive` / `..._counts_total_bytes_not_entries` / `accept_transmit_reports_notice_on_overflow`~~ —— **这 5 条已作废**，同日第二轮换成账本方案的 9 条（见 ①附 与 ④），保留在此只为解释"为什么 291 这个数字后来变了" |
 | `serial_impl/channel.rs`（+3） | `is_ready_is_false_until_the_port_is_actually_open` / `open_transitions_through_the_opening_state`（**直接读状态位**并禁止 `ACTIVE`——只看结果的版本会被"存 `IDLE` 而不是 `OPENING`"骗过）/ `is_ready_agrees_with_is_active_outside_the_opening_window` |
-| `app.rs`（+6） | `reconnect_backoff_doubles_until_capped`（断言绝对时长）/ `channel_failure_increments_reconnect_failures` / `receiving_bytes_resets_reconnect_failures` / `reconnect_gives_up_after_max_attempts` / `explicit_close_resets_reconnect_failures` / `serial_open_does_not_claim_connected_before_the_port_is_ready` / `sending_is_blocked_while_the_port_is_still_opening` / `settling_never_downgrades_an_established_connection` / `settle_wording_follows_the_connection_kind_not_the_channel_kind` / `settle_announces_open_only_once_per_connection` |
+| `app.rs`（+10） | `reconnect_backoff_doubles_until_capped`（断言绝对时长）/ `channel_failure_increments_reconnect_failures` / `receiving_bytes_resets_reconnect_failures` / `reconnect_gives_up_after_max_attempts` / `explicit_close_resets_reconnect_failures` / `serial_open_does_not_claim_connected_before_the_port_is_ready` / `sending_is_blocked_while_the_port_is_still_opening` / `settling_never_downgrades_an_established_connection` / `settle_wording_follows_the_connection_kind_not_the_channel_kind` / `settle_announces_open_only_once_per_connection` |
 | `status_bar.rs`（改写 1 条 + 新增 1 条） | `indicator_covers_all_four_states` → **`indicator_covers_all_five_states`**；`status_bar_agrees_with_the_sidebar_on_opening` |
 
 **测试替身新增"异步就绪"模式**：`FakeHandle::defer_ready()` / `signal_ready()`，
@@ -1022,7 +1035,7 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 于是"还原后仍绿"这条复核假红。修法是还原后显式 `touch` 一次源文件。
 
 **门禁**：`cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** ·
-`cargo test` **291 passed / 1 ignored** · clippy **8 条既有**（0 新增）·
+`cargo test` **291 passed / 1 ignored**（**当日第三轮后为 302**，见 ④）· clippy **8 条既有**（0 新增）·
 `cargo build --release` 后 exe 时间戳（16:18:04）**晚于**最后一次 `src/` 改动（16:17:08）。
 
 **未验证（需实机 · 见 §4② 新增第 69~71 项）**：串口打开失败的**那一瞬**是否
@@ -1032,6 +1045,80 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 
 **顺带的影响**：`GAP_ANALYSIS_VS_COMTOOL.md` §0 里「真正值得做 4 项」已完成 3 项，
 只剩「发送文件」（其硬前置①已完成，可以立项了）。
+
+#### ④ TCP 写侧改为非阻塞（同日第三轮：修掉 §5「TCP 写侧没有写超时」那一行）
+
+**问题**：`TcpChannel::open()` 只调了 `set_read_timeout`，**写侧是阻塞 socket、没有
+`SO_SNDTIMEO`**（串口那边 `.timeout(10ms)` 在 Windows 上同时落成
+`WriteTotalTimeoutConstant`，所以**只有 TCP 有这个问题**）。两条后果：
+
+1. 对端**彻底停读**时 `send` 永不返回（实测灌满约 2.75 MB 内核缓冲后 **2 分 36 秒**无进展）
+   ⇒ worker 卡在 `write` 上 ⇒ 它再也不会回到主循环，**1 MiB 上限形同虚设**，
+   而真正无限增长的是**无界的 mpsc 通道**（背压①白做了）。
+2. `close()` 是「投 `Halt` 后 `join()`」，worker 只能在两轮 I/O 之间看到 `Halt`
+   ⇒ UI 线程一直等它：对端慢读时实测单次 `write` 阻塞 **1.168 s**，点「断开」就得等这么久；
+   彻底停读时**等于卡死**。
+
+**为什么选「非阻塞写」而不是「加一行写超时」——实测决定的，不是偏好**：
+
+> ⚠️ Windows 上带 `SO_SNDTIMEO` 的阻塞 `send` 超时后，数据**可能已经进入内核缓冲并发出**，
+> 而调用方只拿到 `WSAETIMEDOUT`、**拿不到已写字节数**；worker 于是重发整片。
+> 实测（64 KB 一片、片内含片号、超时 10 ms、对端停读 2 秒）：同一片在接收端出现 **126** 遍
+> （片 42 的词数 1032192 = 126×8192）。**这不是"没修好"，是"这么修会更糟"**——它会污染
+> 串口流本身。
+
+非阻塞写没有这个歧义：`Ok(n)` 就是**准确**的已写字节数，`WouldBlock` 单独一档，
+既不阻塞也不重发。
+
+**做法**：
+
+| 改动 | 说明 |
+|---|---|
+| `open()` | `set_read_timeout(…)` → `stream.set_nonblocking(true)`（另加 `set_nodelay(true)`，小包指令不该被 Nagle 攒着） |
+| `IDLE_SLEEP = 1 ms`（常量） | 非阻塞后**读侧不能再用 `set_read_timeout`**（阻塞性是**每 fd** 的，读写一起变），空转必须自己节拍。它同时决定 `close()` 的最大响应延迟——两个用途写在同一处注释里 |
+| `worker_main` 的 `idle` 标记 | 每一轮开始时若"上一轮一个字节都没动过"，`sleep(IDLE_SLEEP)`。`Ok(n)` 与收到 `Transmit` 都清 `idle`——有活干时不该被节拍拖慢（回环上大流量能跑满，不该被压到 1000 包/秒） |
+| `write()` | 走与串口同一套 `submit(&self.ledger, …)`，队列满**在调用线程当场**返回 `Err` |
+
+**UDP 刻意不改**（同日做了对照实测，不是顺手省略）：向一个**从不 `recv`** 的对端发
+4000 × 60 KB 报文（`SO_SNDBUF=4096`）→ **0 次失败**、单次 `send` 最坏 **0.1 ms**；
+同一实验的 TCP 对照组**挂了 2 分 05 秒**。⇒ UDP 没有"对端停读 ⇒ worker 卡住"这条路径，
+改非阻塞只会换来一个不必要的节拍与一圈新代码。本机网卡**出口**被打满时 `send` 仍可能阻塞
+（未实测），已作为残余风险记在 §5。
+
+**新增测试 11 条**（**291 → 302 passed / 1 ignored**；净数 = 新增 16 − 删除 5）：
+
+| 文件 | 测试 |
+|---|---|
+| `communicationtrait.rs::worker_tests`（+9，同时**删掉**原 `push_bounded` 那 5 条） | `ledger_hands_out_quota_up_to_the_cap` / `ledger_counts_total_bytes_not_entries` / `ledger_release_returns_the_quota` / `ledger_reset_clears_the_quota` / `retiring_a_finished_chunk_pops_it_and_returns_the_quota` / `retiring_on_an_empty_queue_is_a_no_op` / `submit_refuses_when_the_ledger_is_full_and_queues_nothing`（⭐ 断言 `rx.try_recv().is_err()`——**一个字节都没交给 worker**，"先投再报错"的半吊子实现过不了）/ `submit_hands_the_bytes_to_the_worker_and_charges_the_ledger` / `submit_returns_the_quota_when_the_worker_is_gone` |
+| 三个通道（各 +2，共 +6） | `oversized_payload_is_refused_at_the_call_site` ×3（串口 / TCP / UDP，都断言**在调用点**就被拒）/ `reopening_the_channel_clears_the_stale_quota` ×3 |
+| `net_impl/tcp.rs`（另 +1） | ⭐ `close_returns_promptly_even_when_the_peer_never_reads`——对端**一个字节都不读**，`close()` 也必须 3 秒内返回 |
+| `app.rs` | **0 条**——刻意的：判定挪到调用线程后，app 既有的 `tx_bytes_counts_only_writes_that_succeeded` / `tx_bytes_resets_on_teardown` / `disconnected_app_writes_nothing` 就是**因为对的原因**通过的，一行都不用改 |
+
+⚠️ **那条 `close_returns_promptly…` 第一版是假绿，值得记**：它一开始只是"投一批、看 `close()`
+回不回得来"，可对端不读时**内核缓冲**才是真正会堵住 `write` 的东西，而账本满只说明
+"有 1 MiB 压着没写出去"。结果是**内核还有余量把积压全吃掉**，worker 根本没被卡住，
+测试于是空转（注入"撤掉非阻塞"它照样绿）。修法是先**灌满内核缓冲**：持续投 2 秒、
+要求投出去 **≥ 2 MiB** 且**至少被拒一次**，否则直接 `assert!` 报"这条测试没测到要测的东西"。
+
+**空转验证（4 处注入，跑 `.workbuddy/tmp_probe_ledger.py`）**：
+
+| 注入 | 变红的测试 |
+|---|---|
+| G1 TCP 撤掉 `set_nonblocking`、换回阻塞 + 读超时 | `close_returns_promptly_even_when_the_peer_never_reads` |
+| G2 `retire_finished_chunk` 只出队、不归还额度 | `retiring_a_finished_chunk_pops_it_and_returns_the_quota` |
+| G3 `submit` 不再预约额度（判定退回后台线程） | `submit_refuses_…` + 三个 `oversized_payload_is_refused_at_the_call_site`（共 4 条） |
+| G4 TCP 的 `open()` 不再 `ledger.reset()` | `reopening_the_channel_clears_the_stale_quota` |
+
+四处**全部按预期变红**，还原后 `302 passed / 0 failed`。
+
+**探针脚本本轮又踩到两个记录常新的坑**：① 把测试尾部的 `error: test failed, to rerun pass …`
+当成了编译错误 ⇒ 三条真红的注入被误报成"注入过于激进"（只认 `error[E` / `could not compile`）；
+② G1 第一次真绿是**探针自己**的 bug——填充循环在第一次账本拒绝时就停了，内核缓冲压根没满
+（与上面那条测试是同一个根因，只是发生在工装侧）。
+
+**门禁（本轮结束）**：`cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** ·
+`cargo test` **302 passed / 1 ignored / 0 failed** · clippy **8 条既有**（0 新增）·
+`cargo build --release` 时间戳晚于最后一次 `src/` 改动。
 
 ## 4. 未决事项
 
@@ -1406,36 +1493,52 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
       程序用「TCP 客户端」连上来，脚本按 **40 KB/s 慢读**把排空速度掐住。脚本自带内存采样
       与判定，收尾给出还需你目视的三条。三步：
       ① `--write-payload payload.txt` 生成载荷；② 启动程序；③ `--mode tcp --port 23232`。
-    - **为什么"慢读"就能造出这个场景**：排空速度是有限的。TCP 写侧**没有写超时**，所以
-      **对端彻底停读**时 `send` 会卡死（实测：灌满约 2.7 MB 内核缓冲后 2 分 36 秒无进展），
-      而**慢读**时 `send` 每次都返回（实测最慢一次 1.168 s）⇒ worker 能一轮轮回到 `try_recv`
-      继续入队，队列于是以「入队 − 排空」的速率涨到 1 MiB。脚本 `--self-test` 把这两条
-      socket 语义当场复现出来（不碰程序、不碰串口）。
-    - **判据（通过 = 四条全中）**：① 接收区**反复**出现「…: 待发队列已满（在队 … 字节，
+    - **为什么"慢读"就能造出这个场景**：排空速度是有限的。**写侧现在是非阻塞的**
+      （2026-09-24 从阻塞改过来，见 §3.15 ④ 与 §5 那一行），所以不管对端是慢读还是
+      **一个字节都不读**，`send` 都不再会卡住 worker：内核缓冲满时立刻 `WouldBlock`，
+      worker 让出 1 ms 再试，队列于是以「入队 − 排空」的速率涨到 1 MiB。
+      脚本 `--self-test` 的第 3 项刻意用**阻塞** socket 把"旧行为会卡死"复现出来
+      （实测灌满约 2.7 MB 内核缓冲后 2 分 36 秒无进展），用来解释当时为什么要改。
+    - **判据（通过 = 五条全中）**：① 接收区**反复**出现「…: 待发队列已满（在队 … 字节，
       上限 1048576 字节），本条未发送」；② 界面**仍显示「已连接」**（绿点），不跳「未连接」；
       ③ 定时发送**没有被自动取消**（复选框还勾着）；④ 进程内存**不持续增长**
-      （脚本的「不 OOM 判据」：提交量增长 ≤ 32 MB 且末 10 秒斜率 ≤ 1 MB/s）。
-      ②③ 是刻意选 `Notice` 而非 `Failed` 的理由；④ 是"不 OOM"的核心。
+      （脚本的「不 OOM 判据」：提交量增长 ≤ 32 MB 且末 10 秒斜率 ≤ 1 MB/s）；
+      ⑤ **状态栏「发送字节数」不再把被拒的包记上**（≈ 对端实际读到的量 + 在队的不超过 1 MiB），
+      且「发送后清空」若开着，输入框在**被拒时不该被清空**（2026-09-24 修，见 §3.15 ①附）。
+      ⚠️ 第 ⑤ 条是**改判据**：旧版 §4② 把"计数照涨"写成"已知缺陷、不属于本项判据"，
+      现在它已经是缺陷本身被修掉了，所以反过来成为判据。
+      ②③ 是刻意不判掉线的理由；④ 是"不 OOM"的核心。
     - **串口路线（可选）**：`--mode serial --serial-port COM7 --baud 115200`（需要一对虚拟
-      串口，例如 com0com；或程序连另一端、脚本持这一端）。串口**不受**上面那条"彻底停读会
-      卡死"的限制（`write` 有 10 ms 超时 ⇒ worker 照常转圈），所以这一档直接 `--read-rate 0`
-      也成立。**只开内存看门狗**：`--mode watch`（程序独占一个真实适配器时用）。
-    - **本会话实测（用替身程序，不是被测程序）**：上限 1 MiB 时 → **2013 条** Notice、
-      在队峰值**正好 1048576 字节**、内存**零增长**（判据 ✅ / 退出码 0）；把上限放开后 →
-      0 条 Notice、队列涨到 **64 MB**、内存 **+57.8 MB、+3.14 MB·s⁻¹**（判据 ❌ / 退出码 1）。
-      两个方向都跑过 ⇒ 判据既不空转、也不假红。
-      ⚠️ 那次还抓到**工装自己的一处假绿**：队列里 2048 条一度指向同一个 32 KB 对象
+      串口，例如 com0com；或程序连另一端、脚本持这一端）。串口另有 `write` 的 10 ms 超时，
+      两条路都通。**只开内存看门狗**：`--mode watch`（程序独占一个真实适配器时用）。
+    - **本会话实测（用替身程序，不是被测程序）**：上限 1 MiB 时 → 试投 2803 包 = 接受 499 /
+      **拒绝 2304 包**、在队峰值**正好 1048576 字节**、内存**零增长（Δ0.0 MB）**（判据 ✅ / 退出码 0）；
+      把上限放开后 → **0 条**拒绝、在队峰值 **76.5 MB**、内存 **+57.5 MB、+3.14 MB·s⁻¹**
+      （判据 ❌ / 退出码 1）。两个方向都跑过 ⇒ 判据既不空转、也不假红。
+      记账侧也自洽：1 MiB 那档替身记账 **16,351,232** 字节 vs 对端实读 **16,318,464**（差 32,768 =
+      还在内核里没被读走的那一片），不再有"记账虚高"。
+      ⚠️ **替身已按新结构重写**（同日晚）：旧版把上限判在 worker 侧、UI 线程从不看队列满不满
+      ——那正是刚修掉的旧结构。不重写的话，`--read-rate 0` 那一档下替身内存会一直涨，
+      脚本会给出与真程序**相反**的判定。（重写后两个方向都复跑过，数字见上。）
+      ⚠️ 更早那次还抓到**工装自己的一处假绿**：队列里 2048 条一度指向同一个 32 KB 对象
       （Python 的 `bytes` 会被复用），64 MB 队列只占几百字节内存，内存判据被骗成绿色。
       替身已改成每包新分配（真实程序每次 send 都是一条新的 `Vec<u8>`）。
+    - **脚本自检**：`python tools/backpressure_check.py --self-test` 三项全 OK / 退出码 0，
+      其中第 3 项刻意用**阻塞** socket 复现"旧行为会卡死"：完全不读时写入 **2,752,512** 字节后
+      2.6 秒无进展（≈ 之前记的 2.75 MB 内核缓冲），慢读时最坏一次 **1.167 s** 仍返回
+      （≈ 之前记的 1.168 s）。**改过脚本后必须重跑这一项。**
     - **手点配方（不想用脚本时）**：波特率 **1200**、文本模式粘 **2~8 KB**、勾定时发送、
       间隔 **10 ms**，几秒后开始报满（耗时由**入队速度**决定，包越大越快；排空上限就是波特率，
       所以波特率越低余量越大，115200 也行）。恢复：取消勾选，队列按波特率慢慢排空，
       想立刻清空就断开重连。
-    - ⚠️ **测试时还会看到一件事（已知缺陷，不属于本项判据）**：状态栏的**发送字节数会照常
-      增长**，哪怕提示写着"本条未发送"。实测差额：替身 20 秒里让界面记 **78.7 MB**
-      「已发送」，而真正入队的只有 **12.8 MB**。原因与修法见 §5。
-    - 单元测试侧已覆盖：`worker_tests` 5 条 + `accept_transmit_reports_notice_on_overflow`
-      断言收到的是 `Notice` 而非 `Failed`。
+    - **"计数照涨"那个缺口已修**（2026-09-24）：原先判在后台线程、`write()` 只投 mpsc 就
+      返回 `Ok`，于是状态栏照涨、输入框照清；现在判定挪到调用线程（`PendingLedger`），
+      `write()` 当场返回 `Err`，`app.rs` 一行未改就同步了。实测差额原是"界面 78.7 MB vs
+      真实入队 12.8 MB"，现在两者应当一致。见 §3.15 ①附。
+    - 单元测试侧已覆盖：`worker_tests` **9 条**（账本 / 出队归还 / `submit` 拒绝且不投递）
+      + 三个通道各 2 条（超限在调用点被拒 / 重连清账）+ TCP 的
+      `close_returns_promptly_even_when_the_peer_never_reads`（对端不读也要能立刻断开）。
+      非空转验证用 4 处注入跑过，**四处全部按预期变红**（见 §3.15 ④）。
 
 ### ③ 仓库状态
 
@@ -1451,10 +1554,11 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 | ~~**高**~~ **已修** | ~~**接收缓冲无上限**~~ | `receive.rs` 的 `trim_receive_logs` | 已于 2026-09-21 修复：新增 `max_log_chars`（默认 30000，0 = 不限）FIFO 淘汰，四份镜像各自按同一字符预算裁剪，支持从句中切开 `ColoredSpan`。接收日志仍不参与持久化（退出时保存大日志只会变慢，无明确需求） |
 | ~~**高**~~ **已修** | ~~**`connected` 假阳性**（串口）~~ | `app.rs::open_connection` / `serial_impl::channel` | **已于 2026-09-24 修复**：串口通道引入第三态 `worker::OPENING`——`SerialChannel::open()` 先置 `OPENING` 再 spawn，后台线程**真正打开端口之后**才升到 `ACTIVE`。新增 `ByteChannel::is_ready()`（默认转发 `is_active()`，只有串口覆盖），`ComTool` 据此新增 `opening()` 与 `channel_is_ready()`；`open_connection` 不再无条件置位，发送闸门（`send_data` / `send_preset` / `tick_repeat_send`）全部改看"通道就绪"而不是 `connected`。界面新增第三档「正在打开」（侧边栏 `status_opening` + 状态栏 `statusbar_opening`，琥珀色圆点）。成功提示延后到 `settle_connection_state()` 补（一次性记账位 `announced_open`）。见 §3.15 |
 | ~~中~~ **已修** | ~~自动重连无退避~~ | `app.rs::auto_reconnect` | **已于 2026-09-24 修复**：新增 `reconnect_backoff(failures)` 纯函数（500 ms 起、指数翻倍、封顶 30 s）+ `reconnect_failures` 计数（`#[serde(skip)]`）+ `MAX_RECONNECT_ATTEMPTS = 6` 上限；到顶后彻底停手并在接收区留一条说明。**只对串口生效**（F4 起对 TCP / UDP 直接返回）。见 §3.15 |
-| ~~中~~ **已修** | ~~待发队列无上限~~ | `communicationtrait::worker` | **已于 2026-09-24 修复**：新增共享上限 `MAX_PENDING_BYTES = 1 MiB` 与纯函数 `push_bounded` / `accept_transmit`，串口 / TCP / UDP 三个 `worker_main` 统一走它。满了**拒绝入队**并报一条 `Notice`（非致命，不判掉线、不停定时发送），而不是继续吃内存或静默丢弃。见 §3.15 |
-| 低 | **待发队列被拒时状态栏的发送字节数仍累加** | `app.rs::transmit` + `serial_impl/channel.rs::write`（TCP / UDP 同理） | 队列满的判定在**后台线程**里做，而 `write()` 只把命令投进 mpsc 就返回 `Ok` ⇒ app 层照常执行 `tx_bytes += len`。用户会看到「本条未发送」的提示与**仍在增长**的发送计数并存；与 `push_bounded` 注释里"界面计数不记账"的意图、以及 `transmit` 注释里 N4 那句"排队时计数会显示出一个并不成立的『已发送』"都矛盾。**无数据丢失**（该条确实没发出去），纯粹是计数与提示不一致。2026-09-24 读码时发现，未修。见 §3.15 ① |
+| ~~中~~ **已修** | ~~待发队列无上限~~ | `communicationtrait::worker` | **已于 2026-09-24 修复**：新增共享上限 `MAX_PENDING_BYTES = 1 MiB` 与**两侧共享**的 `PendingLedger`（`Arc<AtomicUsize>`）；三个通道的 `write()` 统一走 `worker::submit`（先预约额度 → 再投递 → 失败退还），`worker_main` 只 `push_back`、不再自己判上限。满了**在调用线程当场**返回 `Err`（不判掉线、不停定时发送），而不是继续吃内存或静默丢弃。见 §3.15 ① 与 **①附**（初版是"后台线程判 + 报 `Notice`"，当天订正为"调用线程判"） |
+| ~~低~~ **已修** | ~~**待发队列被拒时状态栏的发送字节数仍累加、输入框仍被清空**~~ | `communicationtrait::worker::submit` + 三个通道的 `write()` | **已于 2026-09-24 修复**：根因是"队列满"判在**后台线程**里做，而 `write()` 只把命令投进 mpsc 就返回 `Ok` ⇒ app 层照常 `tx_bytes += len`、`send_data` 照常清空输入框，用户看到「本条未发送」的提示与**仍在增长**的发送计数并存。改法是把这个判定**挪到调用线程**——新增两侧共享的 `PendingLedger`，`write()` 在**投递之前**就 `reserve(len)`，失败即当场返回 `Err`。**`app.rs` 一行未改**（它本来就是"`Ok` 才记账、`Ok` 才清空"），两个症状一起消失。旧的 `Notice` 通路退场，但文案逐字保留（差别只在"当场说"）。见 §3.15 ①附 |
 | 中 | 写路径瞬态错误静默重试 | `channel.rs::worker_main` | `WouldBlock` / `Interrupted` 直接重试是合理的，但设备长期不接受数据时用户得不到提示。背压修好后已有"队列已满"的 `Notice` 兜底，但队列**未满而长期写不动**时仍无提示。建议侧边栏显示「待发字节数」 |
-| 中 | **TCP 写侧没有写超时 ⇒ 背压不生效，还可能卡住界面** | `net_impl/tcp.rs::open` / `worker_main` | `open()` 只调了 `set_read_timeout`，写侧是**阻塞** socket、没有 `SO_SNDTIMEO`（串口那边 `.timeout(10ms)` 在 Windows 上同时落成 `WriteTotalTimeoutConstant`，所以**只有 TCP 有这个问题**）。两条后果：① 对端**彻底停读**时 `write` 永不返回（实测：灌满约 2.75 MB 内核缓冲后 2 分 36 秒无进展）⇒ worker 卡在 `write` 上，`accept_transmit` 再也不会被调用，**1 MiB 上限形同虚设**，真正无限增长的是无界的 mpsc 通道；② `close()` 是「投 `Halt` 后 `join()`」，而 worker 只能在两轮 I/O 之间看到 `Halt` ⇒ UI 线程会一直等它：对端慢读时实测单次 `write` 阻塞 **1.168 s**，点「断开」就要等这么久；彻底停读时**等于卡死**。<br>⚠️ **不要用"加一行写超时"来修——已实测它会让线上出现重复字节**：Windows 上带 `SO_SNDTIMEO` 的阻塞 `send` 超时后，数据**可能已经进入内核缓冲并发出**，而调用方只拿到 `WSAETIMEDOUT`、拿不到已写字节数；worker 于是重发整片。实测（64 KB 一片、片内含片号、超时 10 ms、对端停读 2 秒）：同一片在接收端出现 **126** 遍（片 42 的词数 1032192 = 126×8192），即整片被重复发了 126 次。串口没有这个歧义（驱动不接受就一个字节都不排队），所以那里的 10 ms 写超时是安全的。<br>**两条可行路线**（需先决策再动手）：**(A) 非阻塞写**（`set_nonblocking` + `WouldBlock` 时让出时间片）——进度精确、不阻塞、上限真正生效，代价是读侧不能再靠 `set_read_timeout`，要么 1 ms 轮询、要么引入 poll；**(B) 写超时 + 判故障**：超时不再重试，直接报 `Failed`（"对端长时间不接收数据"），保证流不被污染、界面不再卡死，代价是彻底停读的对端会**断开连接**而不是走背压提示。2026-09-24 写背压验证脚本时发现，未修。另：串口那种"驱动接受部分后超时是否报告计数"未实测，列入实机验证。见 §3.15 ① 与 `tools/backpressure_check.py` 的 `--self-test` |
+| ~~中~~ **已修** | ~~**TCP 写侧没有写超时 ⇒ 背压不生效，还可能卡住界面**~~ | `net_impl/tcp.rs::open` / `worker_main` | **已于 2026-09-24 修复，走的是「非阻塞写」那条路**：`open()` 把 `set_read_timeout` 换成 `stream.set_nonblocking(true)`（另加 `set_nodelay(true)`），worker 循环加了 `idle` 标记与显式的 `IDLE_SLEEP = 1 ms`（非阻塞 socket 上 `set_read_timeout` 无效——阻塞性是**每 fd** 的），`WouldBlock` 时让出时间片后下一轮再试。<br>**修掉的两条后果**：① 对端彻底停读时 worker 不再卡在 `write`，1 MiB 上限真正生效（`TcpChannel` 现在跑的是与串口同一套 `PendingLedger` 账本，队列满**在调用线程当场**返回 `Err`）；② `close()` 里那个 `join()` 不再无限等——实测对端完全不读时 `close()` 也能在毫秒级返回（`close_returns_promptly_even_when_the_peer_never_reads` 钉住，3 秒上限）。代价：读侧不能再靠 `set_read_timeout`，改成 1 ms 轮询（这就是 `IDLE_SLEEP` 的另一个用途，同时决定 `close()` 的最大响应延迟）。<br>⚠️ **为什么没走"加一行写超时"**（已实测排除）：Windows 上带 `SO_SNDTIMEO` 的阻塞 `send` 超时后，数据**可能已经进入内核缓冲并发出**，而调用方只拿到 `WSAETIMEDOUT`、拿不到已写字节数；worker 于是重发整片。实测（64 KB 一片、片内含片号、超时 10 ms、对端停读 2 秒）：同一片在接收端出现 **126** 遍（片 42 的词数 1032192 = 126×8192）。非阻塞写没有这个歧义——`Ok(n)` 就是**准确**的已写字节数。串口也没有（驱动不接受就一个字节都不排队），所以那里 `.timeout(10ms)` 同时落成 `WriteTotalTimeoutConstant` 是安全的。<br>**UDP 刻意不动**（同日的对照实测）：向一个从不 `recv` 的对端发 4000 × 60 KB（`SO_SNDBUF=4096`）→ **0 次失败**、单次 `send` 最坏 **0.1 ms**（TCP 对照组挂了 **2 分 05 秒**）⇒ UDP 没有"对端停读 ⇒ worker 卡住"这条路径。见 §3.15 ④ 与 `tools/backpressure_check.py` 的 `--self-test` |
+| 低 | UDP 的 `send` 仍可能被本机网卡出口堵住 | `net_impl/udp.rs::write`（刻意保持阻塞） | 与 TCP 那条**不是同一个问题**：本机到对端的**网卡出口**被打满时（例如 100 Mbps 网卡上持续满速发大包），`send` 仍会阻塞。实测在回环上向从不 `recv` 的对端发 4000 × 60 KB 是 **0 次失败 / 最坏 0.1 ms**，所以没有"对端停读 ⇒ worker 卡住"这条常被踩到的路径，这是 UDP 不改非阻塞的依据。但要构造出出口饱和需要真实网卡与真实流量，**未实测**，因此保留为已知残余风险；真出现时应按 TCP 同样的方式改非阻塞（`WouldBlock` 对 UDP 是"本机队列满、报文未发出"，语义清晰、无重发歧义） |
 | ~~低~~ **已清理** | ~~2 个未使用依赖~~ | `Cargo.toml` | 已于 P6 第 1 批移除：`tokio`（features = `["full"]`，零调用，明显拖慢编译）与 `egui-chinese-font`（零调用，中文字体已由 `main.rs::setup_fonts` 读系统字体实现）。`chrono` / `egui_plot` / `rfd` / `serde` / `serialport` 仍是活跃依赖 |
 | ~~低~~ **已修** | ~~侧边栏连接按钮的**文案与动作是反的**~~ | `sidebar.rs` | **已于 2026-09-21（F4）修复**：原来「已连接」时按钮显示「打开串口」、点下去却执行关闭，从上游继承而来（`e2039ff:src/sidebar.rs:157` 即在）。F4 重写这段时一并改成同向，并按传输类型分叉文案。见 §3.8 |
 | 低 | 8 条 clippy 风格警告 | `app.rs` / `receive.rs` | `derivable_impls`×2、`manual_range_contains`×3、`explicit_deref`、`unnecessary_map_or`、`redundant_borrow`。全部位于**本任务未触及**的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写）。`cargo clippy --fix` 可一键清掉，但那会改动范围之外的代码，因此留作一次专门的"清警告"提交（P6 收尾不再处理） |

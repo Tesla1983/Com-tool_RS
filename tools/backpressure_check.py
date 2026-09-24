@@ -3,9 +3,11 @@
 
 判据来自 `src/communicationtrait.rs::worker`：
   * 上限 `MAX_PENDING_BYTES = 1 MiB`（按**在队字节合计**，不按条数）；
-  * 满了**拒绝入队**并向界面报一条 `Notice`（非致命），文案
-    「待发队列已满（在队 {pending} 字节，上限 1048576 字节），本条未发送」；
-  * `Notice` **不动** `connected`、也**不停**定时发送（这是刻意选它而非 `Failed` 的理由）。
+  * 满了**拒绝入队**，`write()` **在调用线程当场**返回 `Err`，文案
+    「待发队列已满（在队 {pending} 字节，上限 1048576 字节），本条未发送」，
+    由 app 既有的"发送失败"通路显示在接收区（**不动** `connected`、也**不停**定时发送）；
+  * 因为 `Err` 是同步的，**状态栏的「发送字节数」不再把被拒的包记上**、输入框也不会被清空
+    （2026-09-24 修，见 HANDOVER.md §3.15 ①附）。
 
 # 为什么脚本能"造"出这个场景（不需要真设备）
 
@@ -15,10 +17,10 @@
     `WriteTotalTimeoutConstant`（已读 serialport-4.10.0 源码确认）⇒ 单次 `write`
     最坏阻塞 10 ms 就返回 `TimedOut`，worker 才能一轮轮回到 `try_recv` 继续入队；
     而真正的排空上限是**波特率**（1200 波特 ≈ 120 字节/秒）。
-  * TCP：`TcpChannel::open` 只设了读超时，写侧是**阻塞** socket。实测（`--self-test`
-    可复现）：对端**慢读**时 `send` 每次都返回（偶尔阻塞 1 秒多后仍返回）⇒ worker
-    照常转圈；而对端**完全不读**时 `send` 灌满约 2.7 MB 内核缓冲后**永不返回** ⇒
-    worker 卡在 `write` 上，`accept_transmit` 再也不会被调用（见文末「已知缺口」）。
+  * TCP：写侧是**非阻塞** socket（2026-09-24 从阻塞改过来）。这样对端**完全不读**也
+    不会把 worker 卡住：内核缓冲满时 `send` 立刻 `WouldBlock`，worker 让出时间片后
+    下一轮再试，于是"队列满"这条判据真正生效（阻塞模式下 worker 会永远卡在 `write`，
+    1 MiB 上限形同虚设）。`--self-test` 复现的就是这两种 socket 语义的差别。
 
 ⇒ 所以默认模式用纯 TCP + 一个**慢读对端**，零硬件即可验证。
 
@@ -427,8 +429,8 @@ def run_verification(args) -> int:
     if rate_bps > 0 and enqueue_bps <= rate_bps:
         print("  ⚠️ 入队速率没有超过排空速率 —— 队列不会涨，先把载荷调大或间隔调小。")
     if rate_bps == 0:
-        print("  ⚠️ 当前是完全停读（--read-rate 0）。TCP 下 worker 会卡死在 write 上、"
-              "预期**看不到**背压提示（见文末已知缺口）；串口下这一档是正常可测的。")
+        print("  ⚠️ 当前是完全停读（--read-rate 0）。这一档现在也成立：TCP 写侧是非阻塞的，"
+              "内核缓冲满后 worker 照常转圈、背压提示照常出现。")
     print("=" * 78)
     print()
 
@@ -524,18 +526,18 @@ def run_verification(args) -> int:
     print("  [ ] 界面**仍显示「已连接」**（绿点），没有跳「未连接」")
     print("  [ ] 「定时发送」**没有被自动取消**（复选框还勾着）")
     print()
-    print("对照项（本次读码发现的既有缺口，不是本项判据）：")
-    print("  * 状态栏「发送字节数」会把**被拒的那些包也记上**，与「本条未发送」自相矛盾；")
-    print("    「发送后清空」若开着，输入框也会被清空。原因：通道的 `write()` 只把命令投进")
-    print("    mpsc 就返回 `Ok`，判断队列满不满的是后台线程。")
-    print(f"  * 可拿上面的「对端实际读到 {total_received:,} 字节」和状态栏数字对照："
-          f"状态栏明显更大，差额就是被背压拒掉的量。")
+    print("另有一条对照（2026-09-24 已修，可顺手复核）：")
+    print(f"  * 状态栏「发送字节数」**只应统计真正排上队的**（≈ 上面的「对端实际读到"
+          f" {total_received:,} 字节」+ 在队的那 1 MiB 以内），")
+    print("    不该再出现「提示说未发送、计数却照涨」的自相矛盾。")
+    print("    修法：队列满的判定从后台线程挪到调用线程，`write()` 当场返回 `Err`。")
     print()
     if rate_bps == 0 and args.mode == "tcp":
-        print("已知缺口（完全停读这一档）：TCP 的写侧没有写超时，对端彻底停读时 `send` 会")
-        print("永不返回，worker 卡在 `write` 上，`accept_transmit` 再也不会被调用 —— 于是")
-        print("上限 1 MiB **不生效**，真正无限增长的是无界的 mpsc 通道。串口没有这个问题")
-        print("（写超时 10 ms 保证 worker 能回到入队循环）。")
+        print("这一档（完全停读）现在也是**成立**的：TCP 写侧 2026-09-24 改成非阻塞 socket，")
+        print("内核缓冲满时 `send` 立刻 `WouldBlock`，worker 让出时间片后继续转圈 ⇒")
+        print("1 MiB 上限真正生效、点「断开」也能立刻返回。旧版阻塞 socket 下 worker 会永远")
+        print("卡在 `write`（实测灌满约 2.7 MB 内核缓冲后 2 分 36 秒无进展），那时上限形同虚设。")
+        print("串口无此歧义：`.timeout(10ms)` 让 worker 始终能回到入队循环。")
         print()
 
     if mem_ok is False:
@@ -581,8 +583,10 @@ def self_test() -> int:
 
     print()
     print("=" * 78)
-    print("自检 3/3：TCP「慢读」与「完全不读」下发送侧的行为差异")
+    print("自检 3/3：阻塞 socket 在「慢读」与「完全不读」下的行为差异")
     print("=" * 78)
+    print("  （注意：这里刻意用**默认的阻塞 socket**，用来解释 TcpChannel 为什么改成非阻塞；")
+    print("    被测程序的写侧现在是非阻塞的，行为见文末判定表。）")
     ok3 = _self_test_socket_semantics()
 
     print()
@@ -626,7 +630,11 @@ def _self_test_throttle() -> tuple[bool, float]:
 
 
 def _self_test_socket_semantics() -> bool:
-    """对端不读 => 阻塞 send 不返回；对端慢读 => send 持续返回。"""
+    """**阻塞** socket：对端不读 => send 不返回（卡死）；对端慢读 => send 持续返回。
+
+    这正是 TcpChannel 从阻塞改成非阻塞的理由——阻塞时 worker 会永远卡在 `write` 上，
+    1 MiB 上限形同虚设、点「断开」也回不来（见 HANDOVER.md §3.15 ④）。
+    """
     import threading
 
     def make():

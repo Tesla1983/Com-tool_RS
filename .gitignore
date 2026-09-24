@@ -19,3 +19,8 @@ echo_raw.txt
 .opencode/prompts/executor.md
 .opencode/prompts/expert.md
 .opencode/prompts/planner.md
+
+# tools/ 下有两个 Python 验证脚本（backpressure_check / backpressure_dummy_sender）。
+# 跑一次 `py_compile` 或 import 就会在旁边生成 __pycache__，那是产物不是源码。
+__pycache__/
+*.pyc

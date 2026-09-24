@@ -466,11 +466,19 @@ graph LR
 |---|---|---|---|
 | ~~**高**~~ **已修** | ~~`connected` 假阳性~~ | `app.rs::open_connection` / `serial_impl::channel` | **已于 2026-09-24 修复**（`HANDOVER.md` §3.15③）：引入 `worker::OPENING` 第三态 + `ByteChannel::is_ready()`；界面新增「正在打开」一档。不再与 F4 绑定 |
 | ~~中~~ **已修** | ~~自动重连无退避~~ | `app.rs::auto_reconnect` | **已于 2026-09-24 修复**（`HANDOVER.md` §3.15②）：`reconnect_backoff` 指数退避（500ms→30s）+ 连续失败 6 次停手 |
-| ~~中~~ **已修** | ~~待发队列无上限~~ | `communicationtrait::worker` | **已于 2026-09-24 修复**（`HANDOVER.md` §3.15①）：共享 `MAX_PENDING_BYTES = 1 MiB` + `push_bounded` / `accept_transmit`，三个实现统一走它 |
+| ~~中~~ **已修** | ~~待发队列无上限~~ | `communicationtrait::worker` | **已于 2026-09-24 修复**（`HANDOVER.md` §3.15①）：共享 `MAX_PENDING_BYTES = 1 MiB` + 两侧共享的 `PendingLedger`，三个通道的 `write()` 统一走 `worker::submit`、worker 只 `push_back`。见 ①附（判定从后台线程挪到调用线程） |
 
 > ✅ **这三条已全部修完**（2026-09-24）。其中**待发队列背压**是 F1 里「发送文件」一项的
 > **前置条件**——现在已经具备，因此「发送文件」可以立项了（见 §13.5 与
 > `GAP_ANALYSIS_VS_COMTOOL.md` §0）。
+
+> 同日还顺手清掉了**同一段代码上的另外两个既有缺陷**（不是新功能，但都在发送路径上）：
+> * **背压被拒时状态栏计数仍累加 / 输入框仍被清空** —— 根因是判定在后台线程 ⇒ `write()`
+>   一律 `Ok`。已把判定挪到调用线程（`HANDOVER.md` §3.15 ①附）。
+> * **TCP 写侧无写超时 ⇒ 背压不生效、点「断开」可能卡死** —— TCP 写侧改非阻塞
+>   （`HANDOVER.md` §3.15 ④）。
+>
+> 两项合起来使「发送文件」（F1 剩下那一项）的路径变成**可背压、可中断**的。
 
 ---
 

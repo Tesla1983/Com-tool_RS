@@ -36,6 +36,36 @@
 //! 后再交给写盘线程"，注释里明说这是**刻意**不同于 `open_connection()` 乐观写法的选择。
 //! 换句话说，本项目愿意为"不骗用户"付一次有界的阻塞。
 //!
+//! # 为什么写侧必须非阻塞（2026-09-24 修）
+//!
+//! 曾经的写法是：读侧 `set_read_timeout(10 ms)`，写侧保持**阻塞**、没有写超时。
+//! 这在"对端一直在读"时看不出问题，但 TCP 的发送缓冲由**对端的接收窗口**决定，
+//! 所以对端一停读，本地发送缓冲就会填满——然后 `write` **永不返回**。两条后果：
+//!
+//! * 后台线程卡在 `write` 上，指令队列再也排不到，**待发上限形同虚设**，
+//!   真正无限增长的是那条无界的 mpsc 通道；
+//! * `close()` 是"投 `Halt` 后 `join()`"，而 `Halt` 只能在两轮 I/O 之间被看到，
+//!   于是点「断开」会一直等下去（实测：对端完全不读时，灌满约 2.75 MB 内核缓冲
+//!   后 2 分 36 秒毫无进展）。
+//!
+//! **最容易想到的修法是错的**：给写侧补一个 `set_write_timeout`。实测（64 KB 一片、
+//! 片内含片号、超时 10 ms、对端先停读 2 秒再全速读）表明，Windows 上带
+//! `SO_SNDTIMEO` 的阻塞 `send` 超时后**数据可能已经进了内核缓冲并最终发出**，而
+//! 调用方只拿到 `WSAETIMEDOUT`、**拿不到已写字节数**——worker 于是按原样重发整片，
+//! 同一片在接收端出现了 **126** 遍（`126 × 8192` 个词）。流协议里重复字节比丢字节
+//! 难查得多。
+//!
+//! 正解是让 `write` **永远立刻返回**，并由 `Ok(n)` 如实回报写出去多少：
+//! `set_nonblocking(true)` 之后，发送窗口为零只是返回 `WouldBlock`，worker 把这一片
+//! 留在队列里、下一轮再试，其它的活（读、排空指令、看 `Halt`）照常进行。
+//! 于是上限真正生效、`close()` 立刻返回，而且**一个字节都不会重复**。
+//!
+//! 代价只有一个：非阻塞 fd 上 `set_read_timeout` 不再起作用（阻塞属性是整体的），
+//! 空闲时的等待从"内核里等 10 ms"换成"worker 自己睡 1 ms"。
+//!
+//! 串口没有这个歧义：它的 `.timeout(10 ms)` 是**驱动层**语义，写超时后驱动会如实
+//! 报告已写字节数，所以那里保留阻塞写 + 驱动超时即可，不需要非阻塞。
+//!
 //! # 第一版不做的两件事
 //!
 //! * **自动重连**：`ComTool::auto_reconnect` 依赖 `last_opened_port`，是串口语义；
@@ -53,7 +83,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::communicationtrait::worker::{
-    ACTIVE, IDLE, StateGuard, WorkerCommand, accept_transmit, is_transient,
+    ACTIVE, IDLE, PendingLedger, StateGuard, WorkerCommand, is_transient, retire_finished_chunk,
+    submit,
 };
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::net_impl::config::NetConfig;
@@ -65,11 +96,16 @@ use crate::net_impl::config::NetConfig;
 /// 或本机起个 `nc`），3 秒足够；真需要长超时的场景应该由用户自己重试。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 单次 `read` 的最长等待。
+/// 两个方向都无事可做时，一轮循环让出的时间片。
 ///
-/// 与串口取同一个值（10 ms），理由相同：它同时决定空闲时的唤醒频率与
-/// `close()` 投出停机指令后线程的最长响应延迟。
-const READ_TIMEOUT: Duration = Duration::from_millis(10);
+/// 本通道的 socket 是**非阻塞**的（见 [`TcpChannel::open`]），所以两个方向都会立刻
+/// 返回 `WouldBlock`——没有这一句就是 100% CPU 空转烧满一个核。串口那边靠
+/// `.timeout(10 ms)` 让内核帮着等，非阻塞 socket 没有那层保护，只能自己睡。
+///
+/// 取 1 ms 而不是照搬 10 ms：它同时决定"待发数据的响应延迟"与"`close()` 投出停机
+/// 指令后线程的最长响应延迟"。1 ms 下两者都远优于原来的 10 ms，而每秒一千次
+/// 唤醒对 CPU 基本无感（`read` + 可选的一次 `write`，都是立即返回的失败调用）。
+const IDLE_SLEEP: Duration = Duration::from_millis(1);
 
 /// 单次 `read` 的缓冲上限。TCP 是流式的，一次 `read` 能拿到多少取决于对端
 /// 怎么切分 `send`，所以缓冲稍大无妨——它只影响一轮循环搬多少，不改变语义。
@@ -81,6 +117,7 @@ fn worker_main(
     commands: Receiver<WorkerCommand>,
     events: Sender<ChannelEvent>,
     state: Arc<AtomicU8>,
+    ledger: PendingLedger,
 ) {
     let _guard = StateGuard(Arc::clone(&state));
 
@@ -93,7 +130,16 @@ fn worker_main(
     // `ConnectionReset`，那是真故障，走 `Failed` 上报。
     let mut outgoing: VecDeque<(Vec<u8>, usize)> = VecDeque::new();
 
+    // 上一轮是否什么都没做成（读、写、指令三处都没进展）。用于决定要不要睡——
+    // 非阻塞 socket 下"什么都没有"是常态，不睡就是空转。
+    let mut idle = false;
+
     loop {
+        if idle {
+            thread::sleep(IDLE_SLEEP);
+        }
+        idle = true;
+
         // ———— 方向一：对端 → UI ————
         match stream.read(&mut buf) {
             // TCP 的 EOF：对端**正常**关闭了连接。这是与串口最本质的差别。
@@ -102,6 +148,7 @@ fn worker_main(
                 return;
             }
             Ok(n) => {
+                idle = false;
                 // 接收端已被丢弃，说明 UI 已经退出，没有继续搬数据的理由。
                 if events.send(ChannelEvent::Bytes(buf[..n].to_vec())).is_err() {
                     return;
@@ -118,10 +165,18 @@ fn worker_main(
         // 每轮最多推进一次写，避免长报文占满循环、拖慢停机响应。
         let mut chunk_done = false;
         if let Some((bytes, sent)) = outgoing.front_mut() {
+            // 非阻塞下的三种结果都**立即**返回，没有一种是"等对端腾地方"：
+            // `Ok(n)` 是挤进去了 n 个字节，`WouldBlock` 是这次一个都没挤进去
+            // （发送窗口为零，或对端彻底停读），下一轮再来。所以对端不读**不会**
+            // 把这一轮拖住，`Halt` 也就能按时被看到。
             match stream.write(&bytes[*sent..]) {
-                // 这一轮一个字节都没挤进去，等下一轮重试。
+                // 非阻塞下不该出现，保留以对应 `Write` 契约里的"写了 0 个字节"。
                 Ok(0) => {}
                 Ok(n) => {
+                    idle = false;
+                    // 只推进"确实写出去的"那么多：进度由驱动如实回报，因此不会
+                    // 重发、也不会丢——这是"加一个写超时"那条路走不通的地方
+                    // （超时的 `send` 可能已经把数据送出去了，调用方却拿不到计数）。
                     *sent += n;
                     chunk_done = *sent == bytes.len();
                 }
@@ -132,21 +187,22 @@ fn worker_main(
                 }
             }
         }
-        if chunk_done {
-            outgoing.pop_front();
-        }
+        // 整段确实写完之后才出队并把额度还给调用线程；进度由 `Ok(n)` 如实回报，
+        // 所以不会多还也不会少还。
+        retire_finished_chunk(&mut outgoing, chunk_done, &ledger);
 
         // ———— 接收指令 ————
         // 一次排空，避免高速收发时指令积压；`Halt` 在任何时刻都能被看到
-        // （最迟在下一轮 `read` 超时后），因此 `close()` 的等待时长始终由
-        // 一轮读写决定，不被待发数据拖住。
+        // （最迟在下一轮循环后），因此 `close()` 的等待时长始终由一轮读写决定
+        // ——**这里曾经不成立**：写侧是阻塞 socket 时对端一停读就永久卡在
+        // `write` 上，`Halt` 再也看不到，点「断开」会一直等下去。
         loop {
             match commands.try_recv() {
-                // 与串口共用同一个带背压的入队函数（上限见 `worker::MAX_PENDING_BYTES`）。
-                // 对端不读、发送窗口长期为零时队列只增不减会把内存吃光；满了拒绝并
-                // 报一条 `Notice`，通道本身不受影响（不是掉线）。
+                // 队列**直接 push**：容量已经在调用线程里由 `worker::submit` 预约过了，
+                // 这里不再判一遍（上限只有一处实现）。
                 Ok(WorkerCommand::Transmit(bytes)) => {
-                    let _ = accept_transmit(&mut outgoing, bytes, &events);
+                    idle = false;
+                    outgoing.push_back((bytes, 0));
                 }
                 // 网络通道没有 RTS / DTR：`ByteChannel::set_line_state` 的默认实现
                 // 直接报 `Unsupported`，所以这条指令到不了这里。写出来只是让 match
@@ -167,6 +223,8 @@ pub struct TcpChannel {
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
     commands: Option<Sender<WorkerCommand>>,
+    /// 待发容量的账本。见 [`worker::PendingLedger`] 的文档。
+    ledger: PendingLedger,
 }
 
 impl TcpChannel {
@@ -176,6 +234,7 @@ impl TcpChannel {
             state: Arc::new(AtomicU8::new(IDLE)),
             worker: None,
             commands: None,
+            ledger: PendingLedger::default(),
         }
     }
 }
@@ -204,15 +263,29 @@ impl ByteChannel for TcpChannel {
         // 交互式调试工具不该为了攒包而等待：小报文（几字节的指令）在 Nagle
         // 下会被压到 40 ms 才出去，而串口工具的用户已经习惯了"点一下就走"。
         stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(READ_TIMEOUT))?;
+
+        // **两个方向都设为非阻塞**（而不是只给读设一个超时）。
+        //
+        // 这是本通道唯一的"防卡死"手段，理由在模块文档「为什么写侧必须非阻塞」那节。
+        // 一句话：阻塞写的超时**给不出已写字节数**，于是"超时重试"会把同一段数据
+        // 重发出去；而非阻塞写由 `Ok(n)` 如实回报进度，既有界、又不重复。
+        //
+        // 代价是读侧也不能再靠 `set_read_timeout` 让内核帮着等（同一个 fd 的阻塞
+        // 属性是整体的），改为在 [`worker_main`] 里空闲时自己睡 [`IDLE_SLEEP`]。
+        stream.set_nonblocking(true)?;
 
         let state = Arc::clone(&self.state);
+        let worker_ledger = self.ledger.clone();
         let (commands, orders) = mpsc::channel::<WorkerCommand>();
         self.commands = Some(commands);
 
+        // 账本归零。通道对象在连接类型不变时会被**就地复用**（重连就是"同一个句柄
+        // 再 open 一次"），上一次退出时队列里可能还压着没写完的数据、额度没还。
+        self.ledger.reset();
+
         state.store(ACTIVE, Ordering::Release);
         self.worker = Some(thread::spawn(move || {
-            worker_main(stream, orders, sink, state);
+            worker_main(stream, orders, sink, state, worker_ledger);
         }));
         Ok(())
     }
@@ -238,13 +311,13 @@ impl ByteChannel for TcpChannel {
         self.state.load(Ordering::Acquire) == ACTIVE
     }
 
+    /// 交一段字节出去。**队列满会当场返回 `Err`**（判定在调用线程里做，
+    /// 靠 [`PendingLedger`] 的额度预约，见 `worker::submit` 的文档）。
     fn write(&mut self, bytes: Vec<u8>) -> io::Result<()> {
         let Some(commands) = self.commands.as_ref() else {
             return Err(io::Error::new(io::ErrorKind::NotConnected, "TCP 尚未连接"));
         };
-        commands
-            .send(WorkerCommand::Transmit(bytes))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "TCP 后台线程已退出"))
+        submit(&self.ledger, commands, bytes, "TCP")
     }
 
     fn configure(&mut self, settings: &dyn std::any::Any) -> io::Result<()> {
@@ -259,6 +332,7 @@ impl ByteChannel for TcpChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::communicationtrait::worker::MAX_PENDING_BYTES;
     use std::net::TcpListener;
     use std::time::Instant;
 
@@ -450,6 +524,167 @@ mod tests {
 
         let err = ch.open(tx).expect_err("重复 open 必须被拒绝");
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+
+        ch.close().expect("关闭应成功");
+        peer.join().expect("对端线程不应 panic");
+    }
+
+    /// ⭐ **背压的判据落在调用线程上**：一条自己就超过上限的负载必须**当场**被拒。
+    ///
+    /// 2026-09-24 之前，上限判在后台线程的队列上，`write()` 一律返回 `Ok`，于是
+    /// `app::ComTool::transmit` 照常记账、照常清空输入框——用户会看到"本条未发送"
+    /// 的提示与仍在增长的发送计数并存。这条钉的就是那个缺口已经堵上。
+    ///
+    /// 附带断言"被拒的那一条不占额度"：不然后续每一次发送都会被误拒，而用户看到的
+    /// 只是"没发多少就报队列满"。
+    #[test]
+    fn oversized_payload_is_refused_at_the_call_site() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("回环上应能监听");
+        let port = listener.local_addr().expect("应能取到监听地址").port();
+        let peer = thread::spawn(move || {
+            // 接受连接后什么也不做：队列排得多快全看我们自己。
+            let _accepted = listener.accept();
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let mut ch = TcpChannel::new();
+        ch.configure(&config_to(port)).expect("配置应被接受");
+        let (tx, _rx) = mpsc::channel();
+        ch.open(tx).expect("回环连接应立即成功");
+
+        let err = ch
+            .write(vec![0u8; MAX_PENDING_BYTES + 1])
+            .expect_err("单条就超过上限的负载必须当场被拒");
+        assert!(
+            err.to_string().contains("待发队列已满"),
+            "错误信息应说清是队列满（调用方会原样显示给用户），实际为: {err}"
+        );
+
+        ch.write(vec![1u8; 16])
+            .expect("被拒绝的那一条不该占着容量，后续小负载应仍能排上队");
+
+        ch.close().expect("关闭应成功");
+        peer.join().expect("对端线程不应 panic");
+    }
+
+    /// ⭐⭐ **对端不读时，TCP 也必须能立刻断开**（2026-09-24 修的核心判据）。
+    ///
+    /// 判据选在 `close()` 上，因为它一次暴露老实现的**两个后果**：写侧一旦阻塞，
+    /// worker 就再也看不到 `Halt`，`join()` 会一直等下去（实测 2 分 36 秒毫无进展）；
+    /// 同时指令队列不再被排空，待发上限也就形同虚设。
+    ///
+    /// 之所以把 `close()` 放进独立线程再 `recv_timeout`：万一这条回归了，它要报
+    /// "超时失败"，而不是把整个测试套件一起挂住——挂住的套件比失败的用例难查得多。
+    #[test]
+    fn close_returns_promptly_even_when_the_peer_never_reads() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("回环上应能监听");
+        let port = listener.local_addr().expect("应能取到监听地址").port();
+
+        // 对端接受连接后**一个字节都不读**，正好把我们的发送窗口掐死。
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            let _accepted = listener.accept();
+            let _ = accepted_tx.send(());
+            let _ = stop_rx.recv_timeout(Duration::from_secs(30));
+        });
+
+        let mut ch = TcpChannel::new();
+        ch.configure(&config_to(port)).expect("配置应被接受");
+        let (tx, _rx) = mpsc::channel();
+        ch.open(tx).expect("回环连接应立即成功");
+        // 连上之后再等对端"我已经接受了"的信号：反过来的话会等在一个永远不会发生的
+        // 事件上（accept 要等 connect 先到）。
+        accepted_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("对端应已接受连接");
+
+        // 先把**内核发送缓冲**灌满——这一步不能省。账本满只说明"有 1 MiB 压着还没
+        // 写出去"，而对端不读时真正会让 `write` 卡住的是内核缓冲；只把账本填满就
+        // 收手的话，内核可能还有空间把积压全吃掉，worker 于是根本没被卡住，
+        // 这条测试就成了空转（第一版就是这么假绿的）。
+        //
+        // 判据用"持续投两秒 + 至少投出去 2 MiB"，而不是"某一瞬间排不排得上队"。
+        let chunk = vec![0u8; 64 * 1024];
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut pushed = 0usize;
+        let mut refusals = 0usize;
+        while Instant::now() < deadline {
+            match ch.write(chunk.clone()) {
+                Ok(()) => pushed += chunk.len(),
+                Err(e) if e.to_string().contains("待发队列已满") => {
+                    refusals += 1;
+                    // 让 worker 有机会把缓冲里的数据挤出去，再把额度填回来。
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(e) => panic!("不该出现其它写错误: {e}"),
+            }
+        }
+        assert!(
+            pushed >= 2 * MAX_PENDING_BYTES,
+            "至少要投出去 2 MiB，内核缓冲才会真的被灌满；只投了 {pushed} 字节 ⇒ 这条\
+             测试没测到要测的东西"
+        );
+        assert!(
+            refusals > 0,
+            "对端一个字节都不读，投到这个量必然排不上队；一次没轮到说明上限根本没生效"
+        );
+
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = ch.close();
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+            "对端不读时 close() 也必须立刻返回：阻塞写会让后台线程永远卡在 write 上，\
+             点「断开」就再也回不来了"
+        );
+
+        let _ = stop_tx.send(());
+    }
+
+    /// ⭐ **`open()` 必须把账本归零**，否则重连后容量会凭空少一块。
+    ///
+    /// 为什么这条单独要测：通道对象在连接类型不变时会被**就地复用**（重连就是
+    /// "同一个句柄再 `open` 一次"，见 `app::ComTool::open_connection`），而 `close()`
+    /// 时队列里那些**确实没写出去**的数据的额度是不会被归还的（它们确实没出去）。
+    /// 不清的话，用户第二次连上以后会发现"什么都没发就报队列满"。
+    ///
+    /// 做法是直接把账本压满来模拟"上次留下的额度"——本模块内的测试摸得到通道自己的
+    /// 账本，不必真的去造一个"写到一半就断电"的场景。
+    #[test]
+    fn reopening_the_channel_clears_the_stale_quota() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("回环上应能监听");
+        let port = listener.local_addr().expect("应能取到监听地址").port();
+        let peer = thread::spawn(move || {
+            // 接受两次连接：第一次用完就断，第二次是重连。
+            let _first = listener.accept();
+            let _second = listener.accept();
+            thread::sleep(Duration::from_millis(200));
+        });
+
+        let mut ch = TcpChannel::new();
+        ch.configure(&config_to(port)).expect("配置应被接受");
+        let (tx, _rx) = mpsc::channel();
+        ch.open(tx).expect("首次连接应成功");
+        ch.close().expect("关闭应成功");
+
+        // 模拟上一次运行留下的、没还回来的额度。
+        ch.ledger
+            .reserve(MAX_PENDING_BYTES)
+            .expect("额度充足时应能占满");
+        assert!(ch.ledger.reserve(1).is_err(), "占满之后就该拒绝了");
+
+        let (tx2, _rx2) = mpsc::channel();
+        ch.open(tx2).expect("重连应成功");
+        assert_eq!(
+            ch.ledger.bytes(),
+            0,
+            "open 必须把上一次留下的额度清掉，否则重连后的容量凭空少一块"
+        );
+        ch.write(vec![1u8; 8])
+            .expect("容量已经回来了，小负载应该能排上队");
 
         ch.close().expect("关闭应成功");
         peer.join().expect("对端线程不应 panic");

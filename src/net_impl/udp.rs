@@ -23,6 +23,24 @@
 //!    错误会让用户第一次往没监听的端口发数据就把通道关掉。所以这里把它归入
 //!    **可忽略**，见 [`is_ignorable`]。
 //!
+//! # 为什么 UDP 不需要非阻塞写（与 TCP 的又一处差别）
+//!
+//! TCP 侧在 2026-09-24 从阻塞写改成了非阻塞写，理由是**对端不读会把本地发送缓冲
+//! 灌满**（TCP 的发送缓冲受对端接收窗口节制），`write` 于是永不返回、worker 卡死、
+//! 待发上限失效、`close()` 也回不来。详见 `net_impl::tcp` 的模块文档。
+//!
+//! **UDP 没有这个机制**：它没有流控，对端读不读**不参与**本地发送缓冲的判定——
+//! 收不下就是丢掉，发送端照样返回成功。所以"对端不读 ⇒ worker 卡死"这条路径在
+//! UDP 上不存在，也就没有理由付非阻塞的代价（读侧要自己睡、空闲时多一次显式让出）。
+//!
+//! 实测（对端 socket 绑好端口后一个字节都不收，发送端 SO_SNDBUF 压到 4096）：
+//! 连发 4000 个 60 KB 报文，**0 次失败、单次最长 0.1 ms**；同一台机器上换成 TCP
+//! 做同样的事，2 分 05 秒毫无进展。
+//!
+//! 仍然成立的一条：UDP 的 `send` **在本机出口饱和**时是可能阻塞的。那是另一个
+//! 触发条件（不是"对端不读"），且属"网卡发不出去"的真实反压，不是本文件要解的
+//! 问题；已记在 `HANDOVER.md` §5 里，未修。
+//!
 //! # 为什么要 `connect` 一个无连接的 socket
 //!
 //! 调用 `UdpSocket::connect` **不建立任何连接**（不发包、不等响应），它只做两件
@@ -43,7 +61,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::communicationtrait::worker::{
-    ACTIVE, IDLE, StateGuard, WorkerCommand, accept_transmit, is_transient,
+    ACTIVE, IDLE, PendingLedger, StateGuard, WorkerCommand, is_transient, retire_finished_chunk,
+    submit,
 };
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::net_impl::config::NetConfig;
@@ -79,6 +98,7 @@ fn worker_main(
     commands: Receiver<WorkerCommand>,
     events: Sender<ChannelEvent>,
     state: Arc<AtomicU8>,
+    ledger: PendingLedger,
 ) {
     let _guard = StateGuard(Arc::clone(&state));
 
@@ -120,19 +140,15 @@ fn worker_main(
                 }
             }
         }
-        if chunk_done {
-            outgoing.pop_front();
-        }
+        // 整段确实发出去之后才出队并把额度还给调用线程。
+        retire_finished_chunk(&mut outgoing, chunk_done, &ledger);
 
         // ———— 接收指令 ————
         loop {
             match commands.try_recv() {
-                // 与串口 / TCP 共用同一个带背压的入队函数（上限见
-                // `worker::MAX_PENDING_BYTES`）。多播 / 广播场景下内核发送缓冲
-                // 更容易满，无界队列同样会把内存吃光；满了拒绝并报一条 `Notice`。
-                Ok(WorkerCommand::Transmit(bytes)) => {
-                    let _ = accept_transmit(&mut outgoing, bytes, &events);
-                }
+                // 队列**直接 push**：容量已经在调用线程里由 `worker::submit` 预约过了，
+                // 这里不再判一遍（上限只有一处实现）。
+                Ok(WorkerCommand::Transmit(bytes)) => outgoing.push_back((bytes, 0)),
                 // 网络通道没有 RTS / DTR：`ByteChannel::set_line_state` 的默认实现
                 // 直接报 `Unsupported`，所以这条指令到不了这里。写出来只是让 match
                 // 穷尽——顺带说明"三个实现共用同一个指令枚举"是编译期强制同步的。
@@ -151,6 +167,8 @@ pub struct UdpChannel {
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
     commands: Option<Sender<WorkerCommand>>,
+    /// 待发容量的账本。见 [`worker::PendingLedger`] 的文档。
+    ledger: PendingLedger,
     /// 实际绑定到的本地地址（`local_port` 配 0 时由系统分配）。
     /// 是**运行时**信息，随 `close` 清掉。
     bound: Option<SocketAddr>,
@@ -163,6 +181,7 @@ impl UdpChannel {
             state: Arc::new(AtomicU8::new(IDLE)),
             worker: None,
             commands: None,
+            ledger: PendingLedger::default(),
             bound: None,
         }
     }
@@ -206,12 +225,17 @@ impl ByteChannel for UdpChannel {
         self.bound = socket.local_addr().ok();
 
         let state = Arc::clone(&self.state);
+        let worker_ledger = self.ledger.clone();
         let (commands, orders) = mpsc::channel::<WorkerCommand>();
         self.commands = Some(commands);
 
+        // 账本归零。通道对象在连接类型不变时会被**就地复用**（重连就是"同一个句柄
+        // 再 open 一次"），上一次退出时队列里可能还压着没发出去的数据、额度没还。
+        self.ledger.reset();
+
         state.store(ACTIVE, Ordering::Release);
         self.worker = Some(thread::spawn(move || {
-            worker_main(socket, orders, sink, state);
+            worker_main(socket, orders, sink, state, worker_ledger);
         }));
         Ok(())
     }
@@ -244,13 +268,16 @@ impl ByteChannel for UdpChannel {
         self.bound
     }
 
+    /// 交一段字节出去。**队列满会当场返回 `Err`**（判定在调用线程里做，
+    /// 靠 [`PendingLedger`] 的额度预约，见 `worker::submit` 的文档）。
+    ///
+    /// 与 TCP 的差别只在下游：UDP 写侧仍是**阻塞** socket。这是刻意的，理由见本文件
+    /// 顶部「为什么 UDP 不需要非阻塞写」。
     fn write(&mut self, bytes: Vec<u8>) -> io::Result<()> {
         let Some(commands) = self.commands.as_ref() else {
             return Err(io::Error::new(io::ErrorKind::NotConnected, "UDP 尚未绑定"));
         };
-        commands
-            .send(WorkerCommand::Transmit(bytes))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "UDP 后台线程已退出"))
+        submit(&self.ledger, commands, bytes, "UDP")
     }
 
     fn configure(&mut self, settings: &dyn std::any::Any) -> io::Result<()> {
@@ -265,6 +292,7 @@ impl ByteChannel for UdpChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::communicationtrait::worker::MAX_PENDING_BYTES;
     use crate::net_impl::DEFAULT_REMOTE_PORT;
     use std::time::Instant;
 
@@ -422,5 +450,66 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let err = ch.open(tx).expect_err("端口为 0 必须失败");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// ⭐ **背压的判据落在调用线程上**——三个实现共用 `worker::submit`，UDP 这一份
+    /// 同样要当场拒绝、并且不能占着额度不放。
+    ///
+    /// 与 TCP 那份是同一个缺口的两处复现：上限曾经判在后台线程的队列上，`write()`
+    /// 一律返回 `Ok`，于是 `app::ComTool::transmit` 照常记账、照常清空输入框。
+    #[test]
+    fn oversized_payload_is_refused_at_the_call_site() {
+        let (_peer, peer_port) = peer_socket();
+
+        let mut ch = UdpChannel::new();
+        ch.configure(&config_to(peer_port, 0))
+            .expect("配置应被接受");
+        let (tx, _rx) = mpsc::channel();
+        ch.open(tx).expect("UDP 绑定应立即成功");
+
+        let err = ch
+            .write(vec![0u8; MAX_PENDING_BYTES + 1])
+            .expect_err("单条就超过上限的负载必须当场被拒");
+        assert!(
+            err.to_string().contains("待发队列已满"),
+            "错误信息应说清是队列满（调用方会原样显示给用户），实际为: {err}"
+        );
+
+        ch.write(vec![1u8; 16])
+            .expect("被拒绝的那一条不该占着容量，后续小负载应仍能排上队");
+
+        ch.close().expect("关闭应成功");
+    }
+
+    /// ⭐ **`open()` 必须把账本归零**（与串口 / TCP 同一处约定）。
+    ///
+    /// 通道对象在连接类型不变时会被**就地复用**（重连就是"同一个句柄再 `bind` 一次"），
+    /// 而 `close()` 时队列里那些确实没发出去的数据的额度不会被归还。不清的话，用户
+    /// 第二次连上以后会"什么都没发就报队列满"。做法是直接把账本压满来模拟上次的残留。
+    #[test]
+    fn reopening_the_channel_clears_the_stale_quota() {
+        let (_peer, peer_port) = peer_socket();
+
+        let mut ch = UdpChannel::new();
+        ch.configure(&config_to(peer_port, 0))
+            .expect("配置应被接受");
+        let (tx, _rx) = mpsc::channel();
+        ch.open(tx).expect("UDP 绑定应立即成功");
+        ch.close().expect("关闭应成功");
+
+        ch.ledger
+            .reserve(MAX_PENDING_BYTES)
+            .expect("额度充足时应能占满");
+        assert!(ch.ledger.reserve(1).is_err(), "占满之后就该拒绝了");
+
+        let (tx2, _rx2) = mpsc::channel();
+        ch.open(tx2).expect("重新绑定应成功");
+        assert_eq!(
+            ch.ledger.bytes(),
+            0,
+            "open 必须把上一次留下的额度清掉，否则重连后的容量凭空少一块"
+        );
+
+        ch.close().expect("关闭应成功");
     }
 }

@@ -19,7 +19,8 @@ use std::time::Duration;
 use serialport::SerialPort;
 
 use crate::communicationtrait::worker::{
-    ACTIVE, IDLE, OPENING, StateGuard, WorkerCommand, accept_transmit, is_transient,
+    ACTIVE, IDLE, OPENING, PendingLedger, StateGuard, WorkerCommand, is_transient,
+    retire_finished_chunk, submit,
 };
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::serial_impl::config::SerialConfig;
@@ -55,6 +56,7 @@ fn worker_main(
     commands: Receiver<WorkerCommand>,
     events: Sender<ChannelEvent>,
     state: Arc<AtomicU8>,
+    ledger: PendingLedger,
 ) {
     let _guard = StateGuard(Arc::clone(&state));
 
@@ -120,21 +122,18 @@ fn worker_main(
                 }
             }
         }
-        if chunk_done {
-            outgoing.pop_front();
-        }
+        // 整段确实写完之后才出队并把额度还给调用线程；写出去多少字节由驱动如实
+        // 回报（`Ok(n)`），所以不会多还也不会少还。
+        retire_finished_chunk(&mut outgoing, chunk_done, &ledger);
 
         // ———— 接收指令 ————
         // 一次排空，避免高速收发时指令积压；`Halt` 在任何时刻都能被看到，
         // 因此 `close()` 的等待时长始终由一轮读写决定，不被待发数据拖住。
         loop {
             match commands.try_recv() {
-                // 入队走**带背压**的 `accept_transmit`（上限见 `worker::MAX_PENDING_BYTES`）：
-                // 设备长时间不可写时队列只增不减会把内存吃光，满了必须明确拒绝并
-                // 报一条 `Notice`，而不是继续吃内存、也不是静默丢数据。
-                Ok(WorkerCommand::Transmit(bytes)) => {
-                    let _ = accept_transmit(&mut outgoing, bytes, &events);
-                }
+                // 队列**直接 push**：容量已经在调用线程里由 `worker::submit` 预约过了，
+                // 这里不再判一遍。上限只有一处实现，判两遍迟早会分叉成两套口径。
+                Ok(WorkerCommand::Transmit(bytes)) => outgoing.push_back((bytes, 0)),
                 Ok(WorkerCommand::SetLineState { rts, dtr }) => {
                     // 现场直接改：这两个调用只是驱动层的两次控制请求，不阻塞。
                     // 失败走 `Notice` 而不是 `Failed`——拉不动一根控制线并不代表
@@ -165,6 +164,9 @@ pub struct SerialChannel {
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
     commands: Option<Sender<WorkerCommand>>,
+    /// 待发容量的账本。UI 侧持有它才能在 `write()` 里**当场**知道排不排得上队
+    /// （理由见 `worker::PendingLedger` 的文档：那正是"队列满却报成功"的根）。
+    ledger: PendingLedger,
 }
 
 impl SerialChannel {
@@ -174,6 +176,7 @@ impl SerialChannel {
             state: Arc::new(AtomicU8::new(IDLE)),
             worker: None,
             commands: None,
+            ledger: PendingLedger::default(),
         }
     }
 
@@ -203,8 +206,14 @@ impl ByteChannel for SerialChannel {
         // 后台线程拿一份自己的 `state` 克隆，线程内**先**置 `ACTIVE` 再打开端口
         // ——`is_active()` 因此有确定的次序（见本方法的文档）。
         let worker_state = Arc::clone(&self.state);
+        let worker_ledger = self.ledger.clone();
         let (commands, orders) = mpsc::channel::<WorkerCommand>();
         self.commands = Some(commands);
+
+        // 账本归零。通道对象在连接类型不变时会被**就地复用**（重连就是"同一个句柄
+        // 再 open 一次"），上一次运行退出时队列里可能还压着没写完的数据、额度没还，
+        // 不清掉会让重开后的容量凭空少一块。
+        self.ledger.reset();
 
         // **本线程先置 `OPENING`，后台线程接管后才升到 `ACTIVE`。**
         //
@@ -215,7 +224,7 @@ impl ByteChannel for SerialChannel {
         // 线程会先把状态推到 `ACTIVE`、UI 这一句再把它踩回 `OPENING`。
         self.state.store(OPENING, Ordering::Release);
         self.worker = Some(thread::spawn(move || {
-            worker_main(cfg, orders, sink, worker_state);
+            worker_main(cfg, orders, sink, worker_state, worker_ledger);
         }));
         Ok(())
     }
@@ -260,13 +269,17 @@ impl ByteChannel for SerialChannel {
         self.state.load(Ordering::Acquire) == ACTIVE
     }
 
+    /// 交一段字节出去。**队列满会当场返回 `Err`**（判定在调用线程里做，
+    /// 靠 [`PendingLedger`] 的额度预约，见 `worker::submit` 的文档）。
+    ///
+    /// 这一条对本项目很要紧：调用方（`app::ComTool::transmit`）是"`Ok` 才记账、
+    /// `Ok` 才清空输入框"。异步判定会让它在队列满时照记账、照清空，用户于是看到
+    /// "本条未发送"的提示与仍在增长的发送计数并存、刚敲的内容也被清掉。
     fn write(&mut self, bytes: Vec<u8>) -> io::Result<()> {
         let Some(commands) = self.commands.as_ref() else {
             return Err(io::Error::new(io::ErrorKind::NotConnected, "串口尚未打开"));
         };
-        commands
-            .send(WorkerCommand::Transmit(bytes))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "串口后台线程已退出"))
+        submit(&self.ledger, commands, bytes, "串口")
     }
 
     fn configure(&mut self, settings: &dyn std::any::Any) -> io::Result<()> {
@@ -309,6 +322,7 @@ pub fn scan_ports() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::communicationtrait::worker::MAX_PENDING_BYTES;
     use std::time::Instant;
 
     /// 一个基本不可能存在的端口名，用于稳定地触发「打开失败」路径。
@@ -514,6 +528,60 @@ mod tests {
             ch.is_active(),
             "稳定态（非「正在打开」窗口内）两者必须一致"
         );
+        ch.close().expect("关闭应成功");
+    }
+
+    /// ⭐ **背压的判据落在调用线程上**（三个实现共用 `worker::submit`），串口这一份
+    /// 不必连硬件也能验：打开一个必然失败的端口即可——通道对象仍然在，`write()`
+    /// 会走到同一个 `submit`，判定完全在调用线程内完成。
+    ///
+    /// 与 TCP / UDP 那两条是同一个缺口的三处复现：上限曾经判在后台线程的队列上，
+    /// `write()` 一律返回 `Ok`，于是 `app::ComTool::transmit` 照常记账、照常把用户
+    /// 刚敲的内容清掉。
+    #[test]
+    fn oversized_payload_is_refused_at_the_call_site() {
+        let mut ch = SerialChannel::new();
+        ch.configure(&absent_port_config()).expect("配置应被接受");
+        let (tx, _rx) = mpsc::channel();
+        ch.open(tx).expect("open 只负责拉起线程，应立即返回 Ok");
+
+        let err = ch
+            .write(vec![0u8; MAX_PENDING_BYTES + 1])
+            .expect_err("单条就超过上限的负载必须当场被拒");
+        assert!(
+            err.to_string().contains("待发队列已满"),
+            "错误信息应说清是队列满（调用方会原样显示给用户），实际为: {err}"
+        );
+
+        ch.close().expect("关闭应成功");
+    }
+
+    /// ⭐ **`open()` 必须把账本归零**（与 TCP / UDP 同一处约定）。
+    ///
+    /// 通道对象在连接类型不变时会被**就地复用**（重连就是"同一个句柄再 `open` 一次"），
+    /// 而 `close()` 时队列里那些确实没写出去的数据的额度不会被归还。不清的话，用户
+    /// 第二次连上以后会"什么都没发就报队列满"。做法是直接把账本压满来模拟上次的残留。
+    #[test]
+    fn reopening_the_channel_clears_the_stale_quota() {
+        let mut ch = SerialChannel::new();
+        ch.configure(&absent_port_config()).expect("配置应被接受");
+        let (tx, _rx) = mpsc::channel();
+        ch.open(tx).expect("open 只负责拉起线程，应立即返回 Ok");
+        ch.close().expect("关闭应成功");
+
+        ch.ledger
+            .reserve(MAX_PENDING_BYTES)
+            .expect("额度充足时应能占满");
+        assert!(ch.ledger.reserve(1).is_err(), "占满之后就该拒绝了");
+
+        let (tx2, _rx2) = mpsc::channel();
+        ch.open(tx2).expect("重连应成功");
+        assert_eq!(
+            ch.ledger.bytes(),
+            0,
+            "open 必须把上一次留下的额度清掉，否则重连后的容量凭空少一块"
+        );
+
         ch.close().expect("关闭应成功");
     }
 }

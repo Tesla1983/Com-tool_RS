@@ -84,7 +84,17 @@ pub trait ByteChannel: Send {
         None
     }
 
-    /// 把一段字节交给后台线程发出。调用方不必等待写入完成。
+    /// 把一段字节交给后台线程发出。**不等待写入完成，但当场判定能不能排队**。
+    ///
+    /// 返回 `Ok` 的含义是"**已经排上队**，后台线程会负责把它写出去"，不是"已经写到
+    /// 对端了"——真正的写入仍在后台线程上做（本模块文档第 2 条）。
+    ///
+    /// 与之相对，返回 `Err` 的两类情况都是**当场就有定论**的：
+    ///
+    /// * 通道不可用（未打开 / 后台线程已退出）；
+    /// * **待发队列已满**（[`worker::MAX_PENDING_BYTES`]）——这一条必须是同步的，
+    ///   否则调用方会把"只是排上了队"当成"发出去了"，于是记账虚高、还会把用户
+    ///   没发出去的内容清掉。判定落在调用线程里，靠的是 [`worker::PendingLedger`]。
     fn write(&mut self, bytes: Vec<u8>) -> io::Result<()>;
 
     /// 在 `open` 之前提交配置。
@@ -121,14 +131,15 @@ pub trait ByteChannel: Send {
 ///
 /// 三个实现（串口 / TCP / UDP）的后台线程结构是同一个：独占一个 IO 句柄，
 /// 每轮「读一次 → 推进一次写 → 排空指令队列」，用 [`WorkerCommand`] 停机、
-/// 用 [`StateGuard`] 保证状态归位。这些**不是"看起来像"就该复制的样板**——
-/// 「线程退出后状态必须归位」「`Halt` 在任何时刻都要能被看到」是三条实现共有的
+/// 用 [`StateGuard`] 保证状态归位、用 [`PendingLedger`] 记账待发容量。这些
+/// **不是"看起来像"就该复制的样板**——「线程退出后状态必须归位」「`Halt` 在任何
+/// 时刻都要能被看到」「待发数据一件都还没发出去时不能报成功」是三条实现共有的
 /// 硬约定（见本模块文档第 3、4 条），复制三份迟早有一份走偏。
 pub(crate) mod worker {
     use std::collections::VecDeque;
     use std::io;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
     /// UI 侧投给后台线程的指令。
     pub(crate) enum WorkerCommand {
@@ -200,149 +211,319 @@ pub(crate) mod worker {
     ///
     /// **为什么是 1 MiB**：串口工具的现实负载是"几十字节的指令 + 偶发几百 KB 的
     /// 固件块"。1 MiB 足够缓冲一条很长的报文，同时把单次故障的内存占用钉在
-    /// 可解释的量级；超出的部分**拒绝入队并明确报错**，而不是继续吃内存。
+    /// 可解释的量级；超出的部分**拒绝并明确报错**，而不是继续吃内存。
     ///
-    /// 这个值是**共享**的：串口与 TCP 用同一个上限，判定逻辑也只写一处
-    /// （[`push_bounded`]）——两个实现各写一份，迟早有一份被改歪。
+    /// 判定只写一处（[`PendingLedger::reserve`]），三个实现共用同一个值——
+    /// 各写一份迟早有一份被改歪，而且偏的那一份不会有测试失败来提醒。
     pub(crate) const MAX_PENDING_BYTES: usize = 1024 * 1024;
 
-    /// 把一段待发数据追加到队尾，**带字节上限**。
+    /// 待发队列的**容量账本**：调用线程预约额度，后台线程写完后归还。
     ///
-    /// 返回 `Ok(())` 表示已入队；返回 `Err(pending)` 表示**已拒绝**，实参是拒绝
-    /// 时的在队字节数（仅供调用方拼错误信息）。
+    /// # 为什么需要它（而不是"在队列上判上限"）
     ///
-    /// 判定只看"在队字节数的合计"，不看条数：一条 4 MiB 的报文与四千条 1 KiB 的
-    /// 指令对内存的压力相同，按条数限流会放过前者、误伤后者。
+    /// 队列本体归后台线程独占（本模块文档第 2 条：UI 线程不做 IO），所以调用线程
+    /// **看不见**它。之前把上限判在后台线程的队列上（`push_bounded`），信息回路是
+    /// 单向的：UI 投出去就返回 `Ok`，"排不上队"这件事**回不到**调用线程。用户能
+    /// 看见的两个后果都是这么来的：
     ///
-    /// **满了就拒绝，绝不静默丢弃也不无限增长**。这与 HEX / 转义解析失败时
-    /// "不发送但给提示"是同一条原则：数据没出去必须让用户知道，界面上的
-    /// "发送字节计数"也才不会记账。
-    pub(crate) fn push_bounded(
-        outgoing: &mut VecDeque<(Vec<u8>, usize)>,
-        bytes: Vec<u8>,
-    ) -> Result<(), usize> {
-        let pending: usize = outgoing.iter().map(|(b, _)| b.len()).sum();
-        if pending + bytes.len() > MAX_PENDING_BYTES {
-            return Err(pending);
-        }
-        outgoing.push_back((bytes, 0));
-        Ok(())
-    }
+    /// * 状态栏的「发送字节数」把根本没发出去的数据也算上；
+    /// * 「发送后清空」把用户刚敲下、其实没发出去的内容清掉。
+    ///
+    /// 把它做成一个**两侧都能读的原子计数**，`write()` 就能在调用线程里当场知道
+    /// 排不上队，于是 `write()` 返回 `Err`、调用方既不记账也不清空——两个症状一起
+    /// 消失，而且不需要调用方额外判断什么（它本来就是"`Ok` 才记账"）。
+    ///
+    /// # 它数的是哪一段
+    ///
+    /// 数的是"**用户已经交出去、但一个字节都还没写出去**"的合计：包括还在 mpsc 通道
+    /// 里没被取走的、以及已经在后台队列里等着的。这比"只数队列里的"更贴近用户感知
+    /// ——压着没发出去的就是压着。
+    ///
+    /// # 用完了要还
+    ///
+    /// 额度在两个地方归还：后台线程把**整段**写完时（[`PendingLedger::release`]），
+    /// 以及 `open` 时的 [`PendingLedger::reset`]。后者是必需的：通道对象在类型不变时
+    /// 会被**就地复用**（见 `app::ComTool::open_connection`），上次运行结束时可能还
+    /// 挂着没写完的额度，不清掉会让重开后的容量凭空少一块。
+    #[derive(Clone, Default)]
+    pub(crate) struct PendingLedger(Arc<AtomicUsize>);
 
-    /// 处理一条 [`WorkerCommand::Transmit`]：带背压入队，满了报一条 `Notice`。
-    ///
-    /// 抽成函数而不是在两个/三个 `worker_main` 里各写一段：入队策略（上限、
-    /// 拒绝时的措辞、走 `Notice` 而非 `Failed`）必须**只有一处实现**，
-    /// 三个实现各写一份迟早有一份走偏，而且偏的那一份不会有人发现。
-    ///
-    /// 返回 `Err(pending)` 便于调用方与测试断言"确实是被拒绝了"。
-    pub(crate) fn accept_transmit(
-        outgoing: &mut VecDeque<(Vec<u8>, usize)>,
-        bytes: Vec<u8>,
-        events: &std::sync::mpsc::Sender<crate::communicationtrait::ChannelEvent>,
-    ) -> Result<(), usize> {
-        match push_bounded(outgoing, bytes) {
-            Ok(()) => Ok(()),
-            Err(pending) => {
-                // 走 `Notice` 而非 `Failed`：队列满只说明"这一下没排上队"，
-                // 通道本身好好的，判成掉线会让界面从"已连接"跳走、还会停掉定时发送。
-                let _ = events.send(crate::communicationtrait::ChannelEvent::Notice(format!(
-                    "待发队列已满（在队 {pending} 字节，上限 {MAX_PENDING_BYTES} 字节），本条未发送"
-                )));
-                Err(pending)
+    impl PendingLedger {
+        /// 预约 `len` 字节的额度；满了返回 `Err(在队字节数)`（供调用方拼错误信息）。
+        ///
+        /// 用 CAS 循环而不是"读一次、判一次、写一次"：判定与占用必须是**一个原子
+        /// 步骤**，否则两个调用线程可以同时通过判定、把合计推过上限。眼下只有 UI
+        /// 一个生产者，但那是调用方的巧合，不该由这里来假设。
+        ///
+        /// 边界是**闭**的：恰好等于 [`MAX_PENDING_BYTES`] 接受，多一个字节拒绝。
+        /// 容量比标称值少一个字节是那种"说明和实现对不上"的小毛病，专门有一条测试钉住。
+        pub(crate) fn reserve(&self, len: usize) -> Result<(), usize> {
+            let mut cur = self.0.load(Ordering::Acquire);
+            loop {
+                if cur + len > MAX_PENDING_BYTES {
+                    return Err(cur);
+                }
+                match self.0.compare_exchange_weak(
+                    cur,
+                    cur + len,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Ok(()),
+                    // 别的线程抢先改了，拿新值重判——不能直接放弃，否则会误拒。
+                    Err(actual) => cur = actual,
+                }
             }
         }
+
+        /// 归还 `len` 字节额度。后台线程**确实把整段写完之后**才调用。
+        ///
+        /// 不做"写到一半就按比例还"：额度记账的粒度就是"条"，一条写完了才算出去。
+        /// 按字节比例还会引入一个更难解释的口径（用户看到的"在队字节数"到底指什么）。
+        pub(crate) fn release(&self, len: usize) {
+            self.0.fetch_sub(len, Ordering::AcqRel);
+        }
+
+        /// 归零。每次 `open` 都要做——理由见本类型的文档「用完了要还」。
+        pub(crate) fn reset(&self) {
+            self.0.store(0, Ordering::Release);
+        }
+
+        /// 当前在队字节数。只给测试与诊断用（界面暂未展示它）。
+        #[cfg(test)]
+        pub(crate) fn bytes(&self) -> usize {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    /// 队首那一段写完了就出队，并把额度还给调用线程。
+    ///
+    /// 三个 `worker_main` 共用它。这两件事**必须一起做**：只出队不归还 ⇒ 容量只减
+    /// 不增（用户发上一会儿就永远报"队列满"，而通道其实好得很）；只归还不出队 ⇒
+    /// 同一段数据被反复重发。合成一处就不会有一份实现只做了其中一半——而那种漏法
+    /// 恰恰不会有测试失败来提醒（真通道上的写入要硬件才能驱动）。
+    pub(crate) fn retire_finished_chunk(
+        outgoing: &mut VecDeque<(Vec<u8>, usize)>,
+        finished: bool,
+        ledger: &PendingLedger,
+    ) {
+        if !finished {
+            return;
+        }
+        if let Some((done, _)) = outgoing.pop_front() {
+            ledger.release(done.len());
+        }
+    }
+
+    /// 把一段字节交给后台线程：**先预约额度，再投递；投递失败要退还**。
+    ///
+    /// 三个实现共用它。这三步里漏掉任何一步都会产生一个静默偏差——漏预约等于上限
+    /// 失效，漏退还等于重开后的容量凭空变小——而且都不会有测试失败来提醒。各写一份
+    /// 迟早有一份漏，所以只留这一处。
+    ///
+    /// `noun` 是传输名（"串口" / "TCP" / "UDP"），只用于拼"后台线程已退出"这句
+    /// 错误信息，让用户在接收区里一眼看出是哪条通道出的问题。
+    pub(crate) fn submit(
+        ledger: &PendingLedger,
+        commands: &std::sync::mpsc::Sender<WorkerCommand>,
+        bytes: Vec<u8>,
+        noun: &str,
+    ) -> io::Result<()> {
+        let len = bytes.len();
+        if let Err(pending) = ledger.reserve(len) {
+            // 文案与后台线程那条 `Notice` 保持一致（同一个判据，不该长出两种说法）。
+            // 不同的是：现在它是**同步**返回的错误，用户当场就能看到，而不是过一会儿
+            // 从接收区里冒出来。
+            return Err(io::Error::other(format!(
+                "待发队列已满（在队 {pending} 字节，上限 {MAX_PENDING_BYTES} 字节），本条未发送"
+            )));
+        }
+        if commands.send(WorkerCommand::Transmit(bytes)).is_err() {
+            // 后台线程已经退出，这段数据没有去处——把额度还回去。不还的话，通道在
+            // 类型不变时会被就地复用，下一次 `open` 之前这段"幽灵额度"会让容量变少。
+            ledger.release(len);
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("{noun}后台线程已退出"),
+            ));
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod worker_tests {
-    use super::worker::{MAX_PENDING_BYTES, accept_transmit, push_bounded};
-    use crate::communicationtrait::ChannelEvent;
+    use super::worker::{
+        MAX_PENDING_BYTES, PendingLedger, WorkerCommand, retire_finished_chunk, submit,
+    };
     use std::collections::VecDeque;
     use std::sync::mpsc;
 
-    /// 空队列应接受任意合法长度的数据。
-    #[test]
-    fn push_bounded_accepts_within_capacity() {
-        let mut q: VecDeque<(Vec<u8>, usize)> = VecDeque::new();
-        push_bounded(&mut q, vec![0u8; 1024]).expect("远小于上限应接受");
-        assert_eq!(q.len(), 1, "入队后队列应有一条");
-    }
-
-    /// **核心判据**：累计字节数越界时必须拒绝，并且**不改动队列**。
+    /// 额度从空一直给到上限，**恰好等于上限要接受**（边界是闭的）。
     ///
-    /// 断言的是"拒绝后队列长度不变"——只看返回值会漏掉"先 push 再报错"这种
-    /// 半吊子实现（数据进去了、调用方却以为没进去）。
+    /// 断言写成"MAX 接受、再要一个字节就拒绝"两段：容量比标称值少一个字节是那种
+    /// "说明和实现对不上"的小毛病，只测一侧两边都测不出来。
     #[test]
-    fn push_bounded_rejects_over_capacity_without_mutating() {
-        let mut q: VecDeque<(Vec<u8>, usize)> = VecDeque::new();
-        // 先塞满到接近上限。
-        push_bounded(&mut q, vec![0u8; MAX_PENDING_BYTES - 10]).expect("刚好不越界应接受");
-        let before = q.len();
-
-        let err = push_bounded(&mut q, vec![0u8; 20]).expect_err("越界必须被拒绝");
-        assert!(err > 0, "错误信息里应带上在队字节数，实际为 {err}");
-        assert_eq!(q.len(), before, "拒绝时不得改动队列");
-    }
-
-    /// 恰好等于上限应被接受（边界不能差一）。
-    #[test]
-    fn push_bounded_boundary_is_inclusive() {
-        let mut q: VecDeque<(Vec<u8>, usize)> = VecDeque::new();
-        push_bounded(&mut q, vec![0u8; MAX_PENDING_BYTES])
+    fn ledger_hands_out_quota_up_to_the_cap() {
+        let ledger = PendingLedger::default();
+        ledger
+            .reserve(MAX_PENDING_BYTES)
             .expect("恰好等于上限必须接受，否则容量比标称值少一个字节");
-        assert_eq!(q.len(), 1);
+        assert_eq!(
+            ledger.bytes(),
+            MAX_PENDING_BYTES,
+            "预约之后账本要如实记下在队量"
+        );
+
+        assert_eq!(
+            ledger.reserve(1).expect_err("已经满额时必须拒绝"),
+            MAX_PENDING_BYTES,
+            "拒绝时要把当前在队字节数带出来，供调用方拼错误信息"
+        );
+        assert_eq!(ledger.bytes(), MAX_PENDING_BYTES, "被拒的预约不得改动账本");
     }
 
-    /// 多条小数据累加越界同样要被拒——判定必须看**合计字节**而不是条数。
+    /// 多条小负载累加同样会顶到上限——判定看的是**合计字节**而不是条数。
+    ///
+    /// 一条 4 MiB 的报文与四千条 1 KiB 的指令对内存的压力相同；按条数限流会放过
+    /// 前者、误伤后者。
     #[test]
-    fn push_bounded_counts_total_bytes_not_entries() {
-        let mut q: VecDeque<(Vec<u8>, usize)> = VecDeque::new();
-        // 每条 1 KiB，塞到接近上限。
-        let chunk = vec![0u8; 1024];
+    fn ledger_counts_total_bytes_not_entries() {
+        let ledger = PendingLedger::default();
         for _ in 0..(MAX_PENDING_BYTES / 1024) {
-            push_bounded(&mut q, chunk.clone()).expect("累加到上限之前都应接受");
+            ledger.reserve(1024).expect("累加到上限之前都应接受");
         }
-        // 再加一条必然越界。
         assert!(
-            push_bounded(&mut q, chunk).is_err(),
+            ledger.reserve(1024).is_err(),
             "合计字节越界必须被拒绝，与条数无关"
         );
     }
 
-    /// **核心行为判据**：溢出时事件通道里必须收到一条 `Notice`。
-    ///
-    /// 这是"串口 / TCP / UDP 三个后台线程到底有没有真的报错"的判定点——
-    /// 只看 `push_bounded` 的返回值无法证明调用方处理了它。断言落在**事件内容**
-    /// 与**非致命**这两件事上：消息要说明是队列满，而且**不能**是 `Failed`
-    /// （`Failed` 会让界面从"已连接"跳走、还会停掉定时发送）。
+    /// 归还之后额度要能重新用——写出去的数据不该永久占着容量。
     #[test]
-    fn accept_transmit_reports_notice_on_overflow() {
+    fn ledger_release_returns_the_quota() {
+        let ledger = PendingLedger::default();
+        ledger.reserve(MAX_PENDING_BYTES).expect("应接受");
+        assert!(ledger.reserve(1).is_err(), "用满后应拒绝");
+
+        ledger.release(64);
+        assert_eq!(ledger.bytes(), MAX_PENDING_BYTES - 64, "归还多少就少多少");
+        ledger.reserve(64).expect("归还回来的额度应能立刻再用");
+        assert!(ledger.reserve(1).is_err(), "再要一个字节又该拒绝了");
+    }
+
+    /// ⭐ **归零**：通道对象在类型不变时会被**就地复用**（见
+    /// `app::ComTool::open_connection`），所以每次 `open` 都得清一次账本。
+    /// 不清的话，上一次运行留下的"幽灵额度"会让重开后的容量凭空少一块——用户
+    /// 会看到"明明没发多少就报队列满"。
+    #[test]
+    fn ledger_reset_clears_the_quota() {
+        let ledger = PendingLedger::default();
+        ledger.reserve(MAX_PENDING_BYTES).expect("应接受");
+        ledger.reset();
+        assert_eq!(ledger.bytes(), 0, "归零后账本必须为空");
+        ledger
+            .reserve(MAX_PENDING_BYTES)
+            .expect("归零后应能重新用满一整份容量");
+    }
+
+    /// ⭐ **出队与归还必须同时发生**。
+    ///
+    /// 只出队不归还 ⇒ 容量只减不增（用户发上一会儿就永远报队列满，而通道其实好好
+    /// 的）；只归还不出队 ⇒ 同一段数据被反复重发。两条都是那种在真通道上才暴露、
+    /// 而真通道要硬件才能驱动的漏法，所以在这里一次钉住。
+    #[test]
+    fn retiring_a_finished_chunk_pops_it_and_returns_the_quota() {
+        let ledger = PendingLedger::default();
         let mut q: VecDeque<(Vec<u8>, usize)> = VecDeque::new();
-        let (tx, rx) = mpsc::channel();
+        ledger.reserve(300).expect("额度充足");
+        q.push_back((vec![0u8; 100], 100));
+        q.push_back((vec![0u8; 200], 200));
 
-        // 先塞满到上限。
-        accept_transmit(&mut q, vec![0u8; MAX_PENDING_BYTES], &tx).expect("恰好等于上限应接受");
-        assert!(rx.try_recv().is_err(), "未溢出时不应产生任何事件");
+        // 还没写完：队列与账本都不许动。
+        retire_finished_chunk(&mut q, false, &ledger);
+        assert_eq!(q.len(), 2, "没写完就不该出队");
+        assert_eq!(ledger.bytes(), 300, "没写完就不该归还额度");
 
-        // 再投一条，必然溢出。
-        let refused = accept_transmit(&mut q, vec![1u8; 8], &tx);
-        assert!(refused.is_err(), "越界必须返回 Err 供调用方判断");
+        // 写完了：出队 + 归还。
+        retire_finished_chunk(&mut q, true, &ledger);
+        assert_eq!(q.len(), 1, "写完的那一段必须出队，否则会一直重发同一段");
+        assert_eq!(ledger.bytes(), 200, "写完的那一段要把额度还回去");
+    }
 
-        match rx.recv_timeout(std::time::Duration::from_secs(1)) {
-            Ok(ChannelEvent::Notice(msg)) => {
-                assert!(
-                    msg.contains("待发队列已满"),
-                    "提示应说清是队列满，实际为: {msg}"
-                );
-            }
-            Ok(ChannelEvent::Failed(msg)) => {
-                panic!("队列满不是掉线，绝不能走 Failed（会让界面跳成未连接），实际为: {msg}");
-            }
-            Ok(other) => panic!("溢出应上报 Notice，实际收到: {other:?}"),
-            Err(e) => panic!("溢出必须上报事件，但没收到: {e}"),
+    /// 空队列上"写完了"也不得 panic，并且账本不许被减成负数（`usize` 会绕成一个
+    /// 巨大值，那会让后续的每一次 `reserve` 都被误拒）。
+    #[test]
+    fn retiring_on_an_empty_queue_is_a_no_op() {
+        let ledger = PendingLedger::default();
+        let mut q: VecDeque<(Vec<u8>, usize)> = VecDeque::new();
+        retire_finished_chunk(&mut q, true, &ledger);
+        assert_eq!(ledger.bytes(), 0);
+        ledger.reserve(1).expect("账本不该被减坏");
+    }
+
+    /// ⭐ **核心判据**：满了必须**在调用线程里当场**返回错误，而且**一个字节都没交出去**。
+    ///
+    /// 断言"接收端一条命令都没收到"是关键——只看返回值的版本漏得掉"先投递再报错"
+    /// 这种半吊子实现（数据进去了、调用方却以为没进去）。那正是本次要修的缺陷的
+    /// 原始形态：上限挂在后台线程上，调用方无从知道。
+    #[test]
+    fn submit_refuses_when_the_ledger_is_full_and_queues_nothing() {
+        let ledger = PendingLedger::default();
+        let (tx, rx) = mpsc::channel::<WorkerCommand>();
+        ledger.reserve(MAX_PENDING_BYTES).expect("先把额度用光");
+
+        let err = submit(&ledger, &tx, vec![1u8; 8], "TCP").expect_err("满了必须当场报错");
+        assert!(
+            err.to_string().contains("待发队列已满"),
+            "错误信息应说清是队列满，实际为: {err}"
+        );
+        assert!(
+            err.to_string().contains(&MAX_PENDING_BYTES.to_string()),
+            "错误信息应带上上限，用户才判断得出要等多久，实际为: {err}"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "被拒绝的数据绝不能已经投给后台线程——那等于上限根本没生效"
+        );
+    }
+
+    /// 正常路径：预约成功后数据确实到了后台线程手上，账本也如实记着。
+    #[test]
+    fn submit_hands_the_bytes_to_the_worker_and_charges_the_ledger() {
+        let ledger = PendingLedger::default();
+        let (tx, rx) = mpsc::channel::<WorkerCommand>();
+
+        submit(&ledger, &tx, vec![7u8; 512], "串口").expect("额度充足时应接受");
+        assert_eq!(ledger.bytes(), 512, "接受的字节要记进账本");
+
+        match rx.try_recv().expect("应收到一条 Transmit") {
+            WorkerCommand::Transmit(bytes) => assert_eq!(bytes, vec![7u8; 512]),
+            _ => panic!("投给后台线程的应当是 Transmit"),
         }
+    }
+
+    /// 后台线程已经退出时投递会失败——此时**必须把刚预约的额度还回去**。
+    ///
+    /// 不还的后果很难查：通道被就地复用，重开之后容量少了一块，而用户看到的只是
+    /// "没发多少就报队列满"。
+    #[test]
+    fn submit_returns_the_quota_when_the_worker_is_gone() {
+        let ledger = PendingLedger::default();
+        let (tx, rx) = mpsc::channel::<WorkerCommand>();
+        drop(rx); // 后台线程退出 ⇒ 指令通道断开
+
+        let err = submit(&ledger, &tx, vec![0u8; 4096], "UDP").expect_err("投不出去必须报错");
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(
+            err.to_string().contains("UDP"),
+            "错误信息应指出是哪条通道退出了，实际为: {err}"
+        );
+        assert_eq!(
+            ledger.bytes(),
+            0,
+            "投递失败必须退还额度，否则重开后的容量会变少"
+        );
     }
 }
 
