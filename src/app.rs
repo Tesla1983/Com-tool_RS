@@ -1277,7 +1277,13 @@ impl eframe::App for ComTool {
             self.pick_log_dir();
         }
 
-        // ③ 中央区
+        // ③ 底部状态栏
+        // **必须在 CentralPanel 之前**：egui 的面板先画先占位，后画的只能拿到
+        // 剩下的空间。放在中央区之后画，状态栏就只横跨中央区剩余宽度，
+        // 左右两边露出缝隙，看起来像没对齐。
+        self.show_status_bar(ui);
+
+        // ④ 中央区
         let s = self.language.strings();
         egui::CentralPanel::default().show(ui, |ui| {
             // 设置 / 信息两个窗口跟着中央区一起绘制（主界面的常驻部分）

@@ -143,6 +143,23 @@ strings! {
     available_ports: "可用串口", "Available ports";
     none_placeholder: "（无）", "(none)";
 
+    // —— status_bar.rs：底部状态栏 ——
+    // 这里刻意是**短词**（"已连接" / "未连接"），与侧边栏那套 "状态: 已连接" 分开写：
+    // 侧边栏是一行行读数（前缀"状态:"有助于扫读），状态栏是常驻指示，前缀是噪音。
+    // 两者必须给出**同一结论**，所以词义按同一套四态来（含 UDP 的"已绑定/未绑定"，
+    // 见 `ConnectionKind` 的文档：UDP 没有连接，说"已连接"会让用户以为对端在线）。
+    statusbar_connected: "已连接", "Connected";
+    statusbar_disconnected: "未连接", "Not connected";
+    statusbar_bound: "已绑定", "Bound";
+    statusbar_unbound: "未绑定", "Not bound";
+    // 圆点是纯视觉标记，**不带文字含义**，所以中英共用同一份（`Language::Zh` 那一列
+    // 也只是"没有第二列"的意思）。用变量而不是在绘制处写死字符串：将来若要换成
+    // 非 emoji 的符号，只有这一处要改。
+    // 注意这两个字符能否渲染**取决于字体回退链**——见 `main.rs::setup_fonts` 与
+    // `status_bar::tests::status_dot_glyphs_are_covered_by_the_font_chain`。
+    statusbar_dot_on: "🟢", "🟢";
+    statusbar_dot_off: "🔴", "🔴";
+
     // —— sidebar.rs：连接参数控件 ——
     port_field: "端口", "Port";
     select_port: "请选择端口", "Select a port";

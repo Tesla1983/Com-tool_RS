@@ -538,3 +538,13 @@ impl eframe::App for ComTool {
       ② `font_scale_is_idempotent_across_frames` **除了首末相等，还必须断言绝对值**（`基线 × 系数`）。只断言首末相等是**空转的**：实测"先连乘、再被别的赋值盖掉"这种写法末值照样稳定、测试照样绿；加绝对值后立刻抓到（`17.1925` vs 期望 `14.95`）。
       ③ `panels::tests::font_scale_dropdown_is_wired_to_the_field` 读 `FullOutput.shapes` 里**按落笔顺序**的文字，取「字体大小」标签**紧跟着的下一段**作为下拉选中文案。**不能**改成"整段文字里包含当前档位名"——`font_scale_preview`（「预览：{}」）本来就会写进当前档位名，那样把 `selected_text` 写死也测不出来（实测确实测不出来）。读输出要用 `Context::run_ui` 而不是 `__run_test_ui`（后者 `drop_without_applying_deltas()` 把输出丢了，什么也观察不到），且拿到 `FullOutput` 后要 `textures_delta.clear()`，否则 drop 时会 panic。
     - **无头环境测不了"点一下"**：不投递指针事件，`changed()` 恒 false。写"模拟点击再断言字段变了"会得到**恒真**的空转测试（事件没送到，字段自然没变，断言永远成立）。只能测"字段 → 显示"这条已接通的连线。
+
+48. **底部状态栏：面板画在 `CentralPanel` 之前；圆点字符依赖字体回退链**（2026-09-24 加）：主界面底部常驻一条状态栏（`status_bar.rs`），显示一颗圆点 + 一句话。
+    - **绘制时序是硬约束**：`Panel::bottom("status_bar")` 必须在 `egui::CentralPanel` **之前**画。egui 的面板"先画先占位"，后画的只能拿到剩余空间——放在中央区之后，状态栏只横跨中央区剩余宽度，左右露出缝隙，看起来像一条没对齐的横条。与顶部菜单栏同理（`ui()` 里 ① 菜单栏 / ② 侧边栏 / ③ 状态栏 / ④ 中央区，编号即顺序）。
+    - **判据是纯函数**（`status_bar::connection_indicator(connected, kind, s)`）返回 `ConnectionIndicator { dot, label, is_on }`，绘制只负责画。这样"UDP 该显示已绑定"这类规则可以直接断言，不必先画一遍再猜像素（同约定 43 的道理）。`is_on` 与 `dot` 分开存：将来换图标字体或用第三种颜色时，判据仍只在一处。
+    - **必须沿用侧边栏的四态**：`ConnectionKind::Udp` 下 `connected == true` 只表示**套接字绑定成功**，不是"对端在线"。显示成"已连接"会让用户以为掉线会被发现——侧边栏早就为此分了 `status_bound` / `status_unbound` 两档（见 `sidebar.rs`）。状态栏若只做两态，同一个窗口里两处指示会互相打脸。有一条测试（`status_bar_agrees_with_the_sidebar_on_udp`）把两者的分叉绑在一起。
+    - **圆点用 🟢(U+1F7E2) / 🔴(U+1F534)，但它们不是"随便挑的系统字符"**：egui 默认字体、Hack、微软雅黑**都不含**这两个码点；`seguisym.ttf`（已在回退链里）有 U+1F534 却**没有** U+1F7E2。只有 `seguiemj.ttf`（Segoe UI Emoji）两个都有。因此 `main.rs::setup_fonts` 里那档 emoji 字体是**功能必需项**，删掉它绿色圆点就变成方框 □——而且上面所有测字符串的测试都不会红。
+      `status_bar::tests::status_dot_glyphs_are_covered_by_the_font_chain` 直接读字体文件的 `cmap` 表确认字形存在（字体缺失时跳过而非失败，因为开发机可能是精简系统）。字体文件路径与 `setup_fonts` 里的常量必须同步改。
+    - **emoji 字体只挂 `Proportional` 族**，不挂 `Monospace`：接收区日志不需要彩色 emoji，多挂一档只会让字体栈更长。
+    - **圆点不要上色**：🟢/🔴 是彩色 emoji，`ui.label` 的 `color` 对彩色字形无效（字形自带颜色），着色只会自找困惑。它作为纯视觉标记，用 `on_hover_text` 把有意义的文案挂上去，读屏软件才不至于只念出一个 emoji。
+    - **文案是短词**（"已连接"/"未连接"），与侧边栏的 `"状态: 已连接"` 分开写：侧边栏是逐行读数（前缀有助于扫读），状态栏是常驻指示（前缀是噪音）。圆点字符在文案表里也放两列同值——将来换符号只有一处要改。
