@@ -5,10 +5,50 @@
 //! 派发逻辑集中在 `app.rs` 一处，侧边栏不会在渲染过程中偷偷改状态。
 
 use crate::app::{ComTool, ConnectionKind};
-use crate::serial_impl::{BAUD_RATES, CUSTOM_BAUD_MAX, CUSTOM_BAUD_MIN};
+use crate::serial_impl::{BAUD_CUSTOM_SEED, BAUD_RATES, CUSTOM_BAUD_MAX, CUSTOM_BAUD_MIN};
 use crate::strings::{Strings, fill, timestamp_prefix_label};
 use egui::Ui;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
+
+/// 波特率档位的选择结果。
+///
+/// 抽成自由函数是为了**可测**：这段"选哪一档"的语义（见下）很容易写错，而它是纯计算，
+/// 不需要窗口也不需要串口就能断言。绘制那段只负责把点击翻译成 [`BaudPick`] 再调用它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaudPick {
+    /// 点了列表里的某个档位
+    Listed(u32),
+    /// 点了「自定义…」这一档
+    Custom,
+}
+
+/// 把一次点击应用到 `(baud_rate, baud_custom)` 上。
+///
+/// 三条语义，每一条都有理由：
+///
+/// 1. **点列表档位** → 记下该值并退出自定义档（`baud_custom = false`）。
+/// 2. **点「自定义」且本来就是自定义档** → 什么都不做。否则用户输好的值会被种子覆盖。
+/// 3. **点「自定义」且当前值在列表里** → 换成 [`BAUD_CUSTOM_SEED`]：用户选自定义的意图
+///    就是"要输一个列表里没有的值"，留着他刚选的那个等于让他先删几个字符。
+///    反过来，**当前值本来就不在列表里**（比如从旧存档读回来的 74880）→ 保留不动，
+///    那正是他想输的东西。
+///
+/// 关键的一条不变式：**`baud_custom == true` 时 `baud_rate` 是唯一真值**，
+/// 提交给驱动的永远是它；"选中哪一档"从不参与 `SerialConfig` 的组装。
+pub(crate) fn apply_baud_pick(baud_rate: &mut u32, baud_custom: &mut bool, pick: BaudPick) {
+    match pick {
+        BaudPick::Listed(value) => {
+            *baud_rate = value;
+            *baud_custom = false;
+        }
+        BaudPick::Custom => {
+            if !*baud_custom && BAUD_RATES.contains(baud_rate) {
+                *baud_rate = BAUD_CUSTOM_SEED;
+            }
+            *baud_custom = true;
+        }
+    }
+}
 
 /// 连接类型单选（串口 / TCP 客户端 / UDP）。
 ///
@@ -274,31 +314,66 @@ impl ComTool {
                         });
                         ui.horizontal(|ui| {
                             ui.add_sized([70.0, 20.0], egui::Label::new(s.baud_field));
+
+                            // 下拉框的当前显示文本：选自定义时显示「自定义」而不是那个
+                            // 数字——否则用户看到"自定义"档里显示 115200，会以为没生效。
+                            let selected_text = if self.baud_custom {
+                                s.baud_custom_entry.to_string()
+                            } else {
+                                self.baud_rate.to_string()
+                            };
+
+                            // 这里只把点击翻译成 [`BaudPick`]，攒在 `pick` 里；
+                            // **真正的状态变更在闭包外面**统一交给 `apply_baud_pick`。
+                            // 好处是"选哪一档"的语义只有一份实现（而且是纯函数、有测试），
+                            // 闭包里那份 `&mut self` 借用也少了两处。
+                            let mut pick = None;
+
                             egui::ComboBox::from_id_salt("baud")
-                                .selected_text(self.baud_rate.to_string())
+                                .selected_text(selected_text)
                                 .show_ui(ui, |ui| {
                                     for baud in &BAUD_RATES {
-                                        ui.selectable_value(
-                                            &mut self.baud_rate,
-                                            *baud,
-                                            baud.to_string(),
-                                        );
+                                        // 手写选中判定而不是 `selectable_value`：
+                                        // `selectable_value` 只比较"值相等"，而这里
+                                        // 选中的依据是 `baud_custom` 标记（见该字段的
+                                        // 文档——用户选了自定义档、又输了一个恰好等于
+                                        // 列表项的数字时，仍应停留在自定义档）。
+                                        let selected = !self.baud_custom && self.baud_rate == *baud;
+                                        if ui.selectable_label(selected, baud.to_string()).clicked()
+                                        {
+                                            pick = Some(BaudPick::Listed(*baud));
+                                        }
+                                    }
+
+                                    ui.separator();
+
+                                    let custom_selected = self.baud_custom;
+                                    if ui
+                                        .selectable_label(custom_selected, s.baud_custom_entry)
+                                        .clicked()
+                                    {
+                                        pick = Some(BaudPick::Custom);
                                     }
                                 });
-                            // N5：下拉里只有 20 个常用档，非标波特率（比如 250000、
-                            // 921600 之外的板级值）必须能直接敲。做成"下拉旁边跟一个
-                            // 可拖可键入的数字框"而不是再塞一个输入框：两者改的是
-                            // **同一个** `baud_rate`，不存在"选了 9600 又在旁边填了
-                            // 115200"这种自相矛盾的状态。
-                            //
-                            // 越界不走 `clamp_baud` 兜底，而是由 `range` 当场夹住：
-                            // 用户拖不出界，也就不需要靠"打开端口时偷偷改掉"来补救。
-                            ui.add(
-                                egui::DragValue::new(&mut self.baud_rate)
-                                    .range(CUSTOM_BAUD_MIN..=CUSTOM_BAUD_MAX)
-                                    .speed(1000.0),
-                            )
-                            .on_hover_text(s.baud_custom_hint);
+
+                            if let Some(pick) = pick {
+                                apply_baud_pick(&mut self.baud_rate, &mut self.baud_custom, pick);
+                            }
+
+                            // 只有选中「自定义」才出现输入框：其余档位下它是个多余的控件，
+                            // 而且会诱导用户"在这里改一个已经选好的档"，把两个控件的关系
+                            // 搞乱。越界由 `range` 当场夹住（不做"打开端口时偷偷改掉"）。
+                            if self.baud_custom {
+                                ui.add(
+                                    egui::DragValue::new(&mut self.baud_rate)
+                                        .range(CUSTOM_BAUD_MIN..=CUSTOM_BAUD_MAX)
+                                        .speed(1000.0),
+                                )
+                                .on_hover_text(fill(
+                                    s.baud_custom_hint,
+                                    &[&CUSTOM_BAUD_MIN, &CUSTOM_BAUD_MAX],
+                                ));
+                            }
                         });
                         ui.horizontal(|ui| {
                             ui.add_sized([70.0, 20.0], egui::Label::new(s.data_bits));
@@ -503,5 +578,83 @@ impl ComTool {
             });
 
         action
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 便捷入口：把一对 `(baud_rate, baud_custom)` 过一遍 `apply_baud_pick`。
+    fn pick(start: u32, custom: bool, pick: BaudPick) -> (u32, bool) {
+        let mut baud_rate = start;
+        let mut baud_custom = custom;
+        apply_baud_pick(&mut baud_rate, &mut baud_custom, pick);
+        (baud_rate, baud_custom)
+    }
+
+    /// 语义 1：点列表档位 → 记下该值、退出自定义档。
+    #[test]
+    fn listed_pick_clears_custom_flag() {
+        // 从自定义档点回列表：值被换成列表项，标记落回 false。
+        assert_eq!(pick(250_000, true, BaudPick::Listed(9600)), (9600, false));
+        // 本来就在列表档上点另一个档位：只换值。
+        assert_eq!(
+            pick(115_200, false, BaudPick::Listed(9_600)),
+            (9_600, false)
+        );
+    }
+
+    /// 语义 2：点「自定义」且本来就是自定义档 → 什么都不做。
+    ///
+    /// 这条是防回归的重点：若实现写成"点自定义一律塞种子值"，用户手输的 250000
+    /// 会被自己那一次点击覆盖掉。
+    #[test]
+    fn custom_pick_when_already_custom_keeps_typed_value() {
+        // 手输一个列表里没有的值后再点一次「自定义」，值必须原样保留。
+        assert_eq!(pick(74_880, true, BaudPick::Custom), (74_880, true));
+        // 即使那个手输的值**恰好**在列表里（比如 9600），也要保留——
+        // 这正是"用独立 bool 记录选中档位"而不是从值推导的理由。
+        assert_eq!(pick(9_600, true, BaudPick::Custom), (9_600, true));
+    }
+
+    /// 语义 3a：点「自定义」且当前值在列表里 → 换成 `BAUD_CUSTOM_SEED`。
+    ///
+    /// 用户选自定义的意图就是"要输一个列表里没有的值"，把他刚选的那个留着他得先删
+    /// 几个字符。顺便钉住种子值本身**不在**列表里——否则这个"省事"就是假的。
+    #[test]
+    fn custom_pick_when_value_is_listed_reseeds() {
+        assert_eq!(
+            pick(115_200, false, BaudPick::Custom),
+            (BAUD_CUSTOM_SEED, true)
+        );
+        assert!(!BAUD_RATES.contains(&BAUD_CUSTOM_SEED));
+        assert!((CUSTOM_BAUD_MIN..=CUSTOM_BAUD_MAX).contains(&BAUD_CUSTOM_SEED));
+    }
+
+    /// 语义 3b：点「自定义」且当前值本来就不在列表里 → 保留不动。
+    ///
+    /// 典型来源是从旧存档读回来的值（存档里只有 `baud_rate`，没有档位信息）。
+    #[test]
+    fn custom_pick_when_value_is_unlisted_preserves_it() {
+        assert_eq!(pick(74_880, false, BaudPick::Custom), (74_880, true));
+        assert!(!BAUD_RATES.contains(&74_880));
+    }
+
+    /// 不变式：任何一次点击之后，`baud_rate` 都是一个能提交给驱动的真实值，
+    /// 绝不会是"哨兵"。这就是当初删掉 `BAUD_CUSTOM` 哨兵常量、改用 bool 的原因。
+    #[test]
+    fn baud_rate_is_always_a_real_value() {
+        for start in [9_600, 115_200, 74_880, BAUD_CUSTOM_SEED] {
+            for custom in [false, true] {
+                for p in [BaudPick::Listed(9_600), BaudPick::Custom] {
+                    let (rate, _) = pick(start, custom, p);
+                    assert!(
+                        (CUSTOM_BAUD_MIN..=CUSTOM_BAUD_MAX).contains(&rate),
+                        "起点 {start} / custom={custom} / {p:?} 之后得到越界的 {rate}"
+                    );
+                }
+            }
+        }
     }
 }

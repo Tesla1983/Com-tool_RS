@@ -136,7 +136,19 @@ pub struct ComTool {
     pub selected_port: String,
 
     // 当前波特率
+    //
+    // 选了下拉里的「自定义」时，这个字段仍然是**真值**——界面上的输入框读写的
+    // 就是它。`baud_custom`（下一个字段）只记录"下拉选中的是哪一档"，不是标记值，
+    // 两者都不会把哨兵值混进这里提交给驱动。
     pub baud_rate: u32,
+
+    /// 下拉框当前选中的是「自定义」那一档吗。
+    ///
+    /// **为什么不从"`baud_rate` 是否在 `BAUD_RATES` 里"推导**：那样用户选自定义后
+    /// 手输一个列表里**恰好有**的值（比如 9600），下拉会自己跳回 9600 那一档，
+    /// 输入框消失——他看着自己刚输的数字把输入框弄没了，只会以为程序坏了。
+    /// 用户"选的是哪一档"和"那个数字是多少"是两件事，就存两个字段。
+    pub baud_custom: bool,
 
     // 当前串口参数
     pub data_bits: DataBits,
@@ -944,6 +956,7 @@ impl Default for ComTool {
             ports,
             selected_port,
             baud_rate: DEFAULT_BAUD_RATE,
+            baud_custom: false,
             data_bits: DataBits::Eight,
             stop_bits: StopBits::One,
             parity: Parity::None,

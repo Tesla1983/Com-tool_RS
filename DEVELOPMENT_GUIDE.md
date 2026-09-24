@@ -511,3 +511,10 @@ impl eframe::App for ComTool {
     - **灰色系的显式色要单独看**：`TIMESTAMP_COLOR`（117,117,117）与 `ASCII_NONPRINT_COLOR`（128,128,128）在深色背景下偏暗但尚可辨认，**属于可接受范围，未改**——但若哪天用户抱怨时间戳看不清，先怀疑这两个而不是默认色。
     - **为什么能测**：颜色落在 `LayoutJob.sections[].format.color` 上，可以直接断言。**冒烟测试对颜色一无所知——写死黑色它照样是绿的**，所以这条专门配了三条断言颜色的测试（`receive::tests::default_text_color_follows_theme`、`ascii_view_default_color_follows_theme`、`explicit_ansi_color_overrides_theme_default`）。
     - 测试写法上踩过一次坑：`build_ascii_layout()` 读的是 `ascii_spans`，**只在字节查看模式下才有内容**；在文本模式下断言它会拿到空 `sections` 而 panic。要测它必须先切到 `ascii_view`，并用 `assert!(!ascii_spans.is_empty())` 确认内容非空，否则测试是空转的。
+
+45. **"下拉框选中哪一档"用独立字段记录，不要从值反推**（2026-09-24 起）：波特率下拉新增了「自定义…」档，它旁边跟着一个数字框；两处状态是 `baud_rate: u32` + `baud_custom: bool`，**后者只表示档位、绝不参与 `SerialConfig` 的组装**。
+    - **为什么不用哨兵值**（如 `BAUD_CUSTOM = 0` 混在 `baud_rate` 里）：那个值迟早会被某个 `if` 漏判而提交给驱动。独立 bool 让"哪个数是真的"始终唯一。
+    - **为什么不从"`baud_rate` 是否在 `BAUD_RATES` 里"推导档位**：用户选了自定义、又手输一个列表里**恰好有**的值（比如 9600），下拉会自己跳回 9600 那一档，**输入框当场消失**——他看着自己刚敲的数字把控件弄没了。这条是明文写在 `baud_custom` 字段文档里的。
+    - **点击语义只有一份实现**：`sidebar::apply_baud_pick(baud_rate, baud_custom, BaudPick)`。绘制那段**只攒一个 `Option<BaudPick>`**，闭包结束后再调它——不在闭包里就地改字段（同约定 43 的道理：纯函数才测得到）。四条语义各配一条测试，见 `sidebar::tests`。
+    - **种子值 `BAUD_CUSTOM_SEED`（250000）不是标记**：只在"点自定义且当前值在列表里"时替换，目的是省掉用户删字符的动作；若当前值**本来就不在**列表里（典型是从旧存档读回的 74880）必须原样保留。有一条测试专门钉住"种子值本身不在 `BAUD_RATES` 里"，否则这个"省事"是假的。
+    - **老存档兼容**：`baud_custom` 是新字段，旧存档没有该键，靠容器级 `#[serde(default)]` 落到 `false`（即"列表档"）。`config::tests::archive_missing_new_fields_still_loads` 里有断言，别把它删了。

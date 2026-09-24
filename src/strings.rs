@@ -148,7 +148,8 @@ strings! {
     select_port: "请选择端口", "Select a port";
     refresh: "刷新", "Refresh";
     baud_field: "波特率", "Baud rate";
-    baud_custom_hint: "可直接输入任意波特率", "Any baud rate can be typed here";
+    baud_custom_entry: "自定义…", "Custom…";
+    baud_custom_hint: "可输入 {} ~ {} 之间的任意值", "Any value from {} to {}";
     line_state_header: "控制线", "Control lines";
     line_state_hint:
         "连接后可手动控制；打开端口本身不会去动这两根线",
@@ -540,6 +541,7 @@ mod tests {
             (s.target_label, e.target_label, 1),
             (s.local_port_line, e.local_port_line, 1),
             (s.baud_label, e.baud_label, 1),
+            (s.baud_custom_hint, e.baud_custom_hint, 2),
             (s.rx_bytes_label, e.rx_bytes_label, 1),
             (s.tx_bytes_label, e.tx_bytes_label, 1),
             (s.preset_full, e.preset_full, 1),

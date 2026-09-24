@@ -162,7 +162,11 @@ mod tests {
     fn customized() -> ComTool {
         ComTool {
             selected_port: "COM42".to_string(),
+            // 波特率与「自定义档」标记配成一对：921600 虽然在列表里，但标记为 true，
+            // 模拟"用户在下拉里选了自定义、然后手输了这个值"。正好也覆盖那条容易写错的
+            // 约定——**选中哪一档与数字是多少是两件事**，不能靠"值是否在列表里"推导。
             baud_rate: 921_600,
+            baud_custom: true,
             data_bits: DataBits::Seven,
             stop_bits: StopBits::Two,
             parity: Parity::Even,
@@ -234,6 +238,10 @@ mod tests {
 
         assert_eq!(restored.selected_port, original.selected_port);
         assert_eq!(restored.baud_rate, original.baud_rate);
+        assert_eq!(
+            restored.baud_custom, original.baud_custom,
+            "「哪一档被选中」必须跟着落盘，否则重启后用户选的自定义档会跳回列表档"
+        );
         assert_eq!(restored.data_bits, original.data_bits);
         assert_eq!(restored.stop_bits, original.stop_bits);
         assert_eq!(restored.parity, original.parity);
@@ -365,6 +373,11 @@ mod tests {
         assert!(
             restored.channel_kind.is_none(),
             "通道不存在时类型标记也必须清空"
+        );
+        assert!(
+            !restored.baud_custom,
+            "旧存档没有这个字段，必须落到「非自定义档」——否则一个 4800 会被\
+             显示成「自定义」，而它明明就在下拉列表里"
         );
     }
 
