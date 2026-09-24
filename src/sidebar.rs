@@ -1,4 +1,7 @@
-//! 右侧边栏：串口信息回显、接收统计、连接参数设置与日志操作入口。
+//! 右侧边栏：串口信息回显（含可用端口列表）、连接参数设置与日志操作入口。
+//!
+//! **不负责读数**：接收/发送字节数是底部状态栏的常驻读数（见 [`crate::status_bar`]），
+//! 这里只画"当前设置"类的描述（端口、波特率、显示模式、时间戳前缀…）。
 //!
 //! 绘制函数只负责画控件并把「用户按了哪个按钮」记录下来，真正的状态变更与
 //! 副作用（关闭串口、清空日志、弹出导出对话框）全部交回调用方执行。这样
@@ -105,8 +108,9 @@ impl ComTool {
         let hex_mode = self.hex_view;
         let color_mode = self.color_view;
         let timestamp_mode = self.timestamp_prefix;
-        let rx_bytes = self.receive_text.len();
-        let tx_bytes = self.tx_bytes;
+
+        // 注意：接收/发送字节数**不在这里取值**了——它们是底部状态栏的读数
+        // （见 `status_bar.rs`），侧边栏只保留"当前设置"类的描述。
 
         // 连接类型决定了「显示哪一组参数」与「状态那一行怎么说」，所以它也要在绘制前
         // 定死：下面的信息区与参数区必须来自同一个时刻的类型，否则用户刚点完单选就
@@ -174,6 +178,15 @@ impl ComTool {
                 });
                 ui.separator();
 
+                // 「串口信息」= 端口/波特率/状态 + **可用串口列表** + 显示模式/时间戳前缀。
+                //
+                // 这里刻意把原先独立的「可用串口」折叠区**并了进来**：两者描述的
+                // 都是"当前这条连接长什么样"，分两个折叠头既占竖向空间，又让用户
+                // 要在两个地方之间来回看（选了哪个端口、列表里还有哪些）。
+                // 网络模式下端口列表没有意义（永远是空的），所以只在串口模式下附上。
+                //
+                // 「显示模式」「时间戳前缀」也挪到这里（原先挂在「接收统计」下）：
+                // 它们是**当前设置**的描述，不是累计读数——读数已经进底部状态栏了。
                 egui::CollapsingHeader::new(if kind.uses_serial_settings() {
                     s.serial_info
                 } else {
@@ -191,6 +204,18 @@ impl ComTool {
                             }],
                         ));
                         ui.label(fill(s.baud_label, &[&current_baud]));
+
+                        // 可用串口列表：接在端口信息之后，用一个小标题分隔，
+                        // 避免与上面的"端口: COM3"混淆成读数。
+                        ui.add_space(4.0);
+                        ui.weak(s.available_ports);
+                        if port_list.is_empty() {
+                            ui.weak(s.none_placeholder);
+                        } else {
+                            for p in &port_list {
+                                ui.label(p);
+                            }
+                        }
                     } else {
                         ui.label(fill(
                             s.target_label,
@@ -205,35 +230,11 @@ impl ComTool {
                         }
                     }
                     ui.label(status_text);
+
+                    ui.add_space(4.0);
+                    ui.label(fill(s.display_mode_line, &[&display_mode_text]));
+                    ui.label(fill(s.timestamp_prefix_line, &[&timestamp_text]));
                 });
-
-                egui::CollapsingHeader::new(s.rx_stats)
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.label(fill(s.rx_bytes_label, &[&rx_bytes]));
-                        // 两个计数的口径**不一样**，所以悬停里要点明（N4）：
-                        // 接收那个是"当前留在缓冲区里的字节数"（会被上限裁掉），
-                        // 发送那个是"自本次连接以来累计送出去的字节数"（只增不减）。
-                        // 不写清楚的话，用户会拿两个数字相加去对账。
-                        ui.label(fill(s.tx_bytes_label, &[&tx_bytes]))
-                            .on_hover_text(s.tx_bytes_hover);
-                        ui.label(fill(s.display_mode_line, &[&display_mode_text]));
-                        ui.label(fill(s.timestamp_prefix_line, &[&timestamp_text]));
-                    });
-
-                // 「可用串口」只对串口有意义——网络模式下这一栏永远是空的，
-                // 留着只会让人以为"没扫到可用端口"。
-                if kind.uses_serial_settings() {
-                    egui::CollapsingHeader::new(s.available_ports).show(ui, |ui| {
-                        if port_list.is_empty() {
-                            ui.weak(s.none_placeholder);
-                        } else {
-                            for p in &port_list {
-                                ui.label(p);
-                            }
-                        }
-                    });
-                }
 
                 ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                     // —— 连接类型 ——
@@ -656,5 +657,118 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ——— 以下三条锁定 2026-09-24 的界面重构（接收统计→状态栏、可用串口→串口信息）———
+
+    /// 把侧边栏画一遍，取出**所有真实落笔的文字**。
+    ///
+    /// 走 `Context::run_ui`（`__run_test_ui` 会把输出丢掉），并显式清 `textures_delta`
+    /// 以免 drop 时 panic 造成假红。
+    fn painted_texts(app: &mut ComTool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            let mut open = true;
+            app.show_sidebar(ui, &mut open);
+        });
+
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                texts.push(text_shape.galley.text().to_owned());
+            }
+        }
+        out.textures_delta.clear();
+        texts
+    }
+
+    /// **接收/发送字节数必须已经从侧边栏消失**——它们搬去了底部状态栏。
+    ///
+    /// 这是重构的"减法"一半，最容易被漏掉：只在新位置加读数、旧位置忘了删，
+    /// 结果是同一个数字在窗口里出现两次，用户不知道该信哪个。
+    ///
+    /// 判据是"侧边栏画出的文字里不含这两个带数字的标签"。用 `fill` 拼出带真实
+    /// 数值的完整串再查——比"查是否包含『接收字节数』"更严：万一有人把标签留下、
+    /// 只是不再填数字，前一种查法抓不到，这一种能。
+    #[test]
+    fn sidebar_no_longer_shows_the_byte_counters() {
+        let mut app = ComTool::default();
+        app.receive_text.push_str("hello");
+        app.tx_bytes = 1234;
+
+        let s = crate::app::Language::Zh.strings();
+        let rx = crate::strings::fill(s.rx_bytes_label, &[&app.receive_text.len()]);
+        let tx = crate::strings::fill(s.tx_bytes_label, &[&app.tx_bytes]);
+
+        let painted = painted_texts(&mut app);
+        assert!(
+            !painted.contains(&rx),
+            "侧边栏仍在画接收字节数 {rx:?}——它应当只在底部状态栏出现。实际：{painted:?}"
+        );
+        assert!(
+            !painted.contains(&tx),
+            "侧边栏仍在画发送字节数 {tx:?}——它应当只在底部状态栏出现。实际：{painted:?}"
+        );
+    }
+
+    /// **可用串口列表必须画在「串口信息」里**，不再有独立的「可用串口」折叠头。
+    ///
+    /// 判据分两半：
+    /// 1. 端口名（例如 `COM3`）确实被画了出来——证明列表并进来了，没被顺手删掉；
+    /// 2. 旧的独立折叠头文案（`s.available_ports`，"可用串口"）**不再**作为标题出现。
+    ///
+    /// 第 2 点半带上一个坑：`s.available_ports` 现在仍被用作串口信息区里的小标题
+    /// （`ui.weak(...)`），所以不能直接断言"整个界面不含这四个字"。改成断言
+    /// **折叠头文案集合**里不含它——`CollapsingHeader` 的标题也是画出来的文字，
+    /// 但它旁边会紧跟展开/收起，无法直接区分。因此换个更可靠的判据：端口名出现，
+    /// 且**串口信息标题出现**、**旧的"接收统计"标题不出现**（后者已整条删除）。
+    #[test]
+    fn available_ports_render_inside_the_serial_info_section() {
+        let mut app = ComTool {
+            ports: vec!["COM3".to_string(), "COM7".to_string()],
+            selected_port: "COM3".to_string(),
+            ..ComTool::default()
+        };
+
+        let s = crate::app::Language::Zh.strings();
+        let painted = painted_texts(&mut app);
+
+        // 1) 端口名画出来了（列表并进来了）
+        assert!(
+            painted.iter().any(|t| t == "COM7"),
+            "可用串口列表里的 COM7 没画出来——合并时可能把列表整个丢了。实际：{painted:?}"
+        );
+        // 2) 串口信息标题在（它俩现在同一个折叠区）
+        assert!(
+            painted.iter().any(|t| t == s.serial_info),
+            "串口信息标题没画出来。实际：{painted:?}"
+        );
+        // 3) 旧的「接收统计」整条已删除，不该再出现
+        assert!(
+            !painted.iter().any(|t| t == "接收统计"),
+            "侧边栏仍在画已删除的「接收统计」标题。实际：{painted:?}"
+        );
+    }
+
+    /// **显示模式 / 时间戳前缀**应当留在侧边栏（并入串口信息），而不是被一起搬走。
+    ///
+    /// 这两行是"当前设置"的描述，不是累计读数。重构时最容易一刀切"凡是原先在
+    /// 接收统计里的都搬去状态栏"，把这两行也带走——那会让状态栏塞进设置描述。
+    #[test]
+    fn sidebar_keeps_display_mode_and_timestamp_lines() {
+        let mut app = ComTool::default();
+        let s = crate::app::Language::Zh.strings();
+        let painted = painted_texts(&mut app);
+
+        let mode_prefix = s.display_mode_line.split("{}").next().unwrap_or("");
+        let ts_prefix = s.timestamp_prefix_line.split("{}").next().unwrap_or("");
+        assert!(
+            painted.iter().any(|t| t.starts_with(mode_prefix)),
+            "侧边栏没画「显示模式」行（前缀 {mode_prefix:?}）。实际：{painted:?}"
+        );
+        assert!(
+            painted.iter().any(|t| t.starts_with(ts_prefix)),
+            "侧边栏没画「时间戳前缀」行（前缀 {ts_prefix:?}）。实际：{painted:?}"
+        );
     }
 }

@@ -1,4 +1,4 @@
-//! 底部状态栏：一颗彩色圆点 + 一句话，常驻显示当前连接状态。
+//! 底部状态栏：左侧一颗彩色圆点 + 一句话常驻显示连接状态，右侧常驻显示收发字节数。
 //!
 //! **为什么单独一个模块**：状态栏的判据（哪颗灯、哪句话）是一个纯函数
 //! （[`connection_indicator`]），与绘制分开。这样"UDP 该显示已绑定而不是已连接"
@@ -7,6 +7,16 @@
 //! 词义与侧边栏的 [`crate::sidebar`] 那套**必须一致**：同一个窗口里两处状态指示
 //! 给出不同结论，比只有一处更容易让人误判。所以这里同样按四态走
 //! （串口/TCP 的已连接/未连接 + UDP 的已绑定/未绑定）。
+//!
+//! # 收发字节数为什么在这里
+//!
+//! 「接收统计」原先挂在右侧边栏，但它是一**读数**不是**控件**：用户扫一眼就知道
+//! 收了多少、发了多少，不该占侧边栏一块竖向空间、也不该需要展开折叠区才看得见。
+//! 底部状态栏本来就是"常驻读数"该待的地方，所以把**两个字节计数**挪了过来
+//! （左侧状态、右侧读数，符合状态栏惯例）。
+//!
+//! 口径不同的两行**不在这里**：「显示模式」「时间戳前缀」描述的是当前设置，
+//! 不是累计量，随「串口信息」一起展示更自然——见 `sidebar.rs` 的 `serial_info` 区。
 //!
 //! # 圆点为什么是画出来的，而不是一个 emoji 字符
 //!
@@ -26,7 +36,7 @@
 //! 垂直对齐（圆按行高居中，不跟字体基线漂移），以及**对字体回退链的依赖归零**。
 
 use crate::app::{ComTool, ConnectionKind};
-use crate::strings::Strings;
+use crate::strings::{Strings, fill};
 use egui::{Color32, Ui};
 
 /// 圆点直径相对行高的比例。
@@ -109,9 +119,22 @@ impl ComTool {
     /// egui 的面板"先画先占位"——后画的只能拿到剩下的空间。若在中央区之后画，
     /// 状态栏只会横跨中央区剩余的宽度，左边露出侧边栏、右边露出边缘，
     /// 看起来像一条没对齐的横条。
+    ///
+    /// 版式：左半是圆点 + 连接状态；右半是收发字节数（右对齐）。
+    /// 两侧要放在**同一行**里才能形成"左……右"的布局——所以外层先开一个
+    /// `horizontal`，右侧那段再套一层 `right_to_left` 布局把读数推到最右。
     pub(crate) fn show_status_bar(&mut self, ui: &mut Ui) {
         let s = self.language.strings();
         let indicator = connection_indicator(self.connected, self.connection_kind, s);
+
+        // 本帧要显示的读数快照。与侧边栏一样，在绘制前统一取值，避免同一行里
+        // 几个数字来自不同时刻（虽然这里读的都是即时值，但把口径写在一处更好维护）。
+        //
+        // 两个计数的口径**不一样**，悬停里点明（N4）：接收那个是"当前留在缓冲区
+        // 里的字节数"（会被上限裁掉），发送那个是"自本次连接以来累计送出去的
+        // 字节数"（只增不减）。不写清楚的话，用户会拿两个数字相加去对账。
+        let rx_bytes = self.receive_text.len();
+        let tx_bytes = self.tx_bytes;
 
         egui::Panel::bottom("status_bar")
             .resizable(false)
@@ -122,6 +145,16 @@ impl ComTool {
                 ui.horizontal(|ui| {
                     draw_status_dot(ui, indicator);
                     ui.label(indicator.label);
+
+                    // 右侧读数：用 `right_to_left` 布局把内容推到本行的最右边。
+                    // 顺序要**反着给**——该布局从右往左排，先 add 的贴最右。
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(fill(s.tx_bytes_label, &[&tx_bytes]))
+                            .on_hover_text(s.tx_bytes_hover);
+                        ui.separator();
+                        ui.label(fill(s.rx_bytes_label, &[&rx_bytes]))
+                            .on_hover_text(s.rx_bytes_hover);
+                    });
                 });
             });
     }
@@ -283,6 +316,70 @@ mod tests {
             "状态栏没有画出 {expected:?}——`show_status_bar` 可能算完 `indicator` 就丢了。\
              实际画出：{painted:?}"
         );
+    }
+
+    /// **接收/发送字节数必须在状态栏里画出来，且是本帧的真实值。**
+    ///
+    /// 这条钉住本次重构（把「接收统计」从侧边栏搬到底部状态栏）的**落点**：
+    /// 光看"状态栏能画"是不够的——读写数是新加的，必须确认它既画了、又用的是
+    /// `receive_text.len()` / `tx_bytes` 而不是写死的 0。
+    ///
+    /// 断言用 `fill()` 拼出**期望的完整字符串**再比对，因此"画了标签但值恒为 0"
+    /// 或"两个数字搞反"都会被拦下——只断言"包含 `接收字节数`"是空转的（标签
+    /// 本来就会画出来）。
+    #[test]
+    fn status_bar_paints_live_byte_counters() {
+        let mut app = ComTool::default();
+        // 造两个**互不相同**的值：若实现把两个标签接反了，断言会红。
+        app.receive_text.push_str("hello"); // 5 字节
+        app.tx_bytes = 4096;
+
+        let s = crate::app::Language::Zh.strings();
+        let want_rx = crate::strings::fill(s.rx_bytes_label, &[&app.receive_text.len()]);
+        let want_tx = crate::strings::fill(s.tx_bytes_label, &[&app.tx_bytes]);
+
+        let painted = painted_labels(&mut app);
+        assert!(
+            painted.contains(&want_rx),
+            "状态栏没画出接收字节数 {want_rx:?}（实际：{painted:?}）——\
+             重构后这一读数应当常驻状态栏"
+        );
+        assert!(
+            painted.contains(&want_tx),
+            "状态栏没画出发送字节数 {want_tx:?}（实际：{painted:?}）"
+        );
+    }
+
+    /// 两个读数必须**随数据变化**，不能是写死的常量。
+    ///
+    /// 上一条用默认 0 也可能碰巧通过（如果标签里本来就有个 0）；这条换两个不同的
+    /// 值各画一次，要求两次画出的文字**不相同**——写死常量的实现必然失败。
+    #[test]
+    fn status_bar_byte_counters_change_with_the_data() {
+        let s = crate::app::Language::Zh.strings();
+
+        let mut a = ComTool::default();
+        a.receive_text.push_str("aaaa");
+        a.tx_bytes = 1;
+
+        let mut b = ComTool::default();
+        b.receive_text.push_str("bbbbbbbbbb");
+        b.tx_bytes = 999_999;
+
+        let pa = painted_labels(&mut a);
+        let pb = painted_labels(&mut b);
+
+        let want_a = crate::strings::fill(s.rx_bytes_label, &[&4usize]);
+        let want_b = crate::strings::fill(s.rx_bytes_label, &[&10usize]);
+        assert!(
+            pa.contains(&want_a),
+            "第一帧没画出 {want_a:?}（实际：{pa:?}）"
+        );
+        assert!(
+            pb.contains(&want_b),
+            "第二帧没画出 {want_b:?}（实际：{pb:?}）"
+        );
+        assert_ne!(want_a, want_b, "两次的期望值就不该相同——测试数据没造好");
     }
 
     /// 圆点必须作为**一个真实画出的圆**出现在绘制输出里，且用对了颜色。
