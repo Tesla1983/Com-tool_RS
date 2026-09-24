@@ -1194,6 +1194,64 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 
 ---
 
+### 3.17 增量（2026-09-24：修掉"浅色主题下状态栏没变色"）
+
+**触发**：用户目视审查（本会话第 6 轮）——「UI效果错误，底部状态栏在浅色的情况下没变色」。
+
+**根因不在配色表，而在状态栏原先根本没画背景。** 面板用的是 `egui::Frame::NONE`，
+它的 `fill` 是 `Color32::TRANSPARENT`（已读 `egui-0.36.1/src/containers/frame.rs` 的常量定义
+确认）。`Frame::paint` 无论如何都会 emit 一个 `RectShape`，所以"背景"这个矩形是存在的、
+只是**透明的**——透出来的东西是 `eframe::App::clear_color` 的默认值：
+
+```rust
+// eframe-0.36.1/src/epi.rs:248
+fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+    egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()
+    // _visuals.window_fill() would also be a natural choice
+}
+```
+
+**参数名就叫 `_visuals`——它拿得到主题却不用**，返回恒定的深灰 (12,12,12)。
+于是：深色主题下面板底色是 gray(27)，两者几乎一样 ⇒ **这个缺陷一直没暴露**；
+浅色主题下面板底色是 gray(248)，这条带子还是 (12,12,12)，而浅色主题的文字色是
+gray(80)（`widgets.noninteractive.fg_stroke`）——**深字压在近黑底上**，所以用户看到的是
+"整条状态栏没变色、也像没内容"。
+
+**这也是它躲过全部自动化测试的原因**：原有状态栏测试断言的是圆点数、文字内容、文字位置、
+下留白——没有一条问"这块面板自己的背景是什么颜色"。而"没画背景"这个状态**测不出来**，
+因为没画和"画了个透明的"在形状列表里长得一样。
+
+**改法（两处，一主一兜底）**：
+
+| 落点 | 改动 | 判据 |
+|---|---|---|
+| `status_bar.rs` 的 `.frame(...)` | `Frame::NONE` → **`Frame::side_top_panel(ui.style())`**，只覆盖内边距（沿用我们的 `BAR_PADDING_X/Y`） | 面板背景 = **该主题的 `panel_fill`**（浅 248 / 深 27）。用 `side_top_panel` 而不是手工 `.fill(...)`：它正是 egui 面板不给 frame 时自己会用的那一份（`Panel::resolve_frame`），底色的唯一来源留在 egui 那边 |
+| `app.rs` 的 `impl eframe::App` 新增 `clear_color()` | 返回 `visuals.panel_fill.to_normalized_gamma_f32()` | **兜底**：以后任何没被面板盖住的区域都跟着主题，不会再露一条深色。`clear_color` 拿到的是 `global_style().visuals`（实测 eframe 调用点：`glow_integration.rs:694` / `wgpu_integration.rs:813`），所以它真的能读到主题 |
+
+两条是**纵深防御而非重复**：主修让状态栏自己负责背景（症状消失），兜底让"没人画的区域"也不
+再是写死的深色（同一类问题的下一个入口）。**注意 `side_top_panel` 在 0.36.1 里不带描边**
+（源码只有 `inner_margin` + `fill`），所以没有因此多出一条边线；`show_separator_line(false)`
+仍然生效，`Frame` 的 `inner_margin` 是**覆盖**不是叠加，状态栏高度不变——既有的"下留白"
+与"整组居中"两条测试原样通过。
+
+**新增测试 2 条**（308 → **310**）：
+
+| 文件 | 测试 | 断言 |
+|---|---|---|
+| `status_bar.rs` | `status_bar_background_follows_the_theme` | 无头渲染两种主题，从形状列表里取出**横跨整幅宽、贴住屏幕底边**的那个矩形（即面板背景），断言它 == `Visuals::{light,dark}().panel_fill`。断言"等于该主题的面板底色"而不是"两色不同"：后者会被"换个写死的浅灰/深灰"骗过（注入 G2/G4 就是这两种写法） |
+| `app.rs` | `window_clear_color_follows_the_theme` | `clear_color` 在浅/深两套 `Visuals` 下分别等于对应的 `panel_fill.to_normalized_gamma_f32()`，且两值不等 |
+
+**非空转验证 4 处注入全红**（脚本 `.workbuddy/tmp_probe_theme_bg.py`，不随仓库走）：
+G1 状态栏 frame 回到 `Frame::NONE`（→ 填充是 `#00000000`，这正是改动前的实测值）·
+G2 背景写死成 gray(27)（深色下恰好正确、浅色下露馅）· G3 窗口底色退回 eframe 默认实现 ·
+G4 窗口底色写死成 gray(248)（浅色下恰好正确、深色下露馅）。还原后 310 全绿。
+
+**门禁（本增量结束）**：`cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** ·
+`cargo test` **310 passed / 1 ignored / 0 failed** · clippy **8 条既有**（0 新增）·
+`cargo build --release` 后 exe 时间戳（18:41:17）**晚于**最后一次 `src/` 改动（18:40:30）。
+
+---
+
 ## 4. 未决事项
 
 ### ① GPLv3 合规（**已降为最低优先级**）
@@ -1632,6 +1690,21 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
     - 自动化侧已覆盖：穷举 8 种开关组合的"不空白"回归测试 + 无头渲染断言
       "画出来的是当前模式那一份镜像"，共 6 条（见 §3.16）。**非空转验证 4 处注入全红。**
 
+73. **浅色主题下整条界面的底色（含状态栏）（2026-09-24 加，用户目视发现后修）**：
+    - **怎么试**：菜单栏「设置 → 主题」依次点 **浅色 / 深色 / 跟随系统**，每种都停两秒。
+    - **判据（通过 = 三条全中）**：① **底部状态栏的底色跟着主题一起翻**——浅色主题下
+      是浅底、深色主题下是深底，**不再是一条固定的深色横带**；② 状态栏的底色与**中央区
+      连成一片**（同一档灰，看不出分界；它比深色主题下"以前的样子"会**略微亮一点点**，
+      因为以前那层是 eframe 的窗口底色 (12,12,12)、现在是面板底色 (27,27,27)——这是修正
+      不是新问题）；③ 浅色主题下状态栏那行字（连接状态 + 收发字节数）**看得清**，
+      不是深字压在深底上。
+    - **顺带看一圈**：整幅窗口的四条边（顶/底/左/右）与面板交界的缝隙里**不该出现**
+      任何一条深色细带——那说明还有区域没人画背景。这是同一个缺陷在别处的表现。
+    - 自动化侧已覆盖 2 条：无头渲染读出"状态栏面板背景矩形"的填充色，断言它等于**该主题
+      的面板底色**（浅 248 / 深 27，于是既不透明、也不与中央区异色）；以及窗口底色
+      `clear_color` 跟着主题走（见 §3.17）。**非空转验证 4 处注入全红**
+      （`Frame::NONE` / 写死深色 / 退回 eframe 默认 clear_color / 写死浅色）。
+
 ### ③ 仓库状态
 
 `AI_comtool-rs` 的 `ai-refactor` 分支工作区是干净的。
@@ -1648,6 +1721,7 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 | ~~中~~ **已修** | ~~自动重连无退避~~ | `app.rs::auto_reconnect` | **已于 2026-09-24 修复**：新增 `reconnect_backoff(failures)` 纯函数（500 ms 起、指数翻倍、封顶 30 s）+ `reconnect_failures` 计数（`#[serde(skip)]`）+ `MAX_RECONNECT_ATTEMPTS = 6` 上限；到顶后彻底停手并在接收区留一条说明。**只对串口生效**（F4 起对 TCP / UDP 直接返回）。见 §3.15 |
 | ~~中~~ **已修** | ~~待发队列无上限~~ | `communicationtrait::worker` | **已于 2026-09-24 修复**：新增共享上限 `MAX_PENDING_BYTES = 1 MiB` 与**两侧共享**的 `PendingLedger`（`Arc<AtomicUsize>`）；三个通道的 `write()` 统一走 `worker::submit`（先预约额度 → 再投递 → 失败退还），`worker_main` 只 `push_back`、不再自己判上限。满了**在调用线程当场**返回 `Err`（不判掉线、不停定时发送），而不是继续吃内存或静默丢弃。见 §3.15 ① 与 **①附**（初版是"后台线程判 + 报 `Notice`"，当天订正为"调用线程判"） |
 | ~~低~~ **已修** | ~~**待发队列被拒时状态栏的发送字节数仍累加、输入框仍被清空**~~ | `communicationtrait::worker::submit` + 三个通道的 `write()` | **已于 2026-09-24 修复**：根因是"队列满"判在**后台线程**里做，而 `write()` 只把命令投进 mpsc 就返回 `Ok` ⇒ app 层照常 `tx_bytes += len`、`send_data` 照常清空输入框，用户看到「本条未发送」的提示与**仍在增长**的发送计数并存。改法是把这个判定**挪到调用线程**——新增两侧共享的 `PendingLedger`，`write()` 在**投递之前**就 `reserve(len)`，失败即当场返回 `Err`。**`app.rs` 一行未改**（它本来就是"`Ok` 才记账、`Ok` 才清空"），两个症状一起消失。旧的 `Notice` 通路退场，但文案逐字保留（差别只在"当场说"）。见 §3.15 ①附 |
+| ~~**高**~~ **已修** | ~~**状态栏在浅色主题下不变色（整条仍是深色横带）**~~ | `status_bar.rs` 的 `.frame(...)` + `app.rs` 的 `clear_color` | **已于 2026-09-24 修复**（用户目视发现）：面板用的是 `Frame::NONE`，其 `fill` 是 `TRANSPARENT` ⇒ **状态栏自己不画背景**，透出 `eframe::App::clear_color` 的默认值——一个**写死的**深灰 `rgba(12,12,12,180)`，参数名就叫 `_visuals`、**拿得到主题却不用**（`eframe-0.36.1/src/epi.rs:248`）。深色主题下 (12,12,12) 与面板底色 gray(27) 几乎一样所以一直没暴露；浅色主题下面板底色是 gray(248)、文字色是 gray(80) ⇒ **深字压在近黑底上**，整条状态栏"没变色、也像没内容"。修法：① 面板改用 `Frame::side_top_panel(ui.style())`（只覆盖内边距），背景 = 该主题的 `panel_fill`；② 兜底重写 `App::clear_color()` 返回 `visuals.panel_fill`，让任何未被面板覆盖的区域也跟主题走。⚠️ **它躲过全部自动化测试的原因是"没画背景"测不出来**——原测试问的是圆点数/文字/位置/留白，没有一条问"这块面板自己的背景是什么颜色"。见 §3.17 |
 | 中 | 写路径瞬态错误静默重试 | `channel.rs::worker_main` | `WouldBlock` / `Interrupted` 直接重试是合理的，但设备长期不接受数据时用户得不到提示。背压修好后已有"队列已满"的 `Notice` 兜底，但队列**未满而长期写不动**时仍无提示。建议侧边栏显示「待发字节数」 |
 | ~~中~~ **已修** | ~~**TCP 写侧没有写超时 ⇒ 背压不生效，还可能卡住界面**~~ | `net_impl/tcp.rs::open` / `worker_main` | **已于 2026-09-24 修复，走的是「非阻塞写」那条路**：`open()` 把 `set_read_timeout` 换成 `stream.set_nonblocking(true)`（另加 `set_nodelay(true)`），worker 循环加了 `idle` 标记与显式的 `IDLE_SLEEP = 1 ms`（非阻塞 socket 上 `set_read_timeout` 无效——阻塞性是**每 fd** 的），`WouldBlock` 时让出时间片后下一轮再试。<br>**修掉的两条后果**：① 对端彻底停读时 worker 不再卡在 `write`，1 MiB 上限真正生效（`TcpChannel` 现在跑的是与串口同一套 `PendingLedger` 账本，队列满**在调用线程当场**返回 `Err`）；② `close()` 里那个 `join()` 不再无限等——实测对端完全不读时 `close()` 也能在毫秒级返回（`close_returns_promptly_even_when_the_peer_never_reads` 钉住，3 秒上限）。代价：读侧不能再靠 `set_read_timeout`，改成 1 ms 轮询（这就是 `IDLE_SLEEP` 的另一个用途，同时决定 `close()` 的最大响应延迟）。<br>⚠️ **为什么没走"加一行写超时"**（已实测排除）：Windows 上带 `SO_SNDTIMEO` 的阻塞 `send` 超时后，数据**可能已经进入内核缓冲并发出**，而调用方只拿到 `WSAETIMEDOUT`、拿不到已写字节数；worker 于是重发整片。实测（64 KB 一片、片内含片号、超时 10 ms、对端停读 2 秒）：同一片在接收端出现 **126** 遍（片 42 的词数 1032192 = 126×8192）。非阻塞写没有这个歧义——`Ok(n)` 就是**准确**的已写字节数。串口也没有（驱动不接受就一个字节都不排队），所以那里 `.timeout(10ms)` 同时落成 `WriteTotalTimeoutConstant` 是安全的。<br>**UDP 刻意不动**（同日的对照实测）：向一个从不 `recv` 的对端发 4000 × 60 KB（`SO_SNDBUF=4096`）→ **0 次失败**、单次 `send` 最坏 **0.1 ms**（TCP 对照组挂了 **2 分 05 秒**）⇒ UDP 没有"对端停读 ⇒ worker 卡住"这条路径。见 §3.15 ④ 与 `tools/backpressure_check.py` 的 `--self-test` |
 | 低 | UDP 的 `send` 仍可能被本机网卡出口堵住 | `net_impl/udp.rs::write`（刻意保持阻塞） | 与 TCP 那条**不是同一个问题**：本机到对端的**网卡出口**被打满时（例如 100 Mbps 网卡上持续满速发大包），`send` 仍会阻塞。实测在回环上向从不 `recv` 的对端发 4000 × 60 KB 是 **0 次失败 / 最坏 0.1 ms**，所以没有"对端停读 ⇒ worker 卡住"这条常被踩到的路径，这是 UDP 不改非阻塞的依据。但要构造出出口饱和需要真实网卡与真实流量，**未实测**，因此保留为已知残余风险；真出现时应按 TCP 同样的方式改非阻塞（`WouldBlock` 对 UDP 是"本机队列满、报文未发出"，语义清晰、无重发歧义） |
@@ -1879,7 +1953,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 308 passed / 1 ignored / fmt 干净）
+# 3. 建立门禁基线（应为 0 warning / 310 passed / 1 ignored / fmt 干净）
 cargo fmt && cargo check --all-targets && cargo test
 
 # 4. 看清两个版本的差异
@@ -1890,7 +1964,7 @@ git diff master ai-refactor --stat
 
 # 6. 计划内的功能项已全部落地（P0~P6 与 F1~F5），已知缺陷也已在 2026-09-24 全部收口
 #    （§5 现在只剩"低"档设计取舍，见 §3.15）。**下一件活是 §4② 的实机验证清单**
-#    （72 项 + 34a/34b/57b，共 75 条；全项目从未在真机上跑过一次），都需所有者亲手跑。
+#    （73 项 + 34a/34b/57b，共 76 条；全项目从未在真机上跑过一次），都需所有者亲手跑。
 #    之后是 §5 里那 8 条既有 clippy 警告的清理；GPLv3 合规已降为最低优先级（§4①）。
 ```
 

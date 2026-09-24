@@ -198,11 +198,24 @@ impl ComTool {
             // 关掉面板自带的顶部分隔线：它是"贴着上面那条边框"的观感来源之一。
             // 去掉后，栏内内容与中央区之间只剩留白，视觉上更"飘"、更像一条独立信息带。
             .show_separator_line(false)
-            // 上下左右都留白：纵向留白把状态栏"垫高"、让内容在栏内垂直居中；
-            // 横向留白让居中内容与窗口左右边缘等距。`Frame::NONE` 不带背景填充，
-            // 沿用主题底色，不与深/浅主题打架。
+            // 背景用**标准的面板底色**，只把内边距换成我们自己的（纵向留白把状态栏"垫高"、
+            // 让内容在栏内垂直居中；横向留白让居中内容与窗口左右边缘等距）。
+            //
+            // ⚠️ **这里原先写的是 `Frame::NONE`，那是个真缺陷**（2026-09-24 用户目视发现
+            // "浅色主题下状态栏没变色"）：`Frame::NONE` 的 `fill` 是 `Color32::TRANSPARENT`，
+            // 于是状态栏**自己不画背景**，透出来的是 `eframe::App::clear_color` 的默认值——
+            // 一个**写死的**深灰 `rgba(12,12,12,180)`，它的参数名就叫 `_visuals`，
+            // **完全不看主题**（`eframe-0.36.1/src/epi.rs`）。深色主题下 (12,12,12) 与
+            // 面板底色 (27,27,27) 几乎一样，所以一直没暴露；浅色主题下面板底色是
+            // (248,248,248)，这条带子却还是 (12,12,12)，而文字色同时变成 gray(80)
+            // ——深字压在近黑底上，整条状态栏看起来"没内容、也没变色"。
+            //
+            // 教训：**面板背景是自己的事，不要指望 clear_color**。用
+            // `Frame::side_top_panel` 而不是只补一个 `.fill(...)`：它正是 egui 面板
+            // 不给 frame 时会用的那一份（`Panel::resolve_frame`），底色的唯一来源在
+            // egui 那边，将来它改了我们也跟着改。
             .frame(
-                egui::Frame::NONE
+                egui::Frame::side_top_panel(ui.style())
                     .inner_margin(egui::Margin::symmetric(BAR_PADDING_X, BAR_PADDING_Y)),
             )
             .show(ui, |ui| {
@@ -727,6 +740,91 @@ mod tests {
             offset <= 12.0,
             "状态栏整组内容中心 x={group_centre:.1}，容器中心 x={screen_centre:.1}，\
              偏移 {offset:.1} 超过容差 12——看起来没有水平居中（右对齐/左对齐会明显偏离）"
+        );
+    }
+
+    /// 取出一次绘制里所有矩形填充：(矩形, 填充色)。
+    fn painted_rects(
+        app: &mut ComTool,
+        theme: egui::ThemePreference,
+    ) -> Vec<(egui::Rect, Color32)> {
+        let ctx = egui::Context::default();
+        // 主题要先在 context 上设好：`show_status_bar` 本身不负责下发主题（那是
+        // `ComTool::ui` 里 `apply_theme` 的活），所以测试得自己把 context 摆成目标主题。
+        ctx.set_theme(theme);
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.show_status_bar(ui);
+        });
+
+        let mut rects = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Rect(rect) = &clipped.shape {
+                rects.push((rect.rect, rect.fill));
+            }
+        }
+        out.textures_delta.clear();
+        rects
+    }
+
+    /// 取出状态栏**面板自身**那块背景的填充色。
+    ///
+    /// 判据落在"面板背景"这个矩形上：状态栏是贴底的整幅面板，它的背景矩形一定横跨
+    /// 整个宽度、且下边缘就是屏幕底边。这两条同时满足的矩形只可能有一个。
+    fn status_bar_background_fill(theme: egui::ThemePreference) -> Color32 {
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 700.0));
+        let mut app = ComTool::default();
+        let rects = painted_rects(&mut app, theme);
+
+        let matches: Vec<_> = rects
+            .into_iter()
+            .filter(|(rect, _)| {
+                rect.width() >= screen.width() - 1.0 && rect.max.y >= screen.max.y - 1.0
+            })
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "期望恰好一个「横跨整幅宽度、贴住屏幕底边」的矩形（状态栏面板背景），实际 {matches:?}"
+        );
+        matches[0].1
+    }
+
+    /// **状态栏的底色必须跟着主题走。**
+    ///
+    /// 用户目视发现的缺陷：切到浅色主题后，整条状态栏**没变色**，仍是深色带子。
+    ///
+    /// 根因不在配色表，而在**状态栏原先根本没画背景**：面板用的是 `Frame::NONE`，
+    /// 它的 `fill` 是 `Color32::TRANSPARENT`，于是透出来的是
+    /// `eframe::App::clear_color` 的默认值——一个**写死的**深灰
+    /// `rgba(12,12,12,180)`，参数名就叫 `_visuals`，**完全不看主题**
+    /// （`eframe-0.36.1/src/epi.rs`）。深色主题下 (12,12,12) 与面板底色 (27,27,27)
+    /// 几乎一样，所以这个缺陷一直没暴露；浅色主题下面板底色变成 (248,248,248)，
+    /// 而这条带子还是 (12,12,12)——同时浅色主题的文字色是 gray(80)，深字压在近黑的
+    /// 底上，于是整条状态栏看起来像"没有内容、也没变色"。
+    ///
+    /// 断言直接比"底色 == 该主题的面板底色"：这既排除了透明（`TRANSPARENT` 不等于
+    /// 任何一个面板底色），也排除了"换个写死的浅灰"——那样两套主题会得到同一个值。
+    /// 同时它钉住了"与中央区连成一片"这个外观要求：状态栏不该是一条异色的横带。
+    #[test]
+    fn status_bar_background_follows_the_theme() {
+        let light = status_bar_background_fill(egui::ThemePreference::Light);
+        let dark = status_bar_background_fill(egui::ThemePreference::Dark);
+
+        assert_ne!(
+            light,
+            Color32::TRANSPARENT,
+            "浅色主题下状态栏没有画自己的背景（`Frame::NONE` 的 fill 是透明的），\
+             透出来的会是 eframe 那个写死的深灰 clear_color，于是浅色下不变色"
+        );
+        assert_eq!(
+            light,
+            egui::Visuals::light().panel_fill,
+            "状态栏底色必须是浅色主题的面板底色，否则会与中央区形成一条异色横带"
+        );
+        assert_eq!(
+            dark,
+            egui::Visuals::dark().panel_fill,
+            "状态栏底色必须是深色主题的面板底色"
         );
     }
 

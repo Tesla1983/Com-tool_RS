@@ -1558,6 +1558,23 @@ impl ComTool {
 }
 
 impl eframe::App for ComTool {
+    /// 整幅窗口的底色（面板之外露出来的那层）。
+    ///
+    /// **必须自己实现**，不能用 eframe 的默认值：默认实现返回一个写死的深灰
+    /// `rgba(12,12,12,180)`，参数名就叫 `_visuals`——**它拿得到主题却故意不用**
+    /// （`eframe-0.36.1/src/epi.rs`，那里的注释只说"`window_fill` 也是个自然的选择"）。
+    /// 一旦有任何区域没被面板盖住，浅色主题下就会露出一条深色——2026-09-24 用户目视
+    /// 发现的"状态栏在浅色下没变色"正是这条路径（状态栏当时用 `Frame::NONE`，
+    /// 自己不画背景，于是透出了这层默认色）。状态栏现在已经自己画背景了（见
+    /// `status_bar.rs` 的 `Frame::side_top_panel`），这里是**同一类问题的兜底**：
+    /// 把底色也接上主题，以后新增面板时不会再踩一次。
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        // 用 `panel_fill` 而不是 `window_fill`：两者在 egui 的两套主题里取值相同
+        // （深色 gray(27) / 浅色 gray(248)），但"与面板同色"才是这里想要的语义
+        // ——露出来的一条要与相邻面板连成一片，而不是像个窗口背景。
+        visuals.panel_fill.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // 检查串口接收数据
         self.receive_data();
@@ -3044,5 +3061,45 @@ mod tests {
                  这一档不会跟随全局字体档位"
             );
         }
+    }
+
+    // ——— 窗口底色 ———
+
+    /// **窗口底色必须跟着主题走**（面板之外露出来的那层）。
+    ///
+    /// eframe 的默认实现返回一个**写死的深灰** `rgba(12,12,12,180)`，参数名就叫
+    /// `_visuals`——**拿得到主题却故意不用**。浅色主题下，任何没被面板盖住的区域
+    /// 都会露出这条深色；2026-09-24 用户目视发现的「状态栏在浅色下没变色」正是
+    /// 这条路径（状态栏当时用 `Frame::NONE` 自己不画背景）。状态栏已经单独修了
+    /// （见 `status_bar::tests::status_bar_background_follows_the_theme`），
+    /// 这条测试守的是同一类问题的**兜底**。
+    ///
+    /// 断言"底色 == 该主题的面板底色"而不是"两色不同"：后者会被"换个写死的浅灰"
+    /// 混过去（深色主题下就露馅）。
+    #[test]
+    fn window_clear_color_follows_the_theme() {
+        // `clear_color` 是 `eframe::App` 的方法，测试里要显式把 trait 带进来
+        // （生产代码不需要：`ui()` 就在那个 impl 块里）。
+        use eframe::App as _;
+
+        let app = ComTool::default();
+
+        let light = app.clear_color(&egui::Visuals::light());
+        let dark = app.clear_color(&egui::Visuals::dark());
+
+        assert_eq!(
+            light,
+            egui::Visuals::light().panel_fill.to_normalized_gamma_f32(),
+            "浅色主题下窗口底色必须是浅色面板底色，不能是 eframe 默认的那个深灰"
+        );
+        assert_eq!(
+            dark,
+            egui::Visuals::dark().panel_fill.to_normalized_gamma_f32(),
+            "深色主题下窗口底色必须是深色面板底色"
+        );
+        assert_ne!(
+            light, dark,
+            "两套主题的窗口底色完全相同 ⇒ 说明它读到的根本不是主题"
+        );
     }
 }
