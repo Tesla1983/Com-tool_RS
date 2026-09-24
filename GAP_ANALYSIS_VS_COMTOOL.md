@@ -5,8 +5,8 @@
 | 分析日期 | 2026-09-24 |
 | 对照基线 | `Neutree/COMTool`（Python 3 + PyQt5，跨平台串口/网络/终端一体工具，支持插件） |
 | 本项目 | `comtool-rs` 0.1.0，edition 2024，egui/eframe 0.36.1，单 binary crate，约 17,000 行 |
-| 当前提交 | `c7748ff`（分支 `ai-refactor`），工作区 clean |
-| 门禁 | fmt 干净 / check 0 warning / test **291 passed + 1 ignored** / clippy 8 条既有 |
+| 当前提交 | `8330fce`（分支 `ai-refactor`），工作区 clean |
+| 门禁 | fmt 干净 / check 0 warning / test **302 passed + 1 ignored** / clippy 8 条既有 |
 | 已有基线文档 | `FUTURE_ROADMAP.md`（本文件是它的**再清点 + 量化补全**，口径一致） |
 | 分析方式 | 逐项核对 COMTool README 能力清单 × 本项目源码实际状态（不是只读旧文档） |
 
@@ -27,7 +27,7 @@
 
 | 项 | 状态 | 提交 | 证据 |
 |---|---|---|---|
-| #1 待发队列背压 | ✅ **已做** | `afe4630` + 同日订正 | `MAX_PENDING_BYTES = 1 MiB` + 共享 `PendingLedger` + `worker::submit`（9 条账本单测 + 3 通道各 2 条）；超限在**调用线程当场**返回 `Err`，`app.rs` 一行未改 |
+| #1 待发队列背压 | ✅ **已做** | `afe4630` + `8330fce`（同日两轮订正） | `MAX_PENDING_BYTES = 1 MiB` + 共享 `PendingLedger` + `worker::submit`（9 条账本单测 + 3 通道各 2 条）；超限在**调用线程当场**返回 `Err`，`app.rs` 一行未改 |
 | #2 `connected` 假阳性（串口侧） | ✅ **已做** | `afe4630` | `worker::OPENING` 第三态 + `ByteChannel::is_ready()` + `opening()` / `settle_connection_state()`（9 条测试）；界面新增「正在打开」档 |
 | #3 自动重连无退避 | ✅ **已做** | `afe4630` | 纯函数 `reconnect_backoff()`（500 ms 倍增封顶 30 s）+ `MAX_RECONNECT_ATTEMPTS = 6` |
 | #4 发送文件 | ⬜ **未开始** | — | **硬前置（#1）已解除** ⇒ 可立项，尚未开工 |
@@ -52,7 +52,8 @@
 2. **值得做但门槛明确（2 项）**：**发送文件**（前置：待发队列背压）、
    **TCP/UDP 服务端模式**（与单通道契约冲突，需另立抽象）。
 3. **真正"性价比最高的待办"其实不是新功能**：是 3 条**既有缺陷**（`connected` 假阳性、
-   自动重连无退避、待发队列无背压）+ 一批**实机未验证项**。这些比补第 37 个功能值钱得多。
+   自动重连无退避、待发队列无背压）+ 一批**实机未验证项**。这 3 条已于 2026-09-24 **全部修完**
+   （§0.1），**所以现在性价比最高的待办只剩一件：实机验证**——这个项目至今没在真机上跑过一次。
 
 **加权覆盖率现状：36 完成 / 2 部分 / 3 缺失 / 3 待定 / 6 明确不做（共 50 项）= 74%；
 剔除 6 项"明确不做"后为 84%。**
