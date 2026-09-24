@@ -90,6 +90,18 @@ const CONNECT_BUTTON_HEIGHT: f32 = 32.0;
 /// 连接按钮的圆角半径。
 const CONNECT_BUTTON_CORNER: u8 = 6;
 
+/// 连接按钮的**最小宽度**。宽度本身贴合内容（见 [`draw_connect_button`]），
+/// 这个下限是给极短文案兜底的：UDP 未连接时只有「绑定」两个字，纯按内容算出来
+/// 不到 90 点宽，看起来像标签而不是按钮。
+const CONNECT_BUTTON_MIN_WIDTH: f32 = 130.0;
+
+/// 连接按钮右边缘与面板右边界之间**至少**留出的空白。
+///
+/// 2026-09-24 用户实机目视：「按钮不需要那么长贴到右边框」。宽度改成贴合内容后，
+/// 多数语言都用不到这个上限；它是给德语/俄语那类长译文兜底的——超长时宁可把文案
+/// 按比例缩小（见 [`CONNECT_TEXT_MIN_SIZE`]），也不让按钮顶到面板边上。
+const CONNECT_BUTTON_RIGHT_MARGIN: f32 = 24.0;
+
 /// 连接按钮内、状态点之前的左留白，以及箭头之后的右留白。
 const CONNECT_BUTTON_PADDING_X: f32 = 12.0;
 
@@ -109,13 +121,22 @@ const ARROW_HEIGHT: f32 = 9.0;
 /// 文案与箭头之间至少留出的间距。
 const CONNECT_TEXT_ARROW_GAP: f32 = 8.0;
 
-/// 文案基准字号。与 egui 的正文档（`TextStyle::Body`，14.0）一致。
-const CONNECT_TEXT_SIZE: f32 = 14.0;
+/// 文案基准字号。
+///
+/// **2026-09-24 用户实机目视后由 14 调到 16**。原先取 14 的理由是"与 egui 正文档
+/// 一致"——这个理由本身也是错的：`TextStyle::Body` 在 egui 0.36.1 里**实测是 13.0**
+/// （读的是 `egui-0.36.1` 本机源码与运行期 `resolve(..)`，不是记忆里的 14），
+/// 所以 14 只是"比正文大 1 点"，肉眼几乎无差别。用户的原话是「打开窗口这四个字
+/// 太小了」。现在这一档**故意明显大于**正文：它是主操作按钮的文案，不是正文。
+const CONNECT_TEXT_SIZE: f32 = 16.0;
 
 /// 文案缩到的最小字号。15 种语言里德语/俄语明显长于中文，放不下时按比例缩到
 /// 这里为止；再长的文案（目前没有）宁可略微压到箭头附近，也不截断——截断会让人
 /// 看不出按钮是干什么的。
-const CONNECT_TEXT_MIN_SIZE: f32 = 11.0;
+///
+/// 14 这个下限的取法是"**不低于正文**"（`Body` = 13.0）：缩到最狠也要和正文齐平，
+/// 不能因为译文长就把按钮上的字缩成最小的那一档。
+const CONNECT_TEXT_MIN_SIZE: f32 = 14.0;
 
 /// 连接按钮的**动作**档——决定底色，与文案无关。
 ///
@@ -237,9 +258,9 @@ pub(crate) fn connect_button_label(
 ///
 /// **自绘而不是 `egui::Button`**，三条理由：
 ///
-/// 1. 要**全宽**、高度固定。`Button` 的尺寸只由文案与 `button_padding` 决定，
-///    而这个文案要走 15 种语言，德语/俄语远长于中文——宽度跟着文案抖，长文案还会
-///    把同行控件挤扁；
+/// 1. 尺寸要**显式给死**：高度固定，宽度按内容算、夹在 [`CONNECT_BUTTON_MIN_WIDTH`]
+///    与「可用宽度 − [`CONNECT_BUTTON_RIGHT_MARGIN`]」之间。`Button` 的尺寸只由文案
+///    与 `button_padding` 决定，想调下限、想留右边距都得绕开它；
 /// 2. 按钮内部要排三个元素（状态点 / 文案 / 右侧箭头），`Button` 只画居中文字；
 /// 3. 底色按"动作语义"取（可打开＝绿、可关闭＝红、进行中＝琥珀），用 `Button::fill`
 ///    得在每个调用点重算主题与悬停态，等于把配色规则抄得到处都是。
@@ -249,10 +270,41 @@ pub(crate) fn connect_button_label(
 /// 不会被 `cargo test` 画到——`show_sidebar` 要的 `Ui` 在无头测试里是造得出来的，
 /// 但那样每条断言都得先绕开侧边栏其余几百行控件。
 fn draw_connect_button(ui: &mut Ui, tone: ConnectButtonTone, label: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), CONNECT_BUTTON_HEIGHT),
-        Sense::click(),
-    );
+    let ink = connect_button_text_color(tone);
+
+    // 宽度**贴合内容**，不再吃满整行。2026-09-24 用户实机目视：「按钮不需要那么长
+    // 贴到右边框」——一块占满侧边栏的实心色块看起来像横幅，不像按钮。
+    //
+    // 必须先量后定宽：文本按 `CONNECT_TEXT_SIZE` 量一遍，加上两侧留白、状态点、
+    // 箭头就是"刚好放得下一行字"的宽度。量文本用的 painter 只在块内活着——出了块
+    // 才 `allocate_exact_size`，因为两者都要借 `ui`，同时借会冲突。
+    let natural_text = {
+        let painter = ui.painter();
+        painter
+            .layout_no_wrap(
+                label.to_owned(),
+                FontId::proportional(CONNECT_TEXT_SIZE),
+                ink,
+            )
+            .size()
+            .x
+    };
+    let content_width = CONNECT_BUTTON_PADDING_X * 2.0
+        + CONNECT_DOT_DIAMETER
+        + CONNECT_DOT_GAP
+        + natural_text
+        + CONNECT_TEXT_ARROW_GAP
+        + ARROW_WIDTH;
+    // 上限也夹一次最小宽度：侧边栏被拉到最窄时 `available_width()` 本身就很小，
+    // 不夹的话下面的 `.min()` 会算出比最小宽度还小的值，clamp 的上下界就反了。
+    let width_ceiling =
+        (ui.available_width() - CONNECT_BUTTON_RIGHT_MARGIN).max(CONNECT_BUTTON_MIN_WIDTH);
+    let width = content_width
+        .max(CONNECT_BUTTON_MIN_WIDTH)
+        .min(width_ceiling);
+
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(width, CONNECT_BUTTON_HEIGHT), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
 
     let fill = connect_button_fill(
@@ -261,7 +313,6 @@ fn draw_connect_button(ui: &mut Ui, tone: ConnectButtonTone, label: &str) -> egu
         response.hovered(),
         response.is_pointer_button_down_on(),
     );
-    let ink = connect_button_text_color(tone);
 
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(CONNECT_BUTTON_CORNER), fill);
@@ -538,8 +589,8 @@ impl ComTool {
                     // 那个是**点下去不会有反应**，这个是**已经点了、正在等**，
                     // 共用一条提示会把两件事说成一件事。
                     //
-                    // 两条提示都放在按钮**下方**单独一行：按钮现在是全宽的，与它同行
-                    // 只会剩几个字宽，读不成句。
+                    // 两条提示都放在按钮**下方**单独一行：提示是整句话，与按钮同行会
+                    // 被挤成几个字一断，读不成句（按钮收窄之后右边还留着边距，更放不下）。
                     if is_opening {
                         ui.weak(s.opening_hint);
                     } else if !is_connected && !self.connection_ready() {
@@ -848,11 +899,20 @@ impl ComTool {
 mod tests {
     use super::*;
 
-    /// "全宽"的判据下界（**判据**，不是实现里的限制——实现用的是
-    /// `ui.available_width()`）。侧边栏默认 280 宽，扣掉面板左右留白后可用宽度
-    /// 约 264，取 240 是给留白与将来微调留余量：它必须**远大于**右侧那条
-    /// 32 宽的收起按钮，否则"全宽"这条判据就白写了。
-    const CONNECT_BUTTON_MIN_WIDTH: f32 = 240.0;
+    /// 按钮宽度的判据**区间**——用来从形状列表里认出"那个矩形是连接按钮"的尺寸
+    /// 指纹，不是实现里的限制（实现见 `CONNECT_BUTTON_MIN_WIDTH` 与
+    /// `CONNECT_BUTTON_RIGHT_MARGIN`）。
+    ///
+    /// * 下界 130 与实现的 `CONNECT_BUTTON_MIN_WIDTH` 对齐，且必须**远大于**右侧那条
+    ///   32 宽的收起按钮，否则"按宽度认出按钮"这个指纹就白写了；
+    /// * 上界 200 是"还没退回全宽"的护栏：2026-09-24 之前按钮吃满整行（侧边栏默认
+    ///   280 宽，扣掉面板留白约 264），用户实机目视后要求收窄。只留下界的话，
+    ///   哪天又变回全宽不会被发现。
+    ///
+    /// 两个数字都用字面量写死、**不引用实现常量**：引用了就变成"实现改小、判据跟着
+    /// 变松"，那是空转。
+    const BUTTON_WIDTH_FLOOR: f32 = 130.0;
+    const BUTTON_WIDTH_CEILING: f32 = 200.0;
 
     /// 一次绘制里取出的填充矩形：`(矩形, 填充色)`。
     type PaintedRect = (egui::Rect, Color32);
@@ -862,6 +922,23 @@ mod tests {
     /// 抽出别名是因为裸元组当返回类型会触发 clippy 的 `type_complexity`——
     /// 本项目要求"0 新增警告"。
     type PaintedCircle = (egui::Pos2, f32, Color32, f32, Color32);
+
+    /// 一次绘制里**第一段文字**的字号。
+    ///
+    /// 按钮里只有一段文字（文案），所以"第一段"就是它。取不到时返回 `None`，
+    /// 由调用方决定怎么报错——这里不 panic，是为了让调用方的错误消息能带上
+    /// 更具体的上下文。
+    fn painted_font_size(out: &egui::FullOutput) -> Option<f32> {
+        out.shapes.iter().find_map(|clipped| match &clipped.shape {
+            egui::epaint::Shape::Text(text) => text
+                .galley
+                .job
+                .sections
+                .first()
+                .map(|section| section.format.font_id.size),
+            _ => None,
+        })
+    }
 
     /// 便捷入口：把一对 `(baud_rate, baud_custom)` 过一遍 `apply_baud_pick`。
     fn pick(start: u32, custom: bool, pick: BaudPick) -> (u32, bool) {
@@ -1072,11 +1149,11 @@ mod tests {
     /// [`painted_button_variant`] 那条路上。
     ///
     /// 按钮靠**尺寸指纹**认出来：`Shape` 列表里没有"这是按钮"这种标签，
-    /// 只能用外观反推。两条判据缺一不可——**高度恰好是 [`CONNECT_BUTTON_HEIGHT`]
-    /// 且宽度接近可用宽度**：
+    /// 只能用外观反推。两条判据缺一不可——**高度恰好是 `CONNECT_BUTTON_HEIGHT`
+    /// 且宽度落在 `BUTTON_WIDTH_FLOOR`..=`BUTTON_WIDTH_CEILING` 之间**：
     ///
     /// * 只按高度找会抓到右上角那个 `>>` 收起按钮（`min_size(vec2(32.0, 32.0))`，
-    ///   同样 32 高，但只有 32 宽）——这是本测试第一版踩到的坑；
+    ///   同样 32 高，但只有 32 宽、够不到下界）——这是本测试第一版踩到的坑；
     /// * 只按宽度找会抓到状态栏/面板背景那类整幅矩形（它们高度不是 32）。
     ///
     /// 真出错时的 panic 会把所有矩形打出来，便于对照。
@@ -1117,13 +1194,13 @@ mod tests {
             .map(|(rect, _)| *rect)
             .find(|rect| {
                 (rect.height() - CONNECT_BUTTON_HEIGHT).abs() < 0.5
-                    && rect.width() >= CONNECT_BUTTON_MIN_WIDTH
+                    && (BUTTON_WIDTH_FLOOR..=BUTTON_WIDTH_CEILING).contains(&rect.width())
             })
             .unwrap_or_else(|| {
                 panic!(
-                    "侧边栏里没有「高 {CONNECT_BUTTON_HEIGHT} 且宽 ≥ \
-                     {CONNECT_BUTTON_MIN_WIDTH}」的填充矩形——连接按钮没画自己的背景。\
-                     实际矩形：{:?}",
+                    "侧边栏里没有「高 {CONNECT_BUTTON_HEIGHT} 且宽在 {BUTTON_WIDTH_FLOOR}..=\
+                     {BUTTON_WIDTH_CEILING} 之间」的填充矩形——连接按钮没画自己的背景，\
+                     或者宽度又变回吃满整行了。实际矩形：{:?}",
                     rects.iter().map(|(rect, _)| *rect).collect::<Vec<_>>()
                 )
             });
@@ -1321,20 +1398,25 @@ mod tests {
         }
     }
 
-    /// **按钮真的接到了侧边栏里，而且是全宽、固定高度、自己画背景。**
+    /// **按钮真的接到了侧边栏里，而且是内容宽、固定高度、自己画背景。**
     ///
     /// 这条与上面几条纯函数测试分开写，正是为了防"函数写得对、但界面没调用"——
-    /// 断言"侧边栏这一帧里存在一个高 32、宽接近可用宽度的填充矩形"。
+    /// 断言"侧边栏这一帧里存在一个高 32、宽度落在判据区间里的填充矩形"。
     /// 老实现（`egui::Button` 默认外观）过不了这条：它的底高度≈文字行高、宽度随文案。
     #[test]
-    fn connect_button_paints_a_full_width_background_in_the_sidebar() {
+    fn connect_button_paints_its_own_background_inside_the_sidebar() {
         let mut app = ComTool::default();
         let frame = painted_frame(&mut app, egui::ThemePreference::Dark);
         let button = frame.button;
 
         assert!(
-            button.width() >= CONNECT_BUTTON_MIN_WIDTH,
-            "按钮宽 {}——侧边栏默认 280 宽，全宽按钮应当接近它",
+            button.width() >= BUTTON_WIDTH_FLOOR,
+            "按钮宽 {}，低于下界 {BUTTON_WIDTH_FLOOR}——按钮没画自己的背景",
+            button.width()
+        );
+        assert!(
+            button.width() <= BUTTON_WIDTH_CEILING,
+            "按钮宽 {}，高于上界 {BUTTON_WIDTH_CEILING}——又变回吃满整行了",
             button.width()
         );
         assert!(
@@ -1358,8 +1440,9 @@ mod tests {
 
     /// **按钮下方那条提示必须真的在按钮下方。**
     ///
-    /// 这是"按钮改全宽"带来的**必然布局后果**：原先提示与按钮在同一个
-    /// `ui.horizontal` 里，全宽之后同行只剩几个字宽、读不成句，所以移到下一行。
+    /// 这是按钮重做带来的**必然布局后果**：原先提示与按钮在同一个 `ui.horizontal`
+    /// 里，按钮占满整行之后同行只剩几个字宽、读不成句，所以移到下一行（收窄之后
+    /// 右边仍留着边距，这一整句话一样放不下）。
     /// 这条测试钉的就是这个位置关系——若哪天有人把提示塞回按钮右侧（或改成同行
     /// 右对齐），文字的 y 会落到按钮中线附近，`pos.y < button.max.y` 立刻报红。
     #[test]
@@ -1398,7 +1481,7 @@ mod tests {
         assert!(
             hint.0.y >= frame.button.max.y - 0.5,
             "提示「{}」画在 y={:.1}，而按钮底边是 y={:.1}——提示必须移到按钮下方：\
-             按钮现在是全宽的，与它同行只剩几个字宽",
+             与按钮同行放不下这一整句话",
             hint.1,
             hint.0.y,
             frame.button.max.y
@@ -1465,6 +1548,111 @@ mod tests {
             opening_dot.2,
             Color32::WHITE,
             "「正在打开」用了白墨色——压在琥珀底上对比度不足"
+        );
+    }
+
+    /// **长文案把按钮压到上限为止，但右边缘永远留白、字号永远不低于下界。**
+    ///
+    /// 德语/俄语的译文远长于中文。`draw_connect_button` 的处理是：宽度先按内容算，
+    /// 撞到「可用宽度 − `CONNECT_BUTTON_RIGHT_MARGIN`」就停住，再按比例缩字号（缩到
+    /// `CONNECT_TEXT_MIN_SIZE` 为止）。两头都要钉住——只钉"不会无限变宽"会漏掉
+    /// "字被缩到看不见"，只钉"字不会太小"会漏掉"按钮顶到面板边上"。
+    #[test]
+    fn connect_button_keeps_a_right_margin_when_the_label_is_long() {
+        const CANVAS_WIDTH: f32 = 280.0;
+
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::ThemePreference::Dark);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(CANVAS_WIDTH, 200.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            draw_connect_button(
+                ui,
+                ConnectButtonTone::Idle,
+                "Seriellen Anschluss dauerhaft schliessen",
+            );
+        });
+
+        let mut button = None;
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Rect(rect) = &clipped.shape
+                && (rect.rect.height() - CONNECT_BUTTON_HEIGHT).abs() < 0.5
+            {
+                button = Some(rect.rect);
+            }
+        }
+        let font_size = painted_font_size(&out);
+        out.textures_delta.clear();
+
+        let button = button.expect("长文案下按钮没画自己的背景矩形");
+        assert!(
+            button.width() <= CANVAS_WIDTH - CONNECT_BUTTON_RIGHT_MARGIN + 0.5,
+            "按钮宽 {}，顶到了画布右边缘（画布 {CANVAS_WIDTH}，右边距要求 \
+             {CONNECT_BUTTON_RIGHT_MARGIN}）",
+            button.width()
+        );
+
+        let font_size = font_size.expect("长文案下按钮里没画文字");
+        // 两个阈值都用**字面量**，理由与上面那条字号测试相同：引用
+        // `CONNECT_TEXT_SIZE` / `CONNECT_TEXT_MIN_SIZE` 就变成自证。这一版最初正是
+        // 这么写的——注入"把下限压到 6"时它照样通过（实测字号 11.31 大于 6），
+        // 是空转验证把它抓出来的。
+        assert!(
+            font_size < 16.0,
+            "长文案没有触发缩小（字号 {font_size}）——这条测试根本没走到被测的那条路上"
+        );
+        assert!(
+            font_size >= 14.0 - 0.01,
+            "长文案把字号缩到了 {font_size}，低于下限 14"
+        );
+    }
+
+    /// **按钮文案字号不许小于 16——而且"比正文大"这个条件本身不算数。**
+    ///
+    /// 2026-09-24 用户实机目视：「打开窗口这四个字太小了」。根因是这一档原先按
+    /// "与 egui 正文档一致"取了 14——而 `TextStyle::Body` 在 0.36.1 里**实测是 13.0**，
+    /// 14 只是"比正文大 1 点"，肉眼无差别。
+    ///
+    /// 判据**写死 16.0**、不引用 `CONNECT_TEXT_SIZE`（引用就变成自证）。这里踩过一次
+    /// 空转：第一版写成 `size > body_size`，注入"把字号改回 14"时照样通过，因为
+    /// 14 > 13 成立。下限必须对着"用户会不会觉得小"定，不是对着"是否大于某个默认值"。
+    #[test]
+    fn connect_button_label_is_larger_than_the_body_default() {
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::ThemePreference::Dark);
+        // 画布给足宽度，确保走的是"基准字号"那条路，而不是被上限压缩的那条。
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(400.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        // 正文的字号**从实际生效的 style 里取**，不写死 14.0：egui 的字号将来若整体
+        // 上调，这条判据跟着走；而 `CONNECT_TEXT_SIZE` 一旦被改回去，它立刻报红。
+        let mut body_size = 0.0_f32;
+        let mut out = ctx.run_ui(input, |ui| {
+            body_size = egui::TextStyle::Body.resolve(ui.style()).size;
+            draw_connect_button(ui, ConnectButtonTone::Idle, "打开串口");
+        });
+        let size = painted_font_size(&out).expect("按钮里没画文案");
+        out.textures_delta.clear();
+
+        // 判据用**字面量下限**，不是"大于正文"。第一版写成 `size > body_size`，
+        // 结果把字号注入改回 14.0 时它照样通过——因为 `Body` 实测只有 13.0，
+        // "比正文大"这个条件在用户抱怨的那个字号上**已经成立**。这次空转验证把它
+        // 抓了出来：判据的松紧必须对着"用户会不会觉得小"来定，不是对着"是否大于
+        // 某个默认值"。
+        const MIN_LABEL_SIZE: f32 = 16.0;
+        assert!(
+            size >= MIN_LABEL_SIZE,
+            "按钮文案字号 {size}，小于下限 {MIN_LABEL_SIZE}（正文才 {body_size}）——\
+             用户反馈过这几个字太小"
         );
     }
 }
