@@ -10,7 +10,9 @@
 use crate::app::{ComTool, ConnectionKind};
 use crate::serial_impl::{BAUD_CUSTOM_SEED, BAUD_RATES, CUSTOM_BAUD_MAX, CUSTOM_BAUD_MIN};
 use crate::strings::{Strings, fill, timestamp_prefix_label};
-use egui::Ui;
+use egui::{
+    Align2, Color32, CornerRadius, CursorIcon, FontId, Sense, Shape, Stroke, Ui, pos2, vec2,
+};
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 
 /// 波特率档位的选择结果。
@@ -68,6 +70,259 @@ fn connection_kind_radios(ui: &mut Ui, kind: &mut ConnectionKind, s: &Strings) {
             ui.radio_value(kind, value, label);
         }
     });
+}
+
+// ——— 连接按钮的外观 ———
+//
+// 这个按钮是侧边栏里唯一的"主操作"，2026-09-24 重做。重做的原因是它**看不出是个
+// 按钮**：原先只是 `egui::Button::new(label).selected(is_connected)`，宽度、高度、
+// 填充、描边、圆角一个都没给，全吃 egui 默认值。实测（`egui-0.36.1/src/style.rs`）：
+// `button_padding` 只有 `vec2(4.0, 1.0)` ⇒ 高度几乎等于文字行高、宽度随文案长度变；
+// 深色主题下底色 `gray(60)` 压在 `panel_fill` `gray(27)` 上、圆角 2px、**无描边**；
+// 已连接时走 `selection.bg_fill`（深色主题是 `rgb(0,92,128)`）——一样很弱。
+//
+// 现在改为自绘（[`draw_connect_button`]），量全部显式给死。
+
+/// 连接按钮的高度（逻辑像素）。32 是为了与下面的端口/波特率下拉框拉开主次，
+/// 同时不至于像"大号操作卡"那样占掉一个折叠区的高度。
+const CONNECT_BUTTON_HEIGHT: f32 = 32.0;
+
+/// 连接按钮的圆角半径。
+const CONNECT_BUTTON_CORNER: u8 = 6;
+
+/// 连接按钮内、状态点之前的左留白，以及箭头之后的右留白。
+const CONNECT_BUTTON_PADDING_X: f32 = 12.0;
+
+/// 状态点直径。
+const CONNECT_DOT_DIAMETER: f32 = 9.0;
+
+/// 状态点描边宽度（只在空心那一档用得上）。
+const CONNECT_DOT_STROKE: f32 = 1.5;
+
+/// 状态点与文案之间的间距。
+const CONNECT_DOT_GAP: f32 = 9.0;
+
+/// 右侧箭头占的宽度与高度。
+const ARROW_WIDTH: f32 = 5.0;
+const ARROW_HEIGHT: f32 = 9.0;
+
+/// 文案与箭头之间至少留出的间距。
+const CONNECT_TEXT_ARROW_GAP: f32 = 8.0;
+
+/// 文案基准字号。与 egui 的正文档（`TextStyle::Body`，14.0）一致。
+const CONNECT_TEXT_SIZE: f32 = 14.0;
+
+/// 文案缩到的最小字号。15 种语言里德语/俄语明显长于中文，放不下时按比例缩到
+/// 这里为止；再长的文案（目前没有）宁可略微压到箭头附近，也不截断——截断会让人
+/// 看不出按钮是干什么的。
+const CONNECT_TEXT_MIN_SIZE: f32 = 11.0;
+
+/// 连接按钮的**动作**档——决定底色，与文案无关。
+///
+/// 注意它与底部状态栏的圆点是"同色不同义"：状态栏报"现在处于什么状态"，
+/// 这里报"按下去会做什么"。两者只在「正在打开」这一档重合（都是琥珀
+/// `#F5A623`），有测试钉住这个重合。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectButtonTone {
+    /// 未连接：绿＝"按下去会连上"。
+    Idle,
+    /// 已发起、通道尚未就绪：琥珀＝"正在进行"。
+    Opening,
+    /// 已连接：红＝"按下去会断开"（准破坏动作）。
+    Connected,
+}
+
+/// 由"是否已连接 / 是否正在打开"定出按钮的动作档。
+///
+/// `is_opening` 只在串口出现（它的 `open()` 只拉起后台线程，端口要到那里才真正
+/// 打开）。这一档必须**压过**已连接之外的一切：那段窗口期里通道还没就绪，把按钮
+/// 直接画成已连接的红色，用户会以为已经能发数据了。
+pub(crate) fn connect_button_tone(is_connected: bool, is_opening: bool) -> ConnectButtonTone {
+    match (is_connected, is_opening) {
+        (false, _) => ConnectButtonTone::Idle,
+        (true, true) => ConnectButtonTone::Opening,
+        (true, false) => ConnectButtonTone::Connected,
+    }
+}
+
+/// 按钮底色。返回的是 `(常态, 悬停, 按下)` 三档里选中的那一档。
+///
+/// 按下比常态**更暗**、悬停比常态**更亮**（深浅两套主题同向）——这与 egui 默认
+/// 控件在深色主题下的行为一致（`inactive` `gray(60)` → `hovered` `gray(70)` →
+/// `active` `gray(55)`），所以手感不会与旁边的下拉框、单选钮打架。
+pub(crate) fn connect_button_fill(
+    tone: ConnectButtonTone,
+    dark: bool,
+    hovered: bool,
+    pressed: bool,
+) -> Color32 {
+    let (base, hover, press) = match (tone, dark) {
+        (ConnectButtonTone::Idle, false) => (
+            Color32::from_rgb(0x17, 0x79, 0x4A),
+            Color32::from_rgb(0x1E, 0x8F, 0x58),
+            Color32::from_rgb(0x0F, 0x5C, 0x38),
+        ),
+        (ConnectButtonTone::Idle, true) => (
+            Color32::from_rgb(0x1A, 0x7F, 0x4B),
+            Color32::from_rgb(0x21, 0x90, 0x5A),
+            Color32::from_rgb(0x14, 0x66, 0x3C),
+        ),
+        // 「正在打开」两套主题共用同一个琥珀，而且**就是底部状态栏那个琥珀**
+        // （`ConnectionIndicator::pending`）：它俩说的是同一件事，各写一个近似色
+        // 迟早会漂移成两个"差不多但不一样"的黄。有测试钉住这个相等。
+        (ConnectButtonTone::Opening, _) => (
+            Color32::from_rgb(0xF5, 0xA6, 0x23),
+            Color32::from_rgb(0xFF, 0xB9, 0x3D),
+            Color32::from_rgb(0xC9, 0x86, 0x1A),
+        ),
+        // 断开是准破坏动作，两套主题共用同一档红：它要的就是"被看见"。
+        (ConnectButtonTone::Connected, _) => (
+            Color32::from_rgb(0xB3, 0x26, 0x1E),
+            Color32::from_rgb(0xC4, 0x33, 0x2A),
+            Color32::from_rgb(0x8F, 0x1C, 0x16),
+        ),
+    };
+    if pressed {
+        press
+    } else if hovered {
+        hover
+    } else {
+        base
+    }
+}
+
+/// 按钮内的墨色（文案、状态点、箭头共用一个颜色）。
+///
+/// 琥珀底必须配深色字：白字压在 `#F5A623` 上对比度只有约 1.8:1，压 `#1B1B1B`
+/// 约 8:1；浅色主题的 `#E08A00` 上配深字也有约 5.9:1。绿底与红底则必须配白字。
+pub(crate) fn connect_button_text_color(tone: ConnectButtonTone) -> Color32 {
+    match tone {
+        ConnectButtonTone::Opening => Color32::from_rgb(0x1B, 0x1B, 0x1B),
+        ConnectButtonTone::Idle | ConnectButtonTone::Connected => Color32::WHITE,
+    }
+}
+
+/// 状态点是否画成空心圆。只有"还没连上"这一档是空心的。
+pub(crate) fn connect_dot_is_hollow(tone: ConnectButtonTone) -> bool {
+    matches!(tone, ConnectButtonTone::Idle)
+}
+
+/// 连接按钮的文案。
+///
+/// **判据是 `is_connected`，不是别的**：为真就一律属于"关闭/断开"那一侧——**包括**
+/// 串口的「正在打开」（那时 `is_connected` 也为真）。若那时显示「打开串口」，用户
+/// 会以为刚才那下没生效而重复点，而按下去实际是**关闭**：这正是 F4 修过的
+/// "文案与动作相反"。那一态要说的是"正在进行"，由琥珀底色 + 按钮下方的小字交代。
+pub(crate) fn connect_button_label(
+    kind: ConnectionKind,
+    is_connected: bool,
+    s: &Strings,
+) -> &'static str {
+    if is_connected {
+        if kind.uses_serial_settings() {
+            s.close_port_button
+        } else {
+            s.disconnect_button
+        }
+    } else {
+        match kind {
+            ConnectionKind::Serial => s.open_port_button,
+            ConnectionKind::TcpClient => s.connect_button,
+            ConnectionKind::Udp => s.bind_button,
+        }
+    }
+}
+
+/// 画「打开/关闭连接」主操作按钮，返回它的响应。
+///
+/// **自绘而不是 `egui::Button`**，三条理由：
+///
+/// 1. 要**全宽**、高度固定。`Button` 的尺寸只由文案与 `button_padding` 决定，
+///    而这个文案要走 15 种语言，德语/俄语远长于中文——宽度跟着文案抖，长文案还会
+///    把同行控件挤扁；
+/// 2. 按钮内部要排三个元素（状态点 / 文案 / 右侧箭头），`Button` 只画居中文字；
+/// 3. 底色按"动作语义"取（可打开＝绿、可关闭＝红、进行中＝琥珀），用 `Button::fill`
+///    得在每个调用点重算主题与悬停态，等于把配色规则抄得到处都是。
+///
+/// 抽成自由函数还有一个更实际的原因：能被无头测试直接驱动（见
+/// `tests::painted_button_variant`）。内联在 `show_sidebar` 的闭包里，就等于一次也
+/// 不会被 `cargo test` 画到——`show_sidebar` 要的 `Ui` 在无头测试里是造得出来的，
+/// 但那样每条断言都得先绕开侧边栏其余几百行控件。
+fn draw_connect_button(ui: &mut Ui, tone: ConnectButtonTone, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(ui.available_width(), CONNECT_BUTTON_HEIGHT),
+        Sense::click(),
+    );
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+
+    let fill = connect_button_fill(
+        tone,
+        ui.visuals().dark_mode,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+    );
+    let ink = connect_button_text_color(tone);
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(CONNECT_BUTTON_CORNER), fill);
+
+    // 状态点：空心＝还没连上，实心＝已发起。
+    let radius = CONNECT_DOT_DIAMETER / 2.0;
+    let dot = pos2(
+        rect.left() + CONNECT_BUTTON_PADDING_X + radius,
+        rect.center().y,
+    );
+    if connect_dot_is_hollow(tone) {
+        painter.circle_stroke(dot, radius, Stroke::new(CONNECT_DOT_STROKE, ink));
+    } else {
+        painter.circle_filled(dot, radius, ink);
+    }
+
+    // 右侧箭头**画几何图形，不用 `▸` 字符**：符号字形要靠字体兜，而 `epaint` 只取
+    // 字体里的矢量轮廓，字体没覆盖到就是一个方框——接收区那条教训对界面文字同样成立。
+    let arrow_center_x = rect.right() - CONNECT_BUTTON_PADDING_X - ARROW_WIDTH / 2.0;
+    painter.add(Shape::convex_polygon(
+        vec![
+            pos2(
+                arrow_center_x - ARROW_WIDTH / 2.0,
+                rect.center().y - ARROW_HEIGHT / 2.0,
+            ),
+            pos2(arrow_center_x + ARROW_WIDTH / 2.0, rect.center().y),
+            pos2(
+                arrow_center_x - ARROW_WIDTH / 2.0,
+                rect.center().y + ARROW_HEIGHT / 2.0,
+            ),
+        ],
+        ink,
+        Stroke::NONE,
+    ));
+
+    // 文案：从状态点右侧起。先按基准字号量一次，放不下就按比例缩，缩到
+    // `CONNECT_TEXT_MIN_SIZE` 为止（不截断——截断后用户看不出这按钮是干什么的）。
+    let text_left = dot.x + radius + CONNECT_DOT_GAP;
+    let room = arrow_center_x - ARROW_WIDTH / 2.0 - CONNECT_TEXT_ARROW_GAP - text_left;
+    let natural = painter
+        .layout_no_wrap(
+            label.to_owned(),
+            FontId::proportional(CONNECT_TEXT_SIZE),
+            ink,
+        )
+        .size()
+        .x;
+    let size = if natural > room && natural > 0.0 {
+        (CONNECT_TEXT_SIZE * room / natural).max(CONNECT_TEXT_MIN_SIZE)
+    } else {
+        CONNECT_TEXT_SIZE
+    };
+    painter.text(
+        pos2(text_left, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(size),
+        ink,
+    );
+
+    response
 }
 
 /// 侧边栏本轮产生的操作请求。
@@ -268,44 +523,34 @@ impl ComTool {
                     // 「正在打开」也归到"已发起"那一侧：此时再显示「打开串口」会让
                     // 用户以为刚才那下没生效而重复点，而按下去实际是**关闭**
                     // （`self.connected` 为真）——又一次"文案与动作相反"。
-                    ui.horizontal(|ui| {
-                        let label = if is_connected {
-                            if kind.uses_serial_settings() {
-                                s.close_port_button
-                            } else {
-                                s.disconnect_button
-                            }
+                    let label = connect_button_label(kind, is_connected, s);
+                    if draw_connect_button(ui, connect_button_tone(is_connected, is_opening), label)
+                        .clicked()
+                    {
+                        if self.connected {
+                            self.close_connection();
                         } else {
-                            match kind {
-                                ConnectionKind::Serial => s.open_port_button,
-                                ConnectionKind::TcpClient => s.connect_button,
-                                ConnectionKind::Udp => s.bind_button,
-                            }
-                        };
-                        let button = egui::Button::new(label).selected(is_connected);
-                        if ui.add(button).clicked() {
-                            if self.connected {
-                                self.close_connection();
-                            } else {
-                                self.open_connection();
-                            }
+                            self.open_connection();
                         }
+                    }
 
-                        // 「正在打开」要单独说一句。它与下面那条"参数没填全"是两回事：
-                        // 那个是**点下去不会有反应**，这个是**已经点了、正在等**，
-                        // 共用一条提示会把两件事说成一件事。
-                        if is_opening {
-                            ui.weak(s.opening_hint);
-                        } else if !is_connected && !self.connection_ready() {
-                            // 参数没填全时按钮点下去会"没反应"（`connection_ready`
-                            // 拦下），所以要把原因摆出来。
-                            ui.weak(if kind.uses_serial_settings() {
-                                s.need_port_to_connect
-                            } else {
-                                s.need_target_to_connect
-                            });
-                        }
-                    });
+                    // 「正在打开」要单独说一句。它与下面那条"参数没填全"是两回事：
+                    // 那个是**点下去不会有反应**，这个是**已经点了、正在等**，
+                    // 共用一条提示会把两件事说成一件事。
+                    //
+                    // 两条提示都放在按钮**下方**单独一行：按钮现在是全宽的，与它同行
+                    // 只会剩几个字宽，读不成句。
+                    if is_opening {
+                        ui.weak(s.opening_hint);
+                    } else if !is_connected && !self.connection_ready() {
+                        // 参数没填全时按钮点下去会"没反应"（`connection_ready`
+                        // 拦下），所以要把原因摆出来。
+                        ui.weak(if kind.uses_serial_settings() {
+                            s.need_port_to_connect
+                        } else {
+                            s.need_target_to_connect
+                        });
+                    }
                     ui.add_space(4.0);
 
                     if kind.uses_serial_settings() {
@@ -603,6 +848,21 @@ impl ComTool {
 mod tests {
     use super::*;
 
+    /// "全宽"的判据下界（**判据**，不是实现里的限制——实现用的是
+    /// `ui.available_width()`）。侧边栏默认 280 宽，扣掉面板左右留白后可用宽度
+    /// 约 264，取 240 是给留白与将来微调留余量：它必须**远大于**右侧那条
+    /// 32 宽的收起按钮，否则"全宽"这条判据就白写了。
+    const CONNECT_BUTTON_MIN_WIDTH: f32 = 240.0;
+
+    /// 一次绘制里取出的填充矩形：`(矩形, 填充色)`。
+    type PaintedRect = (egui::Rect, Color32);
+
+    /// 一次绘制里取出的圆形：`(圆心, 半径, 填充色, 描边宽, 描边色)`。
+    ///
+    /// 抽出别名是因为裸元组当返回类型会触发 clippy 的 `type_complexity`——
+    /// 本项目要求"0 新增警告"。
+    type PaintedCircle = (egui::Pos2, f32, Color32, f32, Color32);
+
     /// 便捷入口：把一对 `(baud_rate, baud_custom)` 过一遍 `apply_baud_pick`。
     fn pick(start: u32, custom: bool, pick: BaudPick) -> (u32, bool) {
         let mut baud_rate = start;
@@ -786,6 +1046,425 @@ mod tests {
         assert!(
             painted.iter().any(|t| t.starts_with(ts_prefix)),
             "侧边栏没画「时间戳前缀」行（前缀 {ts_prefix:?}）。实际：{painted:?}"
+        );
+    }
+
+    // ——— 以下六条锁定 2026-09-24 的连接按钮重做（自绘、全宽、三态配色）———
+
+    /// 一次无头绘制取出的所有可断言素材。
+    ///
+    /// **合并成一次绘制**是必须的：按钮的矩形和提示文字的位置要互相比对，
+    /// 若分两次 `run_ui` 取，比较的就不是同一帧——主题、画布尺寸、绕行布局
+    /// 任何一处不同，两次的落点都会差几个点，"在按钮下方"这类判据就成了假的。
+    struct PaintedFrame {
+        /// 连接按钮的矩形（按尺寸指纹认出，见 [`painted_frame`]）。
+        button: egui::Rect,
+        /// 所有填充矩形：`(矩形, 填充色)`。
+        rects: Vec<PaintedRect>,
+        /// 所有文字块：`(左上角, 文本)`。
+        texts: Vec<(egui::Pos2, String)>,
+    }
+
+    /// 把侧边栏画一遍，取回 [`PaintedFrame`]。
+    ///
+    /// 刻意**不收圆形**：这里没有任何断言用得上它，返回一堆"看起来在被检查、
+    /// 实际没人看"的数据只会让人误以为覆盖到了状态点——状态点的判据在
+    /// [`painted_button_variant`] 那条路上。
+    ///
+    /// 按钮靠**尺寸指纹**认出来：`Shape` 列表里没有"这是按钮"这种标签，
+    /// 只能用外观反推。两条判据缺一不可——**高度恰好是 [`CONNECT_BUTTON_HEIGHT`]
+    /// 且宽度接近可用宽度**：
+    ///
+    /// * 只按高度找会抓到右上角那个 `>>` 收起按钮（`min_size(vec2(32.0, 32.0))`，
+    ///   同样 32 高，但只有 32 宽）——这是本测试第一版踩到的坑；
+    /// * 只按宽度找会抓到状态栏/面板背景那类整幅矩形（它们高度不是 32）。
+    ///
+    /// 真出错时的 panic 会把所有矩形打出来，便于对照。
+    fn painted_frame(app: &mut ComTool, theme: egui::ThemePreference) -> PaintedFrame {
+        let ctx = egui::Context::default();
+        // 主题要先在 context 上设好：`show_sidebar` 不负责下发主题（那是
+        // `ComTool::ui` 里 `apply_theme` 的活），所以测试得自己把 context 摆成目标主题。
+        ctx.set_theme(theme);
+        // 屏幕尺寸显式给：不给的话 `Panel::right` 拿到的可用宽度会退化，
+        // "全宽"就无从判定。
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1000.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            let mut open = true;
+            app.show_sidebar(ui, &mut open);
+        });
+
+        let mut rects = Vec::new();
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            match &clipped.shape {
+                egui::epaint::Shape::Rect(rect) => rects.push((rect.rect, rect.fill)),
+                egui::epaint::Shape::Text(text) => {
+                    texts.push((text.pos, text.galley.text().to_owned()));
+                }
+                _ => {}
+            }
+        }
+        out.textures_delta.clear();
+
+        let button = rects
+            .iter()
+            .map(|(rect, _)| *rect)
+            .find(|rect| {
+                (rect.height() - CONNECT_BUTTON_HEIGHT).abs() < 0.5
+                    && rect.width() >= CONNECT_BUTTON_MIN_WIDTH
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "侧边栏里没有「高 {CONNECT_BUTTON_HEIGHT} 且宽 ≥ \
+                     {CONNECT_BUTTON_MIN_WIDTH}」的填充矩形——连接按钮没画自己的背景。\
+                     实际矩形：{:?}",
+                    rects.iter().map(|(rect, _)| *rect).collect::<Vec<_>>()
+                )
+            });
+        PaintedFrame {
+            button,
+            rects,
+            texts,
+        }
+    }
+
+    /// 单独把某一档的按钮画一遍，取出 `(底色, 圆形列表, 文字)`。
+    ///
+    /// 直接驱动 [`draw_connect_button`]（它是自由函数），不走整条侧边栏：
+    /// `show_sidebar` 造不出"已连接"那一档——那需要一条**真就绪**的通道替身，
+    /// 而 `ComTool::default()` 的 `channel` 是 `None`（⇒ `opening()` 为真）。
+    fn painted_button_variant(
+        tone: ConnectButtonTone,
+        label: &str,
+        dark: bool,
+    ) -> (Color32, Vec<PaintedCircle>, Vec<String>) {
+        let ctx = egui::Context::default();
+        ctx.set_theme(if dark {
+            egui::ThemePreference::Dark
+        } else {
+            egui::ThemePreference::Light
+        });
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            draw_connect_button(ui, tone, label);
+        });
+
+        let mut fill = None;
+        let mut circles = Vec::new();
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            match &clipped.shape {
+                egui::epaint::Shape::Rect(rect)
+                    if (rect.rect.height() - CONNECT_BUTTON_HEIGHT).abs() < 0.5 =>
+                {
+                    fill = Some(rect.fill);
+                }
+                egui::epaint::Shape::Circle(circle) => circles.push((
+                    circle.center,
+                    circle.radius,
+                    circle.fill,
+                    circle.stroke.width,
+                    circle.stroke.color,
+                )),
+                egui::epaint::Shape::Text(text) => {
+                    texts.push(text.galley.text().to_owned());
+                }
+                _ => {}
+            }
+        }
+        out.textures_delta.clear();
+
+        (fill.expect("按钮没画背景矩形"), circles, texts)
+    }
+
+    /// 三个动作档的映射：**没连上就谈不上"正在打开"**。
+    #[test]
+    fn connect_button_tone_covers_all_three_states() {
+        assert_eq!(
+            connect_button_tone(false, false),
+            ConnectButtonTone::Idle,
+            "未连接必须是「可打开」档"
+        );
+        assert_eq!(
+            connect_button_tone(false, true),
+            ConnectButtonTone::Idle,
+            "`is_opening` 只在已连接时才可能为真；没连上就不该画成琥珀"
+        );
+        assert_eq!(
+            connect_button_tone(true, true),
+            ConnectButtonTone::Opening,
+            "已发起但通道未就绪 ⇒ 琥珀档"
+        );
+        assert_eq!(
+            connect_button_tone(true, false),
+            ConnectButtonTone::Connected,
+            "已连接 ⇒ 红档"
+        );
+    }
+
+    /// **「正在打开」时按钮文案必须仍在"关闭"侧**。
+    ///
+    /// 这一态里 `is_connected` 也为真，两件事合起来才是完整判据 ⇒ 断言成对写。
+    /// 若哪天有人把 `is_opening` 当成"还没连上"去选文案，按钮会显示「打开串口」
+    /// 而按下去是**关闭**——那正是 F4 修过的"文案与动作相反"。
+    #[test]
+    fn connect_button_label_stays_on_the_close_side_while_opening() {
+        let s = crate::app::Language::Zh.strings();
+
+        // 串口「正在打开」这一态：tone 是琥珀，文案仍是「关闭串口」。
+        assert_eq!(connect_button_tone(true, true), ConnectButtonTone::Opening);
+        assert_eq!(
+            connect_button_label(ConnectionKind::Serial, true, s),
+            s.close_port_button,
+            "「正在打开」时文案必须仍是「关闭串口」——按下去确实是关闭"
+        );
+
+        // 其余五格：三类连接 × 已连接/未连接。
+        assert_eq!(
+            connect_button_label(ConnectionKind::Serial, false, s),
+            s.open_port_button
+        );
+        assert_eq!(
+            connect_button_label(ConnectionKind::TcpClient, true, s),
+            s.disconnect_button
+        );
+        assert_eq!(
+            connect_button_label(ConnectionKind::TcpClient, false, s),
+            s.connect_button
+        );
+        assert_eq!(
+            connect_button_label(ConnectionKind::Udp, true, s),
+            s.disconnect_button
+        );
+        assert_eq!(
+            connect_button_label(ConnectionKind::Udp, false, s),
+            s.bind_button
+        );
+    }
+
+    /// **底色跟"按下去会做什么"走，跟状态栏那套不同义。**
+    ///
+    /// 方向必须断言**通道大小**，不能只断言"两色不同"——后者会被反色骗过
+    /// （把红绿对调它也过）。悬停更亮 / 按下更暗则逐个通道值之和比较，
+    /// 深浅两套主题、三个档位都要成立。
+    #[test]
+    fn connect_button_fill_follows_the_action_not_the_status() {
+        fn brightness(color: Color32) -> u32 {
+            u32::from(color.r()) + u32::from(color.g()) + u32::from(color.b())
+        }
+
+        for dark in [false, true] {
+            let idle = connect_button_fill(ConnectButtonTone::Idle, dark, false, false);
+            let connected = connect_button_fill(ConnectButtonTone::Connected, dark, false, false);
+
+            assert!(
+                idle.g() > idle.r() && idle.g() > idle.b(),
+                "dark={dark} 时「可打开」档不偏绿：{idle:?}"
+            );
+            assert!(
+                connected.r() > connected.g() && connected.r() > connected.b(),
+                "dark={dark} 时「可关闭」档不偏红：{connected:?}"
+            );
+
+            for tone in [
+                ConnectButtonTone::Idle,
+                ConnectButtonTone::Opening,
+                ConnectButtonTone::Connected,
+            ] {
+                let base = connect_button_fill(tone, dark, false, false);
+                let hover = connect_button_fill(tone, dark, true, false);
+                let press = connect_button_fill(tone, dark, false, true);
+
+                assert!(
+                    brightness(hover) > brightness(base),
+                    "dark={dark} / {tone:?}：悬停没有比常态更亮（{base:?} → {hover:?}）"
+                );
+                assert!(
+                    brightness(press) < brightness(base),
+                    "dark={dark} / {tone:?}：按下没有比常态更暗（{base:?} → {press:?}）"
+                );
+                // 按下与悬停同时为真时以按下为准（指针按着不放时也会 hovered）。
+                assert_eq!(
+                    connect_button_fill(tone, dark, true, true),
+                    press,
+                    "dark={dark} / {tone:?}：按下 + 悬停时应以按下为准"
+                );
+            }
+        }
+    }
+
+    /// **「正在打开」的琥珀与底部状态栏是同色**。
+    ///
+    /// 这是项目里"同一含义只能有一处颜色定义"的落地：状态栏的圆点与这个按钮
+    /// 说的都是"正在打开"，两边各写一个琥珀，迟早会漂移成两个近似色。
+    #[test]
+    fn connect_button_opening_tone_reuses_the_status_bar_amber() {
+        let bar = crate::status_bar::connection_indicator(
+            true,
+            true,
+            ConnectionKind::Serial,
+            crate::app::Language::Zh.strings(),
+        )
+        .color();
+
+        for dark in [false, true] {
+            assert_eq!(
+                connect_button_fill(ConnectButtonTone::Opening, dark, false, false),
+                bar,
+                "dark={dark} 时「正在打开」的底色与状态栏琥珀不一致"
+            );
+        }
+    }
+
+    /// **按钮真的接到了侧边栏里，而且是全宽、固定高度、自己画背景。**
+    ///
+    /// 这条与上面几条纯函数测试分开写，正是为了防"函数写得对、但界面没调用"——
+    /// 断言"侧边栏这一帧里存在一个高 32、宽接近可用宽度的填充矩形"。
+    /// 老实现（`egui::Button` 默认外观）过不了这条：它的底高度≈文字行高、宽度随文案。
+    #[test]
+    fn connect_button_paints_a_full_width_background_in_the_sidebar() {
+        let mut app = ComTool::default();
+        let frame = painted_frame(&mut app, egui::ThemePreference::Dark);
+        let button = frame.button;
+
+        assert!(
+            button.width() >= CONNECT_BUTTON_MIN_WIDTH,
+            "按钮宽 {}——侧边栏默认 280 宽，全宽按钮应当接近它",
+            button.width()
+        );
+        assert!(
+            button.height() >= CONNECT_BUTTON_HEIGHT - 0.5,
+            "按钮高 {}，小于 CONNECT_BUTTON_HEIGHT={CONNECT_BUTTON_HEIGHT}",
+            button.height()
+        );
+
+        let fill = frame
+            .rects
+            .iter()
+            .find(|(rect, _)| *rect == button)
+            .map(|(_, fill)| *fill)
+            .expect("按钮矩形不在矩形列表里");
+        assert_eq!(
+            fill,
+            connect_button_fill(ConnectButtonTone::Idle, true, false, false),
+            "按钮底色不是「可打开」那一档绿——又退回 egui 默认的弱灰底了"
+        );
+    }
+
+    /// **按钮下方那条提示必须真的在按钮下方。**
+    ///
+    /// 这是"按钮改全宽"带来的**必然布局后果**：原先提示与按钮在同一个
+    /// `ui.horizontal` 里，全宽之后同行只剩几个字宽、读不成句，所以移到下一行。
+    /// 这条测试钉的就是这个位置关系——若哪天有人把提示塞回按钮右侧（或改成同行
+    /// 右对齐），文字的 y 会落到按钮中线附近，`pos.y < button.max.y` 立刻报红。
+    #[test]
+    fn connect_button_hint_sits_below_the_button() {
+        let mut app = ComTool::default();
+        // 提示只在"参数没填全"时出现，而 `ComTool::default()` 默认已经选好 COM1
+        // （`connection_ready()` 为真）⇒ 先把端口清掉，否则这一帧里根本没有这条提示，
+        // 测试就会去断言一个不存在的东西。第一版就是这么写的，报"没画这条提示"。
+        app.selected_port.clear();
+
+        let frame = painted_frame(&mut app, egui::ThemePreference::Dark);
+        let s = crate::app::Language::Zh.strings();
+        let prefix = s.need_port_to_connect.split("{}").next().unwrap_or("");
+        assert!(
+            !prefix.is_empty(),
+            "这条提示的文案以占位符开头，测试取不到可用于匹配的前缀：{:?}",
+            s.need_port_to_connect
+        );
+
+        let hint = frame
+            .texts
+            .iter()
+            .find(|(_, text)| text.starts_with(prefix))
+            .unwrap_or_else(|| {
+                panic!(
+                    "未选端口时侧边栏没画这条提示：{:?}；实际画了：{:?}",
+                    s.need_port_to_connect,
+                    frame
+                        .texts
+                        .iter()
+                        .map(|(pos, text)| (pos.y, text.as_str()))
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert!(
+            hint.0.y >= frame.button.max.y - 0.5,
+            "提示「{}」画在 y={:.1}，而按钮底边是 y={:.1}——提示必须移到按钮下方：\
+             按钮现在是全宽的，与它同行只剩几个字宽",
+            hint.1,
+            hint.0.y,
+            frame.button.max.y
+        );
+    }
+
+    /// **状态点：只有"还没连上"是空心圆**，另外两档实心，且墨色与文案同色。
+    ///
+    /// 判据里的圆必须**落在按钮的垂直中线上**：侧边栏里单选钮也画圆，
+    /// 只断言"存在一个半径 4.5 的圆"会被它们骗过（radio 的圆半径也是这个量级）。
+    #[test]
+    fn connect_button_dot_is_hollow_only_before_connecting() {
+        let radius_ok = |r: f32| (r - CONNECT_DOT_DIAMETER / 2.0).abs() < 0.5;
+
+        // 未连接：空心——fill 透明、描边 1.5。
+        let (_, idle_circles, _) =
+            painted_button_variant(ConnectButtonTone::Idle, "打开串口", true);
+        let idle_dot = idle_circles
+            .iter()
+            .find(|(_, radius, _, _, _)| radius_ok(*radius))
+            .expect("未连接时按钮里没有状态点");
+        assert_eq!(
+            idle_dot.2,
+            Color32::TRANSPARENT,
+            "未连接的状态点不是空心的（fill 应当透明）：{idle_dot:?}"
+        );
+        assert!(
+            (idle_dot.3 - CONNECT_DOT_STROKE).abs() < 0.01,
+            "未连接的状态点描边宽 {} 不是 {CONNECT_DOT_STROKE}",
+            idle_dot.3
+        );
+        assert_eq!(
+            idle_dot.4,
+            connect_button_text_color(ConnectButtonTone::Idle),
+            "未连接的状态点描边色与文案色不一致"
+        );
+
+        // 已连接：实心白点。
+        let (_, connected_circles, _) =
+            painted_button_variant(ConnectButtonTone::Connected, "关闭串口", true);
+        let connected_dot = connected_circles
+            .iter()
+            .find(|(_, radius, _, _, _)| radius_ok(*radius))
+            .expect("已连接时按钮里没有状态点");
+        assert_eq!(
+            connected_dot.2,
+            connect_button_text_color(ConnectButtonTone::Connected),
+            "已连接的状态点不是实心白点：{connected_dot:?}"
+        );
+
+        // 「正在打开」：实心，且是压在琥珀上的深墨色（白字在琥珀上只有约 1.8:1）。
+        let (_, opening_circles, _) =
+            painted_button_variant(ConnectButtonTone::Opening, "关闭串口", true);
+        let opening_dot = opening_circles
+            .iter()
+            .find(|(_, radius, _, _, _)| radius_ok(*radius))
+            .expect("「正在打开」时按钮里没有状态点");
+        assert_eq!(
+            opening_dot.2,
+            connect_button_text_color(ConnectButtonTone::Opening),
+            "「正在打开」的状态点不是深墨色：{opening_dot:?}"
+        );
+        assert_ne!(
+            opening_dot.2,
+            Color32::WHITE,
+            "「正在打开」用了白墨色——压在琥珀底上对比度不足"
         );
     }
 }
