@@ -568,7 +568,10 @@ impl eframe::App for ComTool {
     - **exe 不能进版本控制**（`target/` 已在 `.gitignore` 里），所以它**每次都要现场重建**，不会随 clone / checkout 带过来。换机器或清过 `target/` 之后，第一次交付界面前同样要先 build。
     - **用户明确要求过这条**：本约定不是我的自拟规范，是用户在 2026-09-24 连续两次指出后的固化（第一次："先编译再让我目视检查啊，你没编译吧？"）。此后凡涉及界面交付，`build --release` 与 `test` 同级必跑。
 
-50. **加一种语言 = 加一列，不改代码**（2026-09-24 多语种扩展起）：`src/strings.rs` 的表头 `langs: ZH, EN, ZH_HANT, JA, ES, IT, PT, ID, FR, DE, KO, VI;` 是**唯一**的语言清单，每条文案后按同顺序跟 12 个字面量。加语言只做三件事：① 表头插一个语言标识；② **每一条**补上该列（漏一条编译期就报 `compile_error!`——宏会数每行的列数）；③ 在 `app.rs` 的 `Language` 枚举末尾追加变体 + `Language::ALL` + `endonym()`。**不要**在 `strings.rs` 的测试里写死语言数量，都从 `Language::ALL` / `LANGS` / `ALL` 里取。
+50. **加一种语言 = 加一列，不改代码**（2026-09-24 多语种扩展起）：`src/strings.rs` 的表头 `langs: ZH, EN, ZH_HANT, JA, ES, IT, PT, ID, FR, DE, KO, VI, TR, RU, PL;` 是**唯一**的语言清单，每条文案后按同顺序跟 15 个字面量。加语言只做三件事：① 表头插一个语言标识；② **每一条**补上该列（漏一条编译期就报 `compile_error!`——宏会数每行的列数）；③ 在 `app.rs` 的 `Language` 枚举末尾追加变体 + `Language::ALL` + `endonym()`。**不要**在 `strings.rs` 的测试里写死语言数量，都从 `Language::ALL` / `LANGS` / `ALL` 里取。
+    - **每加一种新文字系统，必须同时补一个"字形归属"检测器**。`columns_have_no_foreign_script` 的检测器集合原本只有假名/谚文/泰文/中日韩，**没有西里尔**——所以整列 `ru` 抄成波兰语（拉丁）时全部检测器不命中，静默通过。`has_cyrillic` 补上这个洞。
+    - **"这一列是不是这种文字"要从数据自证，不能靠写死的字表**。`third_batch_columns_use_their_own_alphabets` 的判据：`ru` 列至少 100 条含西里尔（实测 195/199）、`pl` 列至少 40 条含**波兰独有**字母 `ą ć ę ł ń ś ż`（实测 101/199）。**不能用完整波兰字母表**——`ó`/`ź` 也出现在葡萄牙语（`não`）与西班牙语（`Versión`）里，拿它们当判据，整列换成西语也会命中。判据必须是**差异集**。
+    - **守卫必须做"空转验证"，而且要能看出"测试压根没跑"**（2026-09-24 本轮踩了两个假绿坑，务必记住）：① 本项目**没有 lib target**，`cargo test --lib <名字>` 报 `no library targets found`——**测试一条也没跑**；② `-- --exact <裸名字>` 匹配不到模块限定路径（要写 `strings::tests::xxx`），输出 `running 0 tests; N filtered out` 然后 `test result: ok`——**同样是假绿**。两者都因为"红判据只找 `FAILED` / `panicked at`"而被吞掉。探针必须把**执行数 0** 也判为红。
     - **宏为什么写成"边走边剥"**：`macro_rules!` 既**不能拼接 token**（写不出 `(m m)` → `(m m m)`），也**不能在匹配时做算术**（`[$n - 1]` 不成立）。所以"取第 k 列"不能靠计数器，只能每处理一种语言就从每行字面量里**取走第一个**、把尾巴交给下一种（见 `@emit_langs` 的两个臂）。改宏时先想清楚这一点，否则会绕回那两个死胡同。
     - **枚举变体只能往后追加**：`Language` 派生 `Serialize` / `Deserialize`，按**变体名**存取。插在中间不影响正确性（名字不变），但让 diff 难读；删改已有变体名会让老存档读不出来。`Default` 仍是 `Zh`。
     - **字段名索引的守卫测试优先于"比数值"**：`template_placeholder_counts_are_pinned` 按**字段名**在 `ALL` 里查该条的各语言列，逐列核 `{}` 个数；不要退化成"只比中文和英文"。同理 `columns_have_no_foreign_script` 按语言分别判定允许的文字系统（日语列允许汉字、拉丁列出现汉字才是错），不要写成"一列一条规则"。

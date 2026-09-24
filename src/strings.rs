@@ -143,7 +143,7 @@ strings! {
     // language_order` 钉住），也是 `Language::strings()` 按下标取表的依据。
     // 名字须大写标识符：宏生成的 `static` 直接用它。
     // 顺序 = 风险从低到高（见 I18N_TARGET_LANGUAGES.md §0）。
-    langs: ZH, EN, ZH_HANT, JA, ES, IT, PT, ID, FR, DE, KO, VI;
+    langs: ZH, EN, ZH_HANT, JA, ES, IT, PT, ID, FR, DE, KO, VI, TR, RU, PL;
 
     // —— app.rs：顶栏按钮 ——
     sidebar_toggle: "☰ 侧边栏", "☰ Sidebar",
@@ -156,7 +156,10 @@ strings! {
         "☰ Barre latérale",
         "☰ Seitenleiste",
         "☰ 사이드바",
-        "☰ Thanh bên";
+        "☰ Thanh bên",
+        "☰ Kenar çubuğu",
+        "☰ Боковая панель",
+        "☰ Pasek boczny";
     settings_button: "⚙ 设置", "⚙ Settings",
         "⚙ 設定",
         "⚙ 設定",
@@ -167,7 +170,10 @@ strings! {
         "⚙ Paramètres",
         "⚙ Einstellungen",
         "⚙ 설정",
-        "⚙ Cài đặt";
+        "⚙ Cài đặt",
+        "⚙ Ayarlar",
+        "⚙ Настройки",
+        "⚙ Ustawienia";
 
     // —— app.rs：接收设置行 ——
     receive_settings: "接收设置:", "Receive:",
@@ -180,7 +186,10 @@ strings! {
         "Réception :",
         "Empfang:",
         "수신 설정:",
-        "Nhận:";
+        "Nhận:",
+        "Alım:",
+        "Приём:",
+        "Odbiór:";
     color: "颜色", "Color",
         "顏色",
         "色",
@@ -191,7 +200,10 @@ strings! {
         "Couleur",
         "Farbe",
         "색상",
-        "Màu";
+        "Màu",
+        "Renk",
+        "Цвет",
+        "Kolor";
     byte_view: "字节查看", "Byte view",
         "位元組檢視",
         "バイト表示",
@@ -202,7 +214,10 @@ strings! {
         "Vue octets",
         "Byte-Ansicht",
         "바이트 보기",
-        "Xem byte";
+        "Xem byte",
+        "Bayt görünümü",
+        "Просмотр байтов",
+        "Widok bajtów";
 
     // —— app.rs：发送区 ——
     send_area: "发送区:", "Send:",
@@ -215,7 +230,10 @@ strings! {
         "Envoi :",
         "Senden:",
         "송신 영역:",
-        "Gửi:";
+        "Gửi:",
+        "Gönderme alanı:",
+        "Отправка:",
+        "Wysyłanie:";
     format: "格式", "Format",
         "格式",
         "形式",
@@ -226,7 +244,10 @@ strings! {
         "Format",
         "Format",
         "형식",
-        "Định dạng";
+        "Định dạng",
+        "Biçim",
+        "Формат",
+        "Format";
     line_ending: "行尾", "Line ending",
         "行尾",
         "改行コード",
@@ -237,7 +258,10 @@ strings! {
         "Fin de ligne",
         "Zeilenende",
         "줄 끝",
-        "Kết thúc dòng";
+        "Kết thúc dòng",
+        "Satır sonu",
+        "Конец строки",
+        "Koniec wiersza";
     repeat_send: "定时发送", "Repeat send",
         "定時傳送",
         "定期送信",
@@ -248,7 +272,10 @@ strings! {
         "Envoi périodique",
         "Wiederholtes Senden",
         "반복 전송",
-        "Gửi định kỳ";
+        "Gửi định kỳ",
+        "Yineli gönder",
+        "Повторная отправка",
+        "Wysyłanie cykliczne";
     preview_too_long: "输入过长，已停止实时校验", "Input too long — live validation paused",
         "輸入過長，已停止即時校驗",
         "入力が長すぎるため、リアルタイム検証を停止しました",
@@ -259,7 +286,10 @@ strings! {
         "Entrée trop longue : validation en direct suspendue",
         "Eingabe zu lang — Live-Prüfung angehalten",
         "입력이 너무 깁니다 — 실시간 검사 일시 중지",
-        "Nhập quá dài — tạm dừng kiểm tra trực tiếp";
+        "Nhập quá dài — tạm dừng kiểm tra trực tiếp",
+        "Girdi çok uzun — canlı doğrulama duraklatıldı",
+        "Ввод слишком длинный — проверка в реальном времени приостановлена",
+        "Dane wejściowe są za długie — walidacja na bieżąco wstrzymana";
     will_send_bytes: "将发送 {} 字节", "Will send {} bytes",
         "將傳送 {} 位元組",
         "{} バイト送信します",
@@ -270,7 +300,10 @@ strings! {
         "{} octets seront envoyés",
         "{} Bytes werden gesendet",
         "{} 바이트 전송 예정",
-        "Sẽ gửi {} byte";
+        "Sẽ gửi {} byte",
+        "{} bayt gönderilecek",
+        "Будет отправлено {} байт",
+        "Zostanie wysłane {} bajtów";
     unmappable_in_encoding:
         "有字符在 {} 里无法表示，将被替换",
         "Some characters cannot be represented in {} and will be replaced",
@@ -283,7 +316,10 @@ strings! {
         "Certains caractères ne peuvent pas être représentés en {} et seront remplacés",
         "Einige Zeichen lassen sich in {} nicht darstellen und werden ersetzt",
         "일부 문자는 {}에서 표현할 수 없어 대체됩니다",
-        "Một số ký tự không thể biểu diễn trong {} và sẽ bị thay thế";
+        "Một số ký tự không thể biểu diễn trong {} và sẽ bị thay thế",
+        "Bazı karakterler {} içinde gösterilemez ve değiştirilecek",
+        "Некоторые символы невозможно представить в {}, они будут заменены",
+        "Niektóre znaki nie mogą być przedstawione w {} i zostaną zastąpione";
     hex_parse_failed: "HEX 解析失败: {}", "HEX parse failed: {}",
         "HEX 解析失敗: {}",
         "HEX 解析に失敗: {}",
@@ -294,7 +330,10 @@ strings! {
         "Échec de l'analyse HEX : {}",
         "HEX-Analyse fehlgeschlagen: {}",
         "HEX 구문 분석 실패: {}",
-        "Phân tích HEX thất bại: {}";
+        "Phân tích HEX thất bại: {}",
+        "HEX ayrıştırma başarısız: {}",
+        "Ошибка разбора HEX: {}",
+        "Błąd analizy HEX: {}";
     history_browsing: "历史浏览中：↑ 更旧 / ↓ 更新", "Browsing history: ↑ older / ↓ newer",
         "歷史瀏覽中：↑ 更舊 / ↓ 更新",
         "履歴を参照中: ↑ 古い / ↓ 新しい",
@@ -305,7 +344,10 @@ strings! {
         "Navigation dans l'historique : ↑ plus ancien / ↓ plus récent",
         "Verlauf durchblättern: ↑ älter / ↓ neuer",
         "기록 탐색 중: ↑ 이전 / ↓ 최신",
-        "Đang duyệt lịch sử: ↑ cũ hơn / ↓ mới hơn";
+        "Đang duyệt lịch sử: ↑ cũ hơn / ↓ mới hơn",
+        "Geçmişe göz atılıyor: ↑ daha eski / ↓ daha yeni",
+        "Просмотр истории: ↑ старее / ↓ новее",
+        "Przeglądanie historii: ↑ starsze / ↓ nowsze";
     clear_send_button: "清空发送", "Clear input",
         "清空傳送",
         "入力を消去",
@@ -316,7 +358,10 @@ strings! {
         "Effacer l'entrée",
         "Eingabe löschen",
         "입력 지우기",
-        "Xóa nội dung";
+        "Xóa nội dung",
+        "Girdiyi temizle",
+        "Очистить ввод",
+        "Wyczyść dane";
     repeat_needs_connection:
         "未连接：连上之后才会开始定时发送",
         "Not connected — repeat send only starts once connected",
@@ -329,7 +374,10 @@ strings! {
         "Non connecté : l'envoi périodique ne démarre qu'après connexion",
         "Nicht verbunden — wiederholtes Senden startet erst nach dem Verbinden",
         "연결되지 않음 — 연결 후에야 반복 전송이 시작됩니다",
-        "Chưa kết nối — gửi định kỳ chỉ bắt đầu sau khi kết nối";
+        "Chưa kết nối — gửi định kỳ chỉ bắt đầu sau khi kết nối",
+        "Bağlı değil — yineli gönderim ancak bağlandıktan sonra başlar",
+        "Нет подключения — повторная отправка начнётся только после подключения",
+        "Brak połączenia — wysyłanie cykliczne ruszy dopiero po połączeniu";
     escape: "转义", "Escape",
         "跳脫",
         "エスケープ",
@@ -340,7 +388,10 @@ strings! {
         "Échappement",
         "Escape",
         "이스케이프",
-        "Thoát ký tự";
+        "Thoát ký tự",
+        "Kaçış",
+        "Экранирование",
+        "Znaki ucieczki";
 
     // —— app.rs：常用数据（N2）——
     presets_header: "常用数据", "Presets",
@@ -353,7 +404,10 @@ strings! {
         "Préréglages",
         "Vorlagen",
         "즐겨찾기",
-        "Mẫu sẵn dùng";
+        "Mẫu sẵn dùng",
+        "Hazır veriler",
+        "Шаблоны",
+        "Szablony";
     save_preset: "存为常用", "Save as preset",
         "存為常用",
         "定型として保存",
@@ -364,7 +418,10 @@ strings! {
         "Enregistrer comme préréglage",
         "Als Vorlage speichern",
         "즐겨찾기에 저장",
-        "Lưu thành mẫu";
+        "Lưu thành mẫu",
+        "Şablon olarak kaydet",
+        "Сохранить как шаблон",
+        "Zapisz jako szablon";
     preset_empty:
         "还没有常用数据：把输入框里的内容存进来，之后点一下就能重发",
         "No presets yet — save the input box contents, then send them with one click",
@@ -377,7 +434,10 @@ strings! {
         "Aucun préréglage : enregistrez le contenu du champ de saisie, puis envoyez-le en un clic",
         "Noch keine Vorlagen — speichern Sie den Inhalt des Eingabefelds und senden Sie ihn per Klick",
         "즐겨찾기가 없습니다 — 입력 상자의 내용을 저장하면 클릭 한 번으로 전송할 수 있습니다",
-        "Chưa có mẫu nào — lưu nội dung ô nhập rồi gửi bằng một cú nhấp";
+        "Chưa có mẫu nào — lưu nội dung ô nhập rồi gửi bằng một cú nhấp",
+        "Henüz hazır veri yok — giriş kutusundaki içeriği kaydedin, sonra tek tıkla gönderin",
+        "Шаблонов пока нет — сохраните содержимое поля ввода и отправляйте его одним нажатием",
+        "Brak szablonów — zapisz zawartość pola wprowadzania i wysyłaj ją jednym kliknięciem";
     preset_hint: "点一下发送；右键删除", "Click to send; right-click to delete",
         "點一下傳送；右鍵刪除",
         "クリックで送信、右クリックで削除",
@@ -388,7 +448,10 @@ strings! {
         "Cliquez pour envoyer ; clic droit pour supprimer",
         "Klicken zum Senden; Rechtsklick zum Löschen",
         "클릭하면 전송, 오른쪽 클릭하면 삭제",
-        "Nhấp để gửi; nhấp chuột phải để xóa";
+        "Nhấp để gửi; nhấp chuột phải để xóa",
+        "Göndermek için tıklayın; silmek için sağ tıklayın",
+        "Нажмите, чтобы отправить; правый щелчок — удалить",
+        "Kliknij, aby wysłać; kliknij prawym przyciskiem, aby usunąć";
     preset_full: "上限 {} 条", "Up to {} presets",
         "上限 {} 筆",
         "上限 {} 件",
@@ -399,7 +462,10 @@ strings! {
         "Jusqu'à {} préréglages",
         "Bis zu {} Vorlagen",
         "최대 {} 개",
-        "Tối đa {} mẫu";
+        "Tối đa {} mẫu",
+        "En fazla {} şablon",
+        "До {} шаблонов",
+        "Maksymalnie {} szablonów";
     preset_duplicate: "已在列表中", "Already saved",
         "已在清單中",
         "すでに登録済み",
@@ -410,7 +476,10 @@ strings! {
         "Déjà enregistré",
         "Bereits gespeichert",
         "이미 저장됨",
-        "Đã lưu";
+        "Đã lưu",
+        "Zaten kaydedildi",
+        "Уже сохранено",
+        "Już zapisano";
     preset_input_empty: "输入框为空", "Input is empty",
         "輸入框為空",
         "入力欄が空です",
@@ -421,7 +490,10 @@ strings! {
         "L'entrée est vide",
         "Eingabe ist leer",
         "입력이 비어 있습니다",
-        "Ô nhập trống";
+        "Ô nhập trống",
+        "Giriş kutusu boş",
+        "Поле ввода пустое",
+        "Pole wprowadzania jest puste";
     preset_count_text: "{} / {} 条", "{} / {} saved",
         "{} / {} 筆",
         "{} / {} 件",
@@ -432,7 +504,10 @@ strings! {
         "{} / {} enregistrés",
         "{} / {} gespeichert",
         "{} / {} 저장됨",
-        "{} / {} đã lưu";
+        "{} / {} đã lưu",
+        "{} / {} kayıtlı",
+        "{} / {} сохранено",
+        "{} / {} zapisanych";
     clear_presets: "清空常用数据", "Clear presets",
         "清空常用資料",
         "定型データを消去",
@@ -443,7 +518,10 @@ strings! {
         "Effacer les préréglages",
         "Vorlagen löschen",
         "즐겨찾기 지우기",
-        "Xóa mẫu sẵn dùng";
+        "Xóa mẫu sẵn dùng",
+        "Şablonları temizle",
+        "Очистить шаблоны",
+        "Wyczyść szablony";
     preset_needs_connection: "未连接：连上之后才能发送", "Not connected — cannot send yet",
         "未連線：連上之後才能傳送",
         "未接続: 接続後に送信できます",
@@ -454,7 +532,10 @@ strings! {
         "Non connecté : envoi impossible pour l'instant",
         "Nicht verbunden — Senden noch nicht möglich",
         "연결되지 않음 — 아직 전송할 수 없습니다",
-        "Chưa kết nối — chưa thể gửi";
+        "Chưa kết nối — chưa thể gửi",
+        "Bağlı değil — henüz gönderilemez",
+        "Нет подключения — отправка пока невозможна",
+        "Brak połączenia — nie można jeszcze wysłać";
 
     // —— app.rs / log_file.rs：原生文件对话框 ——
     export_dialog_title: "导出接收数据.txt", "Export received data.txt",
@@ -467,7 +548,10 @@ strings! {
         "Exporter les données reçues.txt",
         "Empfangene Daten exportieren.txt",
         "수신 데이터 내보내기.txt",
-        "Xuất dữ liệu nhận.txt";
+        "Xuất dữ liệu nhận.txt",
+        "Alınan verileri dışa aktar.txt",
+        "Экспорт принятых данных.txt",
+        "Eksport odebranych danych.txt";
     export_text_filter: "文本文件", "Text files",
         "文字檔",
         "テキストファイル",
@@ -478,7 +562,10 @@ strings! {
         "Fichiers texte",
         "Textdateien",
         "텍스트 파일",
-        "Tệp văn bản";
+        "Tệp văn bản",
+        "Metin dosyaları",
+        "Текстовые файлы",
+        "Pliki tekstowe";
     pick_log_dir_title: "选择日志输出目录", "Choose log output directory",
         "選擇日誌輸出目錄",
         "ログ出力先フォルダを選択",
@@ -489,7 +576,10 @@ strings! {
         "Choisir le dossier de journalisation",
         "Log-Ausgabeordner wählen",
         "로그 출력 디렉터리 선택",
-        "Chọn thư mục ghi log";
+        "Chọn thư mục ghi log",
+        "Günlük çıktı klasörünü seç",
+        "Выбор папки журнала",
+        "Wybierz katalog dziennika";
 
     // —— info.rs：关于窗口 ——
     info_window_title: "信息", "Info",
@@ -502,7 +592,10 @@ strings! {
         "Informations",
         "Info",
         "정보",
-        "Thông tin";
+        "Thông tin",
+        "Bilgi",
+        "Информация",
+        "Informacje";
     version_label: "版本 {}", "Version {}",
         "版本 {}",
         "バージョン {}",
@@ -513,7 +606,10 @@ strings! {
         "Version {}",
         "Version {}",
         "버전 {}",
-        "Phiên bản {}";
+        "Phiên bản {}",
+        "Sürüm {}",
+        "Версия {}",
+        "Wersja {}";
     app_description:
         "基于 eframe/egui 的串口调试上位机",
         "Serial port terminal built on eframe/egui",
@@ -526,7 +622,10 @@ strings! {
         "Terminal de port série basé sur eframe/egui",
         "Serielles Terminal auf Basis von eframe/egui",
         "eframe/egui 기반 시리얼 포트 터미널",
-        "Terminal cổng nối tiếp dựa trên eframe/egui";
+        "Terminal cổng nối tiếp dựa trên eframe/egui",
+        "eframe/egui tabanlı seri port terminali",
+        "Терминал последовательного порта на eframe/egui",
+        "Terminal portu szeregowego oparty na eframe/egui";
     serial_backend: "串口后端: serialport", "Serial backend: serialport",
         "串口後端: serialport",
         "シリアルバックエンド: serialport",
@@ -537,7 +636,10 @@ strings! {
         "Backend série : serialport",
         "Serielles Backend: serialport",
         "시리얼 백엔드: serialport",
-        "Backend nối tiếp: serialport";
+        "Backend nối tiếp: serialport",
+        "Seri port arka ucu: serialport",
+        "Серверная часть порта: serialport",
+        "Backend portu szeregowego: serialport";
     ui_framework: "界面框架: eframe / egui", "UI framework: eframe / egui",
         "介面框架: eframe / egui",
         "UI フレームワーク: eframe / egui",
@@ -548,7 +650,10 @@ strings! {
         "Framework d'interface : eframe / egui",
         "UI-Framework: eframe / egui",
         "UI 프레임워크: eframe / egui",
-        "Khung giao diện: eframe / egui";
+        "Khung giao diện: eframe / egui",
+        "Arayüz çatısı: eframe / egui",
+        "Фреймворк интерфейса: eframe / egui",
+        "Framework interfejsu: eframe / egui";
     settings_dir: "设置存档: {}", "Settings dir: {}",
         "設定存檔: {}",
         "設定の保存先: {}",
@@ -559,7 +664,10 @@ strings! {
         "Dossier des paramètres : {}",
         "Einstellungsordner: {}",
         "설정 저장 위치: {}",
-        "Thư mục cài đặt: {}";
+        "Thư mục cài đặt: {}",
+        "Ayarlar klasörü: {}",
+        "Каталог настроек: {}",
+        "Katalog ustawień: {}";
     settings_dir_unavailable:
         "设置存档: 当前平台不适用",
         "Settings dir: not applicable on this platform",
@@ -572,7 +680,10 @@ strings! {
         "Dossier des paramètres : non applicable sur cette plateforme",
         "Einstellungsordner: auf dieser Plattform nicht verfügbar",
         "설정 저장 위치: 이 플랫폼에서는 해당 없음",
-        "Thư mục cài đặt: không áp dụng trên nền tảng này";
+        "Thư mục cài đặt: không áp dụng trên nền tảng này",
+        "Ayarlar klasörü: bu platformda geçerli değil",
+        "Каталог настроек: не применимо на этой платформе",
+        "Katalog ustawień: nie dotyczy tej platformy";
     shortcuts: "快捷键", "Shortcuts",
         "快速鍵",
         "ショートカット",
@@ -583,7 +694,10 @@ strings! {
         "Raccourcis",
         "Tastenkürzel",
         "단축키",
-        "Phím tắt";
+        "Phím tắt",
+        "Kısayollar",
+        "Горячие клавиши",
+        "Skróty klawiszowe";
     shortcut_send: "Enter 发送 / Shift+Enter 换行", "Enter to send / Shift+Enter for a newline",
         "Enter 傳送 / Shift+Enter 換行",
         "Enter で送信 / Shift+Enter で改行",
@@ -594,7 +708,10 @@ strings! {
         "Entrée pour envoyer / Maj+Entrée pour un saut de ligne",
         "Enter zum Senden / Umschalt+Enter für Zeilenumbruch",
         "Enter 전송 / Shift+Enter 줄바꿈",
-        "Enter để gửi / Shift+Enter để xuống dòng";
+        "Enter để gửi / Shift+Enter để xuống dòng",
+        "Göndermek için Enter / yeni satır için Shift+Enter",
+        "Enter — отправить / Shift+Enter — новая строка",
+        "Enter — wyślij / Shift+Enter — nowy wiersz";
     shortcut_copy: "接收区右键：复制全部日志", "Receive area, right-click: copy the whole log",
         "接收區右鍵：複製全部日誌",
         "受信エリア右クリック: ログをすべてコピー",
@@ -605,7 +722,10 @@ strings! {
         "Zone de réception, clic droit : copier tout le journal",
         "Empfangsbereich, Rechtsklick: gesamtes Protokoll kopieren",
         "수신 영역 오른쪽 클릭: 전체 로그 복사",
-        "Vùng nhận, nhấp chuột phải: sao chép toàn bộ log";
+        "Vùng nhận, nhấp chuột phải: sao chép toàn bộ log",
+        "Alım alanı, sağ tıklama: tüm günlüğü kopyala",
+        "Область приёма, правый щелчок: копировать весь журнал",
+        "Obszar odbioru, kliknięcie prawym przyciskiem: kopiuj cały dziennik";
 
     // —— sidebar.rs：只读信息回显 ——
     nav_sidebar: "侧边栏", "Sidebar",
@@ -618,7 +738,10 @@ strings! {
         "Barre latérale",
         "Seitenleiste",
         "사이드바",
-        "Thanh bên";
+        "Thanh bên",
+        "Kenar çubuğu",
+        "Боковая панель",
+        "Pasek boczny";
     collapse: "收起", "Collapse",
         "收合",
         "折りたたむ",
@@ -629,7 +752,10 @@ strings! {
         "Réduire",
         "Einklappen",
         "접기",
-        "Thu gọn";
+        "Thu gọn",
+        "Daralt",
+        "Свернуть",
+        "Zwiń";
     serial_info: "串口信息", "Port info",
         "串口資訊",
         "ポート情報",
@@ -640,7 +766,10 @@ strings! {
         "Infos du port",
         "Port-Info",
         "포트 정보",
-        "Thông tin cổng";
+        "Thông tin cổng",
+        "Port bilgisi",
+        "Информация о порте",
+        "Informacje o porcie";
     port_label: "端口: {}", "Port: {}",
         "連接埠: {}",
         "ポート: {}",
@@ -651,7 +780,10 @@ strings! {
         "Port : {}",
         "Port: {}",
         "포트: {}",
-        "Cổng: {}";
+        "Cổng: {}",
+        "Port: {}",
+        "Порт: {}",
+        "Port: {}";
     not_selected: "未选择", "not selected",
         "未選擇",
         "未選択",
@@ -662,7 +794,10 @@ strings! {
         "non sélectionné",
         "nicht ausgewählt",
         "선택 안 됨",
-        "chưa chọn";
+        "chưa chọn",
+        "seçilmedi",
+        "не выбрано",
+        "nie wybrano";
     baud_label: "波特率: {}", "Baud rate: {}",
         "波特率: {}",
         "ボーレート: {}",
@@ -673,7 +808,10 @@ strings! {
         "Débit : {}",
         "Baudrate: {}",
         "보드레이트: {}",
-        "Tốc độ baud: {}";
+        "Tốc độ baud: {}",
+        "Baud hızı: {}",
+        "Скорость: {}",
+        "Prędkość: {}";
     status_connected: "状态: 已连接", "Status: connected",
         "狀態: 已連線",
         "状態: 接続済み",
@@ -684,7 +822,10 @@ strings! {
         "État : connecté",
         "Status: verbunden",
         "상태: 연결됨",
-        "Trạng thái: đã kết nối";
+        "Trạng thái: đã kết nối",
+        "Durum: bağlı",
+        "Состояние: подключено",
+        "Stan: połączono";
     status_disconnected: "状态: 未连接", "Status: disconnected",
         "狀態: 未連線",
         "状態: 未接続",
@@ -695,7 +836,10 @@ strings! {
         "État : déconnecté",
         "Status: getrennt",
         "상태: 연결 끊김",
-        "Trạng thái: chưa kết nối";
+        "Trạng thái: chưa kết nối",
+        "Durum: bağlı değil",
+        "Состояние: не подключено",
+        "Stan: rozłączono";
     rx_stats: "接收统计", "Receive stats",
         "接收統計",
         "受信統計",
@@ -706,7 +850,10 @@ strings! {
         "Statistiques de réception",
         "Empfangsstatistik",
         "수신 통계",
-        "Thống kê nhận";
+        "Thống kê nhận",
+        "Alım istatistikleri",
+        "Статистика приёма",
+        "Statystyki odbioru";
     rx_bytes_label: "接收字节数: {}", "Received bytes: {}",
         "接收位元組數: {}",
         "受信バイト数: {}",
@@ -717,7 +864,10 @@ strings! {
         "Octets reçus : {}",
         "Empfangene Bytes: {}",
         "수신 바이트: {}",
-        "Byte đã nhận: {}";
+        "Byte đã nhận: {}",
+        "Alınan bayt: {}",
+        "Принято байт: {}",
+        "Odebrane bajty: {}";
     tx_bytes_label: "发送字节数: {}", "Sent bytes: {}",
         "傳送位元組數: {}",
         "送信バイト数: {}",
@@ -728,7 +878,10 @@ strings! {
         "Octets envoyés : {}",
         "Gesendete Bytes: {}",
         "송신 바이트: {}",
-        "Byte đã gửi: {}";
+        "Byte đã gửi: {}",
+        "Gönderilen bayt: {}",
+        "Отправлено байт: {}",
+        "Wysłane bajty: {}";
     tx_bytes_hover:
         "自本次连接以来累计送出，断开后归零；与上面「接收字节数」口径不同——那个是当前缓冲区里的字节数，会被上限裁掉",
         "Counted since this connection and reset on disconnect; note the different meaning from \"Received bytes\" above, which is the size of the current buffer and is trimmed at the cap",
@@ -741,7 +894,10 @@ strings! {
         "Comptés depuis cette connexion et remis à zéro à la déconnexion ; à ne pas confondre avec « Octets reçus » ci-dessus, qui est la taille du tampon actuel, tronquée à la limite",
         "Seit dieser Verbindung gezählt und beim Trennen zurückgesetzt; nicht mit \"Empfangene Bytes\" oben verwechseln — das ist die Größe des aktuellen Puffers und wird am Limit gekürzt",
         "이 연결 이후 누적 송신량이며 연결이 끊기면 0으로 초기화됩니다. 위의 \"수신 바이트\"와는 의미가 다릅니다——그쪽은 현재 버퍼 크기로 상한에서 잘립니다",
-        "Được tính từ lần kết nối này và đặt lại khi ngắt kết nối; khác với \"Byte đã nhận\" ở trên — đó là kích thước bộ đệm hiện tại và bị cắt ở giới hạn";
+        "Được tính từ lần kết nối này và đặt lại khi ngắt kết nối; khác với \"Byte đã nhận\" ở trên — đó là kích thước bộ đệm hiện tại và bị cắt ở giới hạn",
+        "Bu bağlantıdan bu yana sayılır ve bağlantı kesilince sıfırlanır; yukarıdaki «Alınan bayt» ile aynı anlamda değildir — o, geçerli arabelleğin boyutudur ve üst sınıra gelince kırpılır",
+        "Считается с момента этого подключения и сбрасывается при отключении; это не то же самое, что «Принято байт» выше — там размер текущего буфера, который обрезается по достижении предела",
+        "Liczone od tego połączenia i zerowane przy rozłączeniu; to nie to samo co „Odebrane bajty” powyżej — tam jest rozmiar bieżącego bufora, przycinany po osiągnięciu limitu";
     display_mode_line: "显示模式: {}", "Display mode: {}",
         "顯示模式: {}",
         "表示モード: {}",
@@ -752,7 +908,10 @@ strings! {
         "Mode d'affichage : {}",
         "Anzeigemodus: {}",
         "표시 모드: {}",
-        "Chế độ hiển thị: {}";
+        "Chế độ hiển thị: {}",
+        "Görüntüleme modu: {}",
+        "Режим отображения: {}",
+        "Tryb wyświetlania: {}";
     suffix_color: " + 颜色", " + color",
         " + 顏色",
         " + 色",
@@ -763,7 +922,10 @@ strings! {
         " + couleur",
         " + Farbe",
         " + 색상",
-        " + màu";
+        " + màu",
+        " + renk",
+        " + цвет",
+        " + kolor";
     suffix_byte_view: " + 字节查看", " + byte view",
         " + 位元組檢視",
         " + バイト表示",
@@ -774,7 +936,10 @@ strings! {
         " + vue octets",
         " + Byte-Ansicht",
         " + 바이트 보기",
-        " + xem byte";
+        " + xem byte",
+        " + bayt görünümü",
+        " + просмотр байтов",
+        " + widok bajtów";
     timestamp_prefix_line: "时间戳前缀: {}", "Timestamp prefix: {}",
         "時間戳前綴: {}",
         "タイムスタンプ接頭辞: {}",
@@ -785,7 +950,10 @@ strings! {
         "Préfixe d'horodatage : {}",
         "Zeitstempel-Präfix: {}",
         "타임스탬프 접두사: {}",
-        "Tiền tố dấu thời gian: {}";
+        "Tiền tố dấu thời gian: {}",
+        "Zaman damgası öneki: {}",
+        "Префикс метки времени: {}",
+        "Prefiks znacznika czasu: {}";
     available_ports: "可用串口", "Available ports",
         "可用串口",
         "利用可能なポート",
@@ -796,7 +964,10 @@ strings! {
         "Ports disponibles",
         "Verfügbare Ports",
         "사용 가능한 포트",
-        "Cổng khả dụng";
+        "Cổng khả dụng",
+        "Kullanılabilir portlar",
+        "Доступные порты",
+        "Dostępne porty";
     none_placeholder: "（无）", "(none)",
         "（無）",
         "（なし）",
@@ -807,7 +978,10 @@ strings! {
         "(aucun)",
         "(keine)",
         "(없음)",
-        "(không có)";
+        "(không có)",
+        "(yok)",
+        "(нет)",
+        "(brak)";
 
     // —— status_bar.rs：底部状态栏 ——
     // 这里刻意是**短词**（"已连接" / "未连接"），与侧边栏那套 "状态: 已连接" 分开写：
@@ -824,7 +998,10 @@ strings! {
         "Connecté",
         "Verbunden",
         "연결됨",
-        "Đã kết nối";
+        "Đã kết nối",
+        "Bağlı",
+        "Подключено",
+        "Połączono";
     statusbar_disconnected: "未连接", "Not connected",
         "未連線",
         "未接続",
@@ -835,7 +1012,10 @@ strings! {
         "Déconnecté",
         "Getrennt",
         "연결 끊김",
-        "Chưa kết nối";
+        "Chưa kết nối",
+        "Bağlı değil",
+        "Не подключено",
+        "Rozłączono";
     statusbar_bound: "已绑定", "Bound",
         "已綁定",
         "バインド済み",
@@ -846,7 +1026,10 @@ strings! {
         "Associé",
         "Gebunden",
         "바인딩됨",
-        "Đã liên kết";
+        "Đã liên kết",
+        "Bağlandı",
+        "Привязано",
+        "Powiązano";
     statusbar_unbound: "未绑定", "Not bound",
         "未綁定",
         "未バインド",
@@ -857,7 +1040,10 @@ strings! {
         "Non associé",
         "Nicht gebunden",
         "바인딩 안 됨",
-        "Chưa liên kết";
+        "Chưa liên kết",
+        "Bağlı değil",
+        "Не привязано",
+        "Niepowiązano";
     // 圆点**不是一个字符**，是用 `Color32` 画的实心圆（见 `status_bar.rs`）。
     // 早期版本用 🟢/🔴 两个 emoji，但 egui 的文本管线只光栅化字体的**矢量轮廓**，
     // 拿不到 COLR/CPAL 彩色图层，结果是两个大小不一、颜色灰黑的圆——不是字体选错，
@@ -874,7 +1060,10 @@ strings! {
         "Port",
         "Port",
         "포트",
-        "Cổng";
+        "Cổng",
+        "Port",
+        "Порт",
+        "Port";
     select_port: "请选择端口", "Select a port",
         "請選擇連接埠",
         "ポートを選択",
@@ -885,7 +1074,10 @@ strings! {
         "Sélectionnez un port",
         "Port auswählen",
         "포트 선택",
-        "Chọn cổng";
+        "Chọn cổng",
+        "Bir port seçin",
+        "Выберите порт",
+        "Wybierz port";
     refresh: "刷新", "Refresh",
         "重新整理",
         "更新",
@@ -896,7 +1088,10 @@ strings! {
         "Actualiser",
         "Aktualisieren",
         "새로고침",
-        "Làm mới";
+        "Làm mới",
+        "Yenile",
+        "Обновить",
+        "Odśwież";
     baud_field: "波特率", "Baud rate",
         "波特率",
         "ボーレート",
@@ -907,7 +1102,10 @@ strings! {
         "Débit",
         "Baudrate",
         "보드레이트",
-        "Tốc độ baud";
+        "Tốc độ baud",
+        "Baud hızı",
+        "Скорость",
+        "Prędkość";
     baud_custom_entry: "自定义…", "Custom…",
         "自訂…",
         "カスタム…",
@@ -918,7 +1116,10 @@ strings! {
         "Personnalisé…",
         "Benutzerdefiniert…",
         "사용자 지정…",
-        "Tùy chỉnh…";
+        "Tùy chỉnh…",
+        "Özel…",
+        "Другое…",
+        "Niestandardowa…";
     baud_custom_hint: "可输入 {} ~ {} 之间的任意值", "Any value from {} to {}",
         "可輸入 {} ~ {} 之間的任何值",
         "{} ~ {} の任意の値を入力できます",
@@ -929,7 +1130,10 @@ strings! {
         "N'importe quelle valeur de {} à {}",
         "Beliebiger Wert von {} bis {}",
         "{} ~ {} 사이의 임의 값",
-        "Bất kỳ giá trị nào từ {} đến {}";
+        "Bất kỳ giá trị nào từ {} đến {}",
+        "{} ile {} arasında herhangi bir değer",
+        "Любое значение от {} до {}",
+        "Dowolna wartość od {} do {}";
     line_state_header: "控制线", "Control lines",
         "控制線",
         "制御線",
@@ -940,7 +1144,10 @@ strings! {
         "Lignes de contrôle",
         "Steuerleitungen",
         "제어선",
-        "Đường điều khiển";
+        "Đường điều khiển",
+        "Kontrol hatları",
+        "Управляющие линии",
+        "Linie sterujące";
     line_state_hint:
         "连接后可手动控制；打开端口本身不会去动这两根线",
         "Controllable while connected; opening a port never touches these lines",
@@ -953,7 +1160,10 @@ strings! {
         "Contrôlables une fois connecté ; l'ouverture du port ne touche pas ces lignes",
         "Nach dem Verbinden steuerbar; das Öffnen des Ports beeinflusst diese Leitungen nicht",
         "연결 후 수동 제어 가능하며, 포트를 열어도 이 두 선에는 손대지 않습니다",
-        "Điều khiển thủ công được sau khi kết nối; mở cổng không đụng đến hai đường này";
+        "Điều khiển thủ công được sau khi kết nối; mở cổng không đụng đến hai đường này",
+        "Bağlıyken elle kontrol edilebilir; portu açmak bu iki hatta dokunmaz",
+        "Управляются вручную при подключении; открытие порта этих линий не касается",
+        "Sterowane ręcznie po połączeniu; otwarcie portu nie dotyka tych linii";
     line_state_hover:
         "勾选表示「我们请求的电平」，不是对引脚的测量——驱动只接受写、不回读，所以硬件把线拉到哪里，界面看不到",
         "The checkbox is the level we requested, not a measurement — the driver only accepts writes and cannot read the lines back, so the UI cannot show where the hardware actually pulled them",
@@ -966,7 +1176,10 @@ strings! {
         "La case indique le niveau que nous demandons, pas une mesure — le pilote n'accepte que l'écriture et ne relit pas les lignes, l'interface ne peut donc pas montrer où le matériel les a réellement placées",
         "Das Kästchen ist der angeforderte Pegel, keine Messung — der Treiber akzeptiert nur Schreiben und liest die Leitungen nicht zurück, daher kann die Oberfläche nicht anzeigen, wohin die Hardware sie tatsächlich gezogen hat",
         "체크박스는 \"우리가 요청한 레벨\"이며 핀 측정값이 아닙니다——드라이버는 쓰기만 받고 다시 읽지 않으므로, 하드웨어가 선을 어디로 끌었는지 UI에서는 알 수 없습니다",
-        "Hộp kiểm là mức chúng ta yêu cầu, không phải kết quả đo — trình điều khiển chỉ nhận ghi mà không đọc lại, nên giao diện không thể hiển thị mức thực tế mà phần cứng đã đặt";
+        "Hộp kiểm là mức chúng ta yêu cầu, không phải kết quả đo — trình điều khiển chỉ nhận ghi mà không đọc lại, nên giao diện không thể hiển thị mức thực tế mà phần cứng đã đặt",
+        "Onay kutusu istediğimiz seviyeyi gösterir, ölçüm değildir — sürücü yalnızca yazmayı kabul eder ve hatları geri okuyamaz, bu yüzden arayüz donanımın hatları gerçekte nereye çektiğini gösteremez",
+        "Флажок — это запрошенный нами уровень, а не измерение: драйвер принимает только запись и не может прочитать линии обратно, поэтому интерфейс не покажет, куда оборудование их фактически подтянуло",
+        "Pole wyboru to żądany przez nas poziom, a nie pomiar — sterownik przyjmuje tylko zapis i nie odczytuje linii z powrotem, więc interfejs nie pokaże, dokąd sprzęt faktycznie je ściągnął";
     open_port_button: "打开串口", "Open",
         "開啟連接埠",
         "ポートを開く",
@@ -977,7 +1190,10 @@ strings! {
         "Ouvrir",
         "Öffnen",
         "열기",
-        "Mở";
+        "Mở",
+        "Aç",
+        "Открыть",
+        "Otwórz";
     close_port_button: "关闭串口", "Close",
         "關閉連接埠",
         "ポートを閉じる",
@@ -988,7 +1204,10 @@ strings! {
         "Fermer",
         "Schließen",
         "닫기",
-        "Đóng";
+        "Đóng",
+        "Kapat",
+        "Закрыть",
+        "Zamknij";
     data_bits: "数据位", "Data bits",
         "資料位元",
         "データビット",
@@ -999,7 +1218,10 @@ strings! {
         "Bits de données",
         "Datenbits",
         "데이터 비트",
-        "Bit dữ liệu";
+        "Bit dữ liệu",
+        "Veri biti",
+        "Биты данных",
+        "Bity danych";
     stop_bits: "停止位", "Stop bits",
         "停止位元",
         "ストップビット",
@@ -1010,7 +1232,10 @@ strings! {
         "Bits d'arrêt",
         "Stoppbits",
         "정지 비트",
-        "Bit dừng";
+        "Bit dừng",
+        "Durdurma biti",
+        "Стоп-биты",
+        "Bity stopu";
     parity: "校验", "Parity",
         "同位檢查",
         "パリティ",
@@ -1021,7 +1246,10 @@ strings! {
         "Parité",
         "Parität",
         "패리티",
-        "Parity";
+        "Parity",
+        "Eşlik",
+        "Чётность",
+        "Parzystość";
     flow_control: "流控", "Flow control",
         "流量控制",
         "フロー制御",
@@ -1032,7 +1260,10 @@ strings! {
         "Contrôle de flux",
         "Flusskontrolle",
         "흐름 제어",
-        "Điều khiển luồng";
+        "Điều khiển luồng",
+        "Akış denetimi",
+        "Управление потоком",
+        "Sterowanie przepływem";
 
     // —— sidebar.rs：连接类型与网络参数（F4）——
     connection_type: "连接类型", "Connection",
@@ -1045,7 +1276,10 @@ strings! {
         "Connexion",
         "Verbindung",
         "연결 유형",
-        "Kết nối";
+        "Kết nối",
+        "Bağlantı",
+        "Подключение",
+        "Połączenie";
     conn_serial: "串口", "Serial",
         "串口",
         "シリアル",
@@ -1056,7 +1290,10 @@ strings! {
         "Série",
         "Seriell",
         "시리얼",
-        "Nối tiếp";
+        "Nối tiếp",
+        "Seri",
+        "Последовательный",
+        "Szeregowy";
     conn_tcp: "TCP 客户端", "TCP client",
         "TCP 用戶端",
         "TCP クライアント",
@@ -1067,8 +1304,14 @@ strings! {
         "Client TCP",
         "TCP-Client",
         "TCP 클라이언트",
-        "Máy khách TCP";
+        "Máy khách TCP",
+        "TCP istemcisi",
+        "TCP-клиент",
+        "Klient TCP";
     conn_udp: "UDP", "UDP",
+        "UDP",
+        "UDP",
+        "UDP",
         "UDP",
         "UDP",
         "UDP",
@@ -1089,7 +1332,10 @@ strings! {
         "Infos de connexion",
         "Verbindungsinfo",
         "연결 정보",
-        "Thông tin kết nối";
+        "Thông tin kết nối",
+        "Bağlantı bilgisi",
+        "Информация о подключении",
+        "Informacje o połączeniu";
     target_label: "目标: {}", "Target: {}",
         "目標: {}",
         "ターゲット: {}",
@@ -1100,7 +1346,10 @@ strings! {
         "Cible : {}",
         "Ziel: {}",
         "대상: {}",
-        "Đích: {}";
+        "Đích: {}",
+        "Hedef: {}",
+        "Цель: {}",
+        "Cel: {}";
     remote_host_field: "远端地址", "Remote host",
         "遠端位址",
         "リモートホスト",
@@ -1111,7 +1360,10 @@ strings! {
         "Hôte distant",
         "Remote-Host",
         "원격 호스트",
-        "Máy chủ từ xa";
+        "Máy chủ từ xa",
+        "Uzak ana bilgisayar",
+        "Удалённый узел",
+        "Zdalny host";
     remote_host_hint: "IP 或域名", "IP or hostname",
         "IP 或網域名稱",
         "IP またはホスト名",
@@ -1122,7 +1374,10 @@ strings! {
         "IP ou nom d'hôte",
         "IP oder Hostname",
         "IP 또는 호스트 이름",
-        "IP hoặc tên miền";
+        "IP hoặc tên miền",
+        "IP veya ana bilgisayar adı",
+        "IP или имя узла",
+        "IP lub nazwa hosta";
     remote_port_field: "远端端口", "Remote port",
         "遠端連接埠",
         "リモートポート",
@@ -1133,7 +1388,10 @@ strings! {
         "Port distant",
         "Remote-Port",
         "원격 포트",
-        "Cổng từ xa";
+        "Cổng từ xa",
+        "Uzak port",
+        "Удалённый порт",
+        "Zdalny port";
     local_port_field: "本地端口", "Local port",
         "本機連接埠",
         "ローカルポート",
@@ -1144,7 +1402,10 @@ strings! {
         "Port local",
         "Lokaler Port",
         "로컬 포트",
-        "Cổng cục bộ";
+        "Cổng cục bộ",
+        "Yerel port",
+        "Локальный порт",
+        "Port lokalny";
     local_port_line: "本地端口: {}", "Local port: {}",
         "本機連接埠: {}",
         "ローカルポート: {}",
@@ -1155,7 +1416,10 @@ strings! {
         "Port local : {}",
         "Lokaler Port: {}",
         "로컬 포트: {}",
-        "Cổng cục bộ: {}";
+        "Cổng cục bộ: {}",
+        "Yerel port: {}",
+        "Локальный порт: {}",
+        "Port lokalny: {}";
     local_port_hint: "0 = 由系统分配", "0 = assigned by the system",
         "0 = 由系統分配",
         "0 = システムが自動割り当て",
@@ -1166,7 +1430,10 @@ strings! {
         "0 = attribué par le système",
         "0 = vom System zugewiesen",
         "0 = 시스템이 자동 할당",
-        "0 = hệ thống tự cấp";
+        "0 = hệ thống tự cấp",
+        "0 = sistem atar",
+        "0 = назначается системой",
+        "0 = przydziela system";
     connect_button: "连接", "Connect",
         "連線",
         "接続",
@@ -1177,7 +1444,10 @@ strings! {
         "Connecter",
         "Verbinden",
         "연결",
-        "Kết nối";
+        "Kết nối",
+        "Bağlan",
+        "Подключить",
+        "Połącz";
     disconnect_button: "断开", "Disconnect",
         "中斷",
         "切断",
@@ -1188,7 +1458,10 @@ strings! {
         "Déconnecter",
         "Trennen",
         "연결 끊기",
-        "Ngắt kết nối";
+        "Ngắt kết nối",
+        "Bağlantıyı kes",
+        "Отключить",
+        "Rozłącz";
     bind_button: "绑定", "Bind",
         "綁定",
         "バインド",
@@ -1199,7 +1472,10 @@ strings! {
         "Associer",
         "Binden",
         "바인딩",
-        "Liên kết";
+        "Liên kết",
+        "Bağla",
+        "Привязать",
+        "Powiąż";
     status_bound: "状态: 已绑定", "Status: bound",
         "狀態: 已綁定",
         "状態: バインド済み",
@@ -1210,7 +1486,10 @@ strings! {
         "État : associé",
         "Status: gebunden",
         "상태: 바인딩됨",
-        "Trạng thái: đã liên kết";
+        "Trạng thái: đã liên kết",
+        "Durum: bağlandı",
+        "Состояние: привязано",
+        "Stan: powiązano";
     status_unbound: "状态: 未绑定", "Status: not bound",
         "狀態: 未綁定",
         "状態: 未バインド",
@@ -1221,7 +1500,10 @@ strings! {
         "État : non associé",
         "Status: nicht gebunden",
         "상태: 바인딩 안 됨",
-        "Trạng thái: chưa liên kết";
+        "Trạng thái: chưa liên kết",
+        "Durum: bağlı değil",
+        "Состояние: не привязано",
+        "Stan: niepowiązane";
     switch_kind_needs_disconnect:
         "连接中不能切换连接类型：请先断开，否则界面显示的参数与实际打开的通道会对不上",
         "Cannot switch the connection type while connected — disconnect first, or the shown parameters will not match the open channel",
@@ -1234,7 +1516,10 @@ strings! {
         "Impossible de changer le type de connexion en cours de connexion : déconnectez-vous d'abord, sinon les paramètres affichés ne correspondront pas au canal ouvert",
         "Der Verbindungstyp kann nicht während einer bestehenden Verbindung gewechselt werden — erst trennen, sonst passen die angezeigten Parameter nicht zum geöffneten Kanal",
         "연결 중에는 연결 유형을 바꿀 수 없습니다 — 먼저 연결을 끊으세요. 그렇지 않으면 표시된 파라미터와 실제 열린 채널이 어긋납니다",
-        "Không thể đổi loại kết nối khi đang kết nối — hãy ngắt kết nối trước, nếu không thông số hiển thị sẽ không khớp với kênh đang mở";
+        "Không thể đổi loại kết nối khi đang kết nối — hãy ngắt kết nối trước, nếu không thông số hiển thị sẽ không khớp với kênh đang mở",
+        "Bağlıyken bağlantı türü değiştirilemez — önce bağlantıyı kesin, yoksa gösterilen parametreler açık kanalla uyuşmaz",
+        "Нельзя сменить тип подключения во время соединения — сначала отключитесь, иначе показанные параметры не будут соответствовать открытому каналу",
+        "Nie można zmienić typu połączenia podczas połączenia — najpierw rozłącz się, inaczej wyświetlane parametry nie będą zgodne z otwartym kanałem";
     need_port_to_connect: "请先选择端口", "Select a port first",
         "請先選擇連接埠",
         "先にポートを選択してください",
@@ -1245,7 +1530,10 @@ strings! {
         "Sélectionnez d'abord un port",
         "Zuerst einen Port auswählen",
         "먼저 포트를 선택하세요",
-        "Chọn cổng trước";
+        "Chọn cổng trước",
+        "Önce bir port seçin",
+        "Сначала выберите порт",
+        "Najpierw wybierz port";
     need_target_to_connect: "请先填写目标地址与端口", "Enter a target host and port first",
         "請先填寫目標位址與連接埠",
         "先にターゲットのホストとポートを入力してください",
@@ -1256,7 +1544,10 @@ strings! {
         "Saisissez d'abord un hôte et un port cibles",
         "Zuerst Zielhost und Port eingeben",
         "먼저 대상 호스트와 포트를 입력하세요",
-        "Nhập máy chủ và cổng đích trước";
+        "Nhập máy chủ và cổng đích trước",
+        "Önce hedef ana bilgisayarı ve portu girin",
+        "Сначала укажите целевой узел и порт",
+        "Najpierw podaj host i port docelowy";
 
     // —— sidebar.rs：日志操作 ——
     clear_log: "清空日志", "Clear log",
@@ -1269,7 +1560,10 @@ strings! {
         "Effacer le journal",
         "Protokoll löschen",
         "로그 지우기",
-        "Xóa log";
+        "Xóa log",
+        "Günlüğü temizle",
+        "Очистить журнал",
+        "Wyczyść dziennik";
     export_log: "导出日志", "Export log",
         "匯出日誌",
         "ログを書き出す",
@@ -1280,7 +1574,10 @@ strings! {
         "Exporter le journal",
         "Protokoll exportieren",
         "로그 내보내기",
-        "Xuất log";
+        "Xuất log",
+        "Günlüğü dışa aktar",
+        "Экспорт журнала",
+        "Eksportuj dziennik";
     file_log: "文件日志", "File log",
         "檔案日誌",
         "ファイルログ",
@@ -1291,7 +1588,10 @@ strings! {
         "Journal fichier",
         "Dateiprotokoll",
         "파일 로그",
-        "Log tệp";
+        "Log tệp",
+        "Dosya günlüğü",
+        "Журнал в файл",
+        "Dziennik do pliku";
     stop_logging: "停止记录", "Stop logging",
         "停止記錄",
         "記録を停止",
@@ -1302,7 +1602,10 @@ strings! {
         "Arrêter la journalisation",
         "Aufzeichnung stoppen",
         "기록 중지",
-        "Dừng ghi";
+        "Dừng ghi",
+        "Kaydı durdur",
+        "Остановить запись",
+        "Zatrzymaj zapis";
     start_logging: "开始记录", "Start logging",
         "開始記錄",
         "記録を開始",
@@ -1313,7 +1616,10 @@ strings! {
         "Démarrer la journalisation",
         "Aufzeichnung starten",
         "기록 시작",
-        "Bắt đầu ghi";
+        "Bắt đầu ghi",
+        "Kaydı başlat",
+        "Начать запись",
+        "Rozpocznij zapis";
     pick_dir: "选择目录", "Choose dir",
         "選擇目錄",
         "フォルダを選択",
@@ -1324,7 +1630,10 @@ strings! {
         "Choisir un dossier",
         "Ordner wählen",
         "폴더 선택",
-        "Chọn thư mục";
+        "Chọn thư mục",
+        "Klasör seç",
+        "Выбрать папку",
+        "Wybierz katalog";
     logged_bytes: "已记录 {} 字节", "{} bytes logged",
         "已記錄 {} 位元組",
         "{} バイト記録しました",
@@ -1335,7 +1644,10 @@ strings! {
         "{} octets enregistrés",
         "{} Bytes aufgezeichnet",
         "{} 바이트 기록됨",
-        "Đã ghi {} byte";
+        "Đã ghi {} byte",
+        "{} bayt kaydedildi",
+        "Записано {} байт",
+        "Zapisano {} bajtów";
     not_logging: "未记录", "Not logging",
         "未記錄",
         "記録していません",
@@ -1346,7 +1658,10 @@ strings! {
         "Pas de journalisation",
         "Keine Aufzeichnung",
         "기록 안 함",
-        "Không ghi";
+        "Không ghi",
+        "Kayıt yok",
+        "Запись не ведётся",
+        "Brak zapisu";
     output_dir_line: "输出目录: {}", "Output dir: {}",
         "輸出目錄: {}",
         "出力先: {}",
@@ -1357,7 +1672,10 @@ strings! {
         "Dossier de sortie : {}",
         "Ausgabeordner: {}",
         "출력 디렉터리: {}",
-        "Thư mục đầu ra: {}";
+        "Thư mục đầu ra: {}",
+        "Çıktı klasörü: {}",
+        "Папка вывода: {}",
+        "Katalog wyjściowy: {}";
 
     // —— panels/chart.rs：图表面板 ——
     chart_panel_label: "实时图表:", "Realtime chart:",
@@ -1370,7 +1688,10 @@ strings! {
         "Graphique en temps réel :",
         "Echtzeitdiagramm:",
         "실시간 차트:",
-        "Biểu đồ thời gian thực:";
+        "Biểu đồ thời gian thực:",
+        "Canlı grafik:",
+        "График в реальном времени:",
+        "Wykres na żywo:";
     auto_bounds: "自动缩放", "Auto bounds",
         "自動縮放",
         "自動スケール",
@@ -1381,7 +1702,10 @@ strings! {
         "Échelle automatique",
         "Automatischer Maßstab",
         "자동 크기 조정",
-        "Tự động điều chỉnh";
+        "Tự động điều chỉnh",
+        "Otomatik sınırlar",
+        "Автомасштаб",
+        "Automatyczne granice";
     clear_chart: "清空图表", "Clear chart",
         "清空圖表",
         "チャートを消去",
@@ -1392,7 +1716,10 @@ strings! {
         "Effacer le graphique",
         "Diagramm löschen",
         "차트 지우기",
-        "Xóa biểu đồ";
+        "Xóa biểu đồ",
+        "Grafiği temizle",
+        "Очистить график",
+        "Wyczyść wykres";
     chart_summary:
         "{} 通道 · {} 样本 · 每通道上限 {}",
         "{} channels · {} samples · max {} each",
@@ -1405,7 +1732,10 @@ strings! {
         "{} canaux · {} échantillons · max {} chacun",
         "{} Kanäle · {} Messwerte · max {} je Kanal",
         "{} 채널 · {} 샘플 · 채널당 최대 {}",
-        "{} kênh · {} mẫu · tối đa {} mỗi kênh";
+        "{} kênh · {} mẫu · tối đa {} mỗi kênh",
+        "{} kanal · {} örnek · her biri en fazla {}",
+        "{} каналов · {} значений · не более {} на канал",
+        "{} kanałów · {} próbek · maks. {} na kanał";
     ignored_fields: "忽略 {} 个非数值字段", "ignored {} non-numeric fields",
         "忽略 {} 個非數值欄位",
         "非数値フィールドを {} 個無視",
@@ -1416,7 +1746,10 @@ strings! {
         "{} champs non numériques ignorés",
         "{} nicht-numerische Felder ignoriert",
         "숫자가 아닌 필드 {}개 무시됨",
-        "đã bỏ qua {} trường không phải số";
+        "đã bỏ qua {} trường không phải số",
+        "{} sayısal olmayan alan yok sayıldı",
+        "пропущено {} нечисловых полей",
+        "zignorowano {} pól nienumerycznych";
     discarded_segments: "丢弃 {} 段超长数据", "dropped {} oversized segments",
         "丟棄 {} 段超長資料",
         "長すぎるデータを {} 件破棄",
@@ -1427,7 +1760,10 @@ strings! {
         "{} segments trop longs ignorés",
         "{} überlange Segmente verworfen",
         "너무 긴 데이터 {}개 버림",
-        "đã bỏ {} đoạn quá dài";
+        "đã bỏ {} đoạn quá dài",
+        "{} aşırı uzun bölüm atıldı",
+        "отброшено {} слишком длинных сегментов",
+        "odrzucono {} zbyt długich segmentów";
     chart_format_hint:
         "{}（格式：一行一组样本，字段用逗号分隔，例如 1.0,2.0,3.0）",
         "{} (format: one sample group per line, comma-separated fields, e.g. 1.0,2.0,3.0)",
@@ -1440,7 +1776,10 @@ strings! {
         "{} (format : un groupe d'échantillons par ligne, champs séparés par des virgules, ex. 1.0,2.0,3.0)",
         "{} (Format: eine Messwertgruppe pro Zeile, Felder durch Kommas getrennt, z. B. 1.0,2.0,3.0)",
         "{} (형식: 한 줄에 샘플 한 그룹, 필드는 쉼표로 구분, 예: 1.0,2.0,3.0)",
-        "{} (định dạng: một nhóm mẫu mỗi dòng, các trường cách nhau bằng dấu phẩy, ví dụ 1.0,2.0,3.0)";
+        "{} (định dạng: một nhóm mẫu mỗi dòng, các trường cách nhau bằng dấu phẩy, ví dụ 1.0,2.0,3.0)",
+        "{} (biçim: satır başına bir örnek grubu, alanlar virgülle ayrılır, örn. 1.0,2.0,3.0)",
+        "{} (формат: одна группа значений в строке, поля через запятую, например 1.0,2.0,3.0)",
+        "{} (format: jedna grupa próbek w wierszu, pola oddzielone przecinkami, np. 1.0,2.0,3.0)";
     waiting_data: "等待数据…", "Waiting for data…",
         "等待資料…",
         "データを待機中…",
@@ -1451,7 +1790,10 @@ strings! {
         "En attente de données…",
         "Warte auf Daten…",
         "데이터 대기 중…",
-        "Đang chờ dữ liệu…";
+        "Đang chờ dữ liệu…",
+        "Veri bekleniyor…",
+        "Ожидание данных…",
+        "Oczekiwanie na dane…";
 
     // —— panels/menu_bar.rs：菜单 ——
     menu_file: "文件", "File",
@@ -1464,7 +1806,10 @@ strings! {
         "Fichier",
         "Datei",
         "파일",
-        "Tệp";
+        "Tệp",
+        "Dosya",
+        "Файл",
+        "Plik";
     menu_info: "信息", "Info",
         "資訊",
         "情報",
@@ -1475,7 +1820,10 @@ strings! {
         "Informations",
         "Info",
         "정보",
-        "Thông tin";
+        "Thông tin",
+        "Bilgi",
+        "Информация",
+        "Informacje";
     menu_quit: "退出", "Quit",
         "結束",
         "終了",
@@ -1486,7 +1834,10 @@ strings! {
         "Quitter",
         "Beenden",
         "종료",
-        "Thoát";
+        "Thoát",
+        "Çık",
+        "Выход",
+        "Zakończ";
     settings_title: "设置", "Settings",
         "設定",
         "設定",
@@ -1497,7 +1848,10 @@ strings! {
         "Paramètres",
         "Einstellungen",
         "설정",
-        "Cài đặt";
+        "Cài đặt",
+        "Ayarlar",
+        "Настройки",
+        "Ustawienia";
     menu_open_settings: "打开设置窗口", "Open settings window",
         "開啟設定視窗",
         "設定ウィンドウを開く",
@@ -1508,7 +1862,10 @@ strings! {
         "Ouvrir la fenêtre des paramètres",
         "Einstellungsfenster öffnen",
         "설정 창 열기",
-        "Mở cửa sổ cài đặt";
+        "Mở cửa sổ cài đặt",
+        "Ayarlar penceresini aç",
+        "Открыть окно настроек",
+        "Otwórz okno ustawień";
     theme_label: "主题", "Theme",
         "主題",
         "テーマ",
@@ -1519,7 +1876,10 @@ strings! {
         "Thème",
         "Design",
         "테마",
-        "Chủ đề";
+        "Chủ đề",
+        "Tema",
+        "Тема",
+        "Motyw";
     menu_view: "视图", "View",
         "檢視",
         "表示",
@@ -1530,7 +1890,10 @@ strings! {
         "Affichage",
         "Ansicht",
         "보기",
-        "Xem";
+        "Xem",
+        "Görünüm",
+        "Вид",
+        "Widok";
     panel_label: "面板", "Panels",
         "面板",
         "パネル",
@@ -1541,7 +1904,10 @@ strings! {
         "Panneaux",
         "Bereiche",
         "패널",
-        "Bảng điều khiển";
+        "Bảng điều khiển",
+        "Paneller",
+        "Панели",
+        "Panele";
     display_mode_heading: "显示模式", "Display mode",
         "顯示模式",
         "表示モード",
@@ -1552,7 +1918,10 @@ strings! {
         "Mode d'affichage",
         "Anzeigemodus",
         "표시 모드",
-        "Chế độ hiển thị";
+        "Chế độ hiển thị",
+        "Görüntüleme modu",
+        "Режим отображения",
+        "Tryb wyświetlania";
     auto_scroll: "自动滚动", "Auto scroll",
         "自動捲動",
         "自動スクロール",
@@ -1563,7 +1932,10 @@ strings! {
         "Défilement automatique",
         "Automatisch scrollen",
         "자동 스크롤",
-        "Tự động cuộn";
+        "Tự động cuộn",
+        "Otomatik kaydır",
+        "Автопрокрутка",
+        "Automatyczne przewijanie";
     text: "文本", "Text",
         "文字",
         "テキスト",
@@ -1574,8 +1946,14 @@ strings! {
         "Texte",
         "Text",
         "텍스트",
-        "Văn bản";
+        "Văn bản",
+        "Metin",
+        "Текст",
+        "Tekst";
     hex: "HEX", "HEX",
+        "HEX",
+        "HEX",
+        "HEX",
         "HEX",
         "HEX",
         "HEX",
@@ -1596,7 +1974,10 @@ strings! {
         "Encodage (partagé par la réception et l'envoi)",
         "Kodierung (gemeinsam für Empfang und Senden)",
         "인코딩(수신과 송신 공용)",
-        "Mã hóa (dùng chung cho nhận và gửi)";
+        "Mã hóa (dùng chung cho nhận và gửi)",
+        "Kodlama (alım ve gönderim ortak)",
+        "Кодировка (общая для приёма и отправки)",
+        "Kodowanie (wspólne dla odbioru i wysyłania)";
     encoding_gbk_note_menu:
         "GBK / GB18030 接收结果相同，仅发送时的可表示字符范围不同",
         "GBK and GB18030 decode identically; only the encodable character range differs",
@@ -1609,7 +1990,10 @@ strings! {
         "GBK et GB18030 décodent à l'identique ; seule la plage de caractères encodables à l'envoi diffère",
         "GBK und GB18030 dekodieren identisch; nur der beim Senden darstellbare Zeichenbereich unterscheidet sich",
         "GBK / GB18030의 수신 결과는 같고, 송신 시 표현 가능한 문자 범위만 다릅니다",
-        "GBK / GB18030 giải mã giống nhau; chỉ khác phạm vi ký tự có thể mã hóa khi gửi";
+        "GBK / GB18030 giải mã giống nhau; chỉ khác phạm vi ký tự có thể mã hóa khi gửi",
+        "GBK / GB18030 aynı şekilde çözer; yalnızca gönderirken kodlanabilen karakter aralığı farklıdır",
+        "GBK и GB18030 декодируются одинаково; различается только диапазон символов, кодируемых при отправке",
+        "GBK i GB18030 dekodują identycznie; różni się tylko zakres znaków możliwych do zakodowania przy wysyłaniu";
     send_title: "发送", "Send",
         "傳送",
         "送信",
@@ -1620,7 +2004,10 @@ strings! {
         "Envoyer",
         "Senden",
         "전송",
-        "Gửi";
+        "Gửi",
+        "Gönder",
+        "Отправка",
+        "Wyślij";
     hex_receive: "HEX 接收", "HEX receive",
         "HEX 接收",
         "HEX 受信",
@@ -1631,7 +2018,10 @@ strings! {
         "Réception HEX",
         "HEX-Empfang",
         "HEX 수신",
-        "Nhận HEX";
+        "Nhận HEX",
+        "HEX alım",
+        "HEX-приём",
+        "Odbiór HEX";
     nav_receive: "接收区", "Receive",
         "接收區",
         "受信エリア",
@@ -1642,7 +2032,10 @@ strings! {
         "Réception",
         "Empfang",
         "수신 영역",
-        "Vùng nhận";
+        "Vùng nhận",
+        "Alım",
+        "Приём",
+        "Odbiór";
     nav_chart: "实时图表", "Realtime chart",
         "即時圖表",
         "リアルタイムチャート",
@@ -1653,7 +2046,10 @@ strings! {
         "Graphique en temps réel",
         "Echtzeitdiagramm",
         "실시간 차트",
-        "Biểu đồ thời gian thực";
+        "Biểu đồ thời gian thực",
+        "Canlı grafik",
+        "График в реальном времени",
+        "Wykres na żywo";
     nav_send: "发送区", "Send",
         "傳送區",
         "送信エリア",
@@ -1664,7 +2060,10 @@ strings! {
         "Envoi",
         "Senden",
         "송신 영역",
-        "Vùng gửi";
+        "Vùng gửi",
+        "Gönderme",
+        "Отправка",
+        "Wysyłanie";
     at_least_one_panel: "至少保留一个面板", "At least one panel must stay visible",
         "至少保留一個面板",
         "パネルは最低 1 つ表示してください",
@@ -1675,7 +2074,10 @@ strings! {
         "Au moins un panneau doit rester visible",
         "Mindestens ein Bereich muss sichtbar bleiben",
         "패널을 최소 하나는 표시해야 합니다",
-        "Phải giữ ít nhất một bảng điều khiển hiển thị";
+        "Phải giữ ít nhất một bảng điều khiển hiển thị",
+        "En az bir panel görünür kalmalı",
+        "Хотя бы одна панель должна остаться видимой",
+        "Co najmniej jeden panel musi pozostać widoczny";
     theme_system: "跟随系统", "System",
         "跟隨系統",
         "システムに従う",
@@ -1686,7 +2088,10 @@ strings! {
         "Système",
         "System",
         "시스템 설정",
-        "Theo hệ thống";
+        "Theo hệ thống",
+        "Sistem",
+        "Системная",
+        "Systemowy";
     theme_light: "浅色", "Light",
         "淺色",
         "ライト",
@@ -1697,7 +2102,10 @@ strings! {
         "Clair",
         "Hell",
         "라이트",
-        "Sáng";
+        "Sáng",
+        "Açık",
+        "Светлая",
+        "Jasny";
     theme_dark: "深色", "Dark",
         "深色",
         "ダーク",
@@ -1708,7 +2116,10 @@ strings! {
         "Sombre",
         "Dunkel",
         "다크",
-        "Tối";
+        "Tối",
+        "Koyu",
+        "Тёмная",
+        "Ciemny";
     ts_off: "关闭", "Off",
         "關閉",
         "オフ",
@@ -1719,7 +2130,10 @@ strings! {
         "Désactivé",
         "Aus",
         "끔",
-        "Tắt";
+        "Tắt",
+        "Kapalı",
+        "Выкл.",
+        "Wył.";
     ts_per_line: "每行", "Per line",
         "每行",
         "行ごと",
@@ -1730,7 +2144,10 @@ strings! {
         "Par ligne",
         "Pro Zeile",
         "줄마다",
-        "Mỗi dòng";
+        "Mỗi dòng",
+        "Satır başına",
+        "На строку",
+        "Na wiersz";
     ts_per_batch: "每批", "Per batch",
         "每批",
         "バッチごと",
@@ -1741,7 +2158,10 @@ strings! {
         "Par lot",
         "Pro Block",
         "배치마다",
-        "Mỗi lô";
+        "Mỗi lô",
+        "Blok başına",
+        "На блок",
+        "Na blok";
     ending_none: "无", "None",
         "無",
         "なし",
@@ -1752,8 +2172,14 @@ strings! {
         "Aucun",
         "Keine",
         "없음",
-        "Không";
+        "Không",
+        "Yok",
+        "Нет",
+        "Brak";
     ending_lf: "LF", "LF",
+        "LF",
+        "LF",
+        "LF",
         "LF",
         "LF",
         "LF",
@@ -1765,6 +2191,9 @@ strings! {
         "LF",
         "LF";
     ending_crlf: "CRLF", "CRLF",
+        "CRLF",
+        "CRLF",
+        "CRLF",
         "CRLF",
         "CRLF",
         "CRLF",
@@ -1787,7 +2216,10 @@ strings! {
         "Historique d'envoi",
         "Sende-Verlauf",
         "전송 기록",
-        "Lịch sử gửi";
+        "Lịch sử gửi",
+        "Gönderme geçmişi",
+        "История отправки",
+        "Historia wysyłania";
     no_send_history: "还没有发送记录", "No sends yet",
         "還沒有傳送記錄",
         "送信履歴はまだありません",
@@ -1798,7 +2230,10 @@ strings! {
         "Aucun envoi pour l'instant",
         "Noch keine Sendungen",
         "전송 기록이 없습니다",
-        "Chưa có lần gửi nào";
+        "Chưa có lần gửi nào",
+        "Henüz gönderim yok",
+        "Отправок пока нет",
+        "Brak wysłanych danych";
     send_history_count: "发送历史（{} / {}）", "Send history ({} / {})",
         "傳送歷史（{} / {}）",
         "送信履歴（{} / {}）",
@@ -1809,7 +2244,10 @@ strings! {
         "Historique d'envoi ({} / {})",
         "Sende-Verlauf ({} / {})",
         "전송 기록 ({} / {})",
-        "Lịch sử gửi ({} / {})";
+        "Lịch sử gửi ({} / {})",
+        "Gönderme geçmişi ({} / {})",
+        "История отправки ({} / {})",
+        "Historia wysyłania ({} / {})";
     empty_line: "<空行>", "<empty line>",
         "<空行>",
         "<空行>",
@@ -1820,7 +2258,10 @@ strings! {
         "<ligne vide>",
         "<Leerzeile>",
         "<빈 줄>",
-        "<dòng trống>";
+        "<dòng trống>",
+        "<boş satır>",
+        "<пустая строка>",
+        "<pusty wiersz>";
     clear_history: "清空历史", "Clear history",
         "清空歷史",
         "履歴を消去",
@@ -1831,7 +2272,10 @@ strings! {
         "Effacer l'historique",
         "Verlauf löschen",
         "기록 지우기",
-        "Xóa lịch sử";
+        "Xóa lịch sử",
+        "Geçmişi temizle",
+        "Очистить историю",
+        "Wyczyść historię";
 
     // —— panels/settings.rs：界面 ——
     sec_interface: "界面", "Interface",
@@ -1844,7 +2288,10 @@ strings! {
         "Interface",
         "Oberfläche",
         "인터페이스",
-        "Giao diện";
+        "Giao diện",
+        "Arayüz",
+        "Интерфейс",
+        "Interfejs";
     language_label: "语言", "Language",
         "語言",
         "言語",
@@ -1855,7 +2302,10 @@ strings! {
         "Langue",
         "Sprache",
         "언어",
-        "Ngôn ngữ";
+        "Ngôn ngữ",
+        "Dil",
+        "Язык",
+        "Język";
     language_applies_immediately:
         "切换语言立即生效，不需要重启",
         "Switching language takes effect immediately, no restart needed",
@@ -1868,7 +2318,10 @@ strings! {
         "Le changement de langue prend effet immédiatement, sans redémarrage",
         "Der Sprachwechsel wirkt sofort, kein Neustart nötig",
         "언어 변경은 즉시 적용되며 재시작이 필요 없습니다",
-        "Đổi ngôn ngữ có hiệu lực ngay, không cần khởi động lại";
+        "Đổi ngôn ngữ có hiệu lực ngay, không cần khởi động lại",
+        "Dil değişikliği hemen geçerli olur, yeniden başlatma gerekmez",
+        "Смена языка применяется сразу, перезапуск не нужен",
+        "Zmiana języka działa natychmiast, bez ponownego uruchamiania";
     font_scale_label: "字体大小", "Font size",
         "字型大小",
         "文字サイズ",
@@ -1879,7 +2332,10 @@ strings! {
         "Taille de police",
         "Schriftgröße",
         "글꼴 크기",
-        "Cỡ chữ";
+        "Cỡ chữ",
+        "Yazı tipi boyutu",
+        "Размер шрифта",
+        "Rozmiar czcionki";
     font_scale_small: "小", "Small",
         "小",
         "小",
@@ -1890,7 +2346,10 @@ strings! {
         "Petite",
         "Klein",
         "작게",
-        "Nhỏ";
+        "Nhỏ",
+        "Küçük",
+        "Мелкий",
+        "Małe";
     font_scale_normal: "标准", "Normal",
         "標準",
         "標準",
@@ -1901,7 +2360,10 @@ strings! {
         "Normale",
         "Normal",
         "보통",
-        "Tiêu chuẩn";
+        "Tiêu chuẩn",
+        "Normal",
+        "Обычный",
+        "Standardowe";
     font_scale_large: "大", "Large",
         "大",
         "大",
@@ -1912,7 +2374,10 @@ strings! {
         "Grande",
         "Groß",
         "크게",
-        "Lớn";
+        "Lớn",
+        "Büyük",
+        "Крупный",
+        "Duże";
     font_scale_xlarge: "特大", "Extra large",
         "特大",
         "特大",
@@ -1923,7 +2388,10 @@ strings! {
         "Très grande",
         "Sehr groß",
         "아주 크게",
-        "Rất lớn";
+        "Rất lớn",
+        "Çok büyük",
+        "Очень крупный",
+        "Bardzo duże";
     font_scale_note:
         "整体缩放界面文字（标题、正文、按钮、等宽一起变），立即生效；接收区与发送框的等宽字号也跟着变。\
          若调到「特大」后某些标签显得拥挤，属已知情况——它遇到的是界面里固定像素的标签列宽度",
@@ -1939,7 +2407,10 @@ strings! {
         "Met à l'échelle tout le texte de l'interface (titres, corps, boutons, monospace) d'un coup, effet immédiat ; la taille monospace de la zone de réception et du champ d'envoi suit aussi. Si certaines étiquettes paraissent à l'étroit en « Très grande », c'est attendu : elles se heurtent à la largeur fixe en pixels de la colonne d'étiquettes",
         "Skaliert den gesamten Oberflächentext gemeinsam (Überschriften, Fließtext, Schaltflächen, Monospace), sofort wirksam; auch die Monospace-Größe im Empfangsbereich und im Sendefeld ändert sich. Wirken einige Beschriftungen bei \"Sehr groß\" gedrängt, ist das erwartet — sie stoßen an die feste Pixelbreite der Beschriftungsspalte",
         "인터페이스 텍스트 전체를 함께 확대·축소합니다(제목, 본문, 버튼, 고정폭 포함). 즉시 적용되며 수신 영역과 송신 상자의 고정폭 크기도 함께 바뀝니다. \"아주 크게\"에서 일부 라벨이 비좁아 보이는 것은 알려진 현상입니다——고정 픽셀 라벨 열 너비에 부딪히기 때문입니다",
-        "Phóng to/thu nhỏ toàn bộ chữ trong giao diện cùng lúc (tiêu đề, nội dung, nút, chữ đẳng khoảng), có hiệu lực ngay; cỡ chữ đẳng khoảng ở vùng nhận và ô gửi cũng thay đổi theo. Nếu vài nhãn trông chật ở mức \"Rất lớn\", đó là điều đã biết — chúng chạm giới hạn chiều rộng cột nhãn cố định theo pixel";
+        "Phóng to/thu nhỏ toàn bộ chữ trong giao diện cùng lúc (tiêu đề, nội dung, nút, chữ đẳng khoảng), có hiệu lực ngay; cỡ chữ đẳng khoảng ở vùng nhận và ô gửi cũng thay đổi theo. Nếu vài nhãn trông chật ở mức \"Rất lớn\", đó là điều đã biết — chúng chạm giới hạn chiều rộng cột nhãn cố định theo pixel",
+        "Tüm arayüz metnini birlikte ölçekler (başlıklar, gövde, düğmeler, eş aralıklı), hemen geçerli olur; alım alanı ile gönderme kutusunun eş aralıklı boyutu da buna uyar. «Çok büyük» seçildiğinde bazı etiketlerin sıkışık görünmesi beklenen bir durumdur — sabit pikselli etiket sütunu genişliğine dayanırlar",
+        "Масштабирует весь текст интерфейса сразу (заголовки, основной текст, кнопки, моноширинный), применяется немедленно; размер моноширинного шрифта в области приёма и поле отправки тоже меняется. Если при «Очень крупном» некоторые подписи выглядят тесно, это ожидаемо — они упираются в фиксированную ширину столбца подписей",
+        "Skaluje cały tekst interfejsu naraz (nagłówki, treść, przyciski, czcionkę o stałej szerokości), działa natychmiast; rozmiar czcionki o stałej szerokości w obszarze odbioru i polu wysyłania też się zmienia. Jeśli przy „Bardzo dużym” niektóre etykiety wydają się ciasne, jest to oczekiwane — napotykają stałą szerokość kolumny etykiet w pikselach";
     font_scale_preview: "预览：{}", "Preview: {}",
         "預覽：{}",
         "プレビュー: {}",
@@ -1950,7 +2421,10 @@ strings! {
         "Aperçu : {}",
         "Vorschau: {}",
         "미리보기: {}",
-        "Xem trước: {}";
+        "Xem trước: {}",
+        "Önizleme: {}",
+        "Предпросмотр: {}",
+        "Podgląd: {}";
 
     // —— panels/settings.rs：文本编码 ——
     sec_text_encoding: "文本编码", "Text encoding",
@@ -1963,7 +2437,10 @@ strings! {
         "Encodage du texte",
         "Textkodierung",
         "텍스트 인코딩",
-        "Mã hóa văn bản";
+        "Mã hóa văn bản",
+        "Kodlama",
+        "Кодировка текста",
+        "Kodowanie tekstu";
     encoding_label: "编码", "Encoding",
         "編碼",
         "エンコーディング",
@@ -1974,7 +2451,10 @@ strings! {
         "Encodage",
         "Kodierung",
         "인코딩",
-        "Mã hóa";
+        "Mã hóa",
+        "Kodlama",
+        "Кодировка",
+        "Kodowanie";
     encoding_shared_note:
         "接收解码与发送编码共用这一档：不会出现「收到的中文按 GBK 解出来、发出去的却是 UTF-8」",
         "Receive decoding and send encoding share this setting: you will never decode incoming Chinese as GBK while sending out UTF-8",
@@ -1987,7 +2467,10 @@ strings! {
         "Le décodage en réception et l'encodage à l'envoi partagent ce réglage : vous ne décoderez jamais du chinois reçu en GBK tout en envoyant de l'UTF-8",
         "Empfangsdekodierung und Sende-Kodierung teilen diese Einstellung: Es passiert nie, dass eingehendes Chinesisch als GBK dekodiert wird, während UTF-8 gesendet wird",
         "수신 디코딩과 송신 인코딩이 이 설정을 공유합니다: \"받은 중국어를 GBK로 해석하고 보내는 것은 UTF-8\" 같은 불일치가 생기지 않습니다",
-        "Giải mã khi nhận và mã hóa khi gửi dùng chung thiết lập này: sẽ không xảy ra việc giải mã chữ Trung nhận được theo GBK trong khi gửi bằng UTF-8";
+        "Giải mã khi nhận và mã hóa khi gửi dùng chung thiết lập này: sẽ không xảy ra việc giải mã chữ Trung nhận được theo GBK trong khi gửi bằng UTF-8",
+        "Alım çözme ve gönderme kodlama bu ayarı paylaşır: gelen Çinceyi GBK ile çözüp UTF-8 gönderme durumu oluşmaz",
+        "Декодирование приёма и кодирование отправки используют одну настройку: не возникнет ситуации, когда входящий текст декодируется как GBK, а отправляется как UTF-8",
+        "Dekodowanie odbioru i kodowanie wysyłania korzystają z tego samego ustawienia: nie zdarzy się, że przychodzący tekst jest dekodowany jako GBK, a wysyłany jako UTF-8";
     encoding_gbk_note:
         "GBK 与 GB18030 的接收结果相同（共用解码器），仅发送时的可表示字符范围不同",
         "GBK and GB18030 decode identically (same decoder); only the encodable character range differs",
@@ -2000,7 +2483,10 @@ strings! {
         "GBK et GB18030 décodent à l'identique (même décodeur) ; seule diffère la plage de caractères encodables à l'envoi",
         "GBK und GB18030 dekodieren identisch (gleicher Decoder); nur der beim Senden darstellbare Zeichenbereich unterscheidet sich",
         "GBK와 GB18030의 수신 결과는 같습니다(디코더 공용). 송신 시 표현 가능한 문자 범위만 다릅니다",
-        "GBK và GB18030 giải mã giống nhau (dùng chung bộ giải mã); chỉ khác phạm vi ký tự có thể mã hóa khi gửi";
+        "GBK và GB18030 giải mã giống nhau (dùng chung bộ giải mã); chỉ khác phạm vi ký tự có thể mã hóa khi gửi",
+        "GBK ile GB18030 aynı şekilde çözer (ortak çözücü); yalnızca gönderirken kodlanabilen karakter aralığı farklıdır",
+        "GBK и GB18030 декодируются одинаково (общий декодер); различается только диапазон символов, кодируемых при отправке",
+        "GBK i GB18030 dekodują identycznie (wspólny dekoder); różni się tylko zakres znaków możliwych do zakodowania przy wysyłaniu";
     encoding_switch_note:
         "切换到别的编码会丢弃上一批残留的半个字符，已经显示的内容不受影响",
         "Switching encoding discards a half character left over from the previous batch; text already shown is unaffected",
@@ -2013,7 +2499,10 @@ strings! {
         "Changer d'encodage rejette le demi-caractère restant du lot précédent ; le contenu déjà affiché n'est pas affecté",
         "Ein Wechsel der Kodierung verwirft das halbe Zeichen aus dem vorherigen Block; bereits angezeigter Inhalt bleibt unberührt",
         "다른 인코딩으로 바꾸면 이전 배치에 남은 반쪽 문자를 버립니다. 이미 표시된 내용은 영향을 받지 않습니다",
-        "Chuyển sang mã hóa khác sẽ bỏ ký tự nửa vời còn lại của lô trước; nội dung đã hiển thị không bị ảnh hưởng";
+        "Chuyển sang mã hóa khác sẽ bỏ ký tự nửa vời còn lại của lô trước; nội dung đã hiển thị không bị ảnh hưởng",
+        "Başka bir kodlamaya geçmek önceki bloktan kalan yarım karakteri atar; hâlihazırda görünen içerik etkilenmez",
+        "Переключение кодировки отбрасывает половинку символа, оставшуюся от предыдущего блока; уже показанное содержимое не затрагивается",
+        "Przełączenie kodowania odrzuca połowę znaku pozostałą z poprzedniego bloku; już wyświetlona treść nie zmienia się";
 
     // —— panels/settings.rs：接收 ——
     sec_receive: "接收", "Receive",
@@ -2026,7 +2515,10 @@ strings! {
         "Réception",
         "Empfang",
         "수신",
-        "Nhận";
+        "Nhận",
+        "Alım",
+        "Приём",
+        "Odbiór";
     timestamp_prefix_field: "时间戳前缀", "Timestamp prefix",
         "時間戳前綴",
         "タイムスタンプ接頭辞",
@@ -2037,7 +2529,10 @@ strings! {
         "Préfixe d'horodatage",
         "Zeitstempel-Präfix",
         "타임스탬프 접두사",
-        "Tiền tố dấu thời gian";
+        "Tiền tố dấu thời gian",
+        "Zaman damgası öneki",
+        "Префикс метки времени",
+        "Prefiks znacznika czasu";
     ts_note:
         "形如 [12:00:00.123] 的本地时间前缀；每行 = 每个换行后重新标注，每批 = 每次收到数据标注一次",
         "Local time prefix such as [12:00:00.123]; per line = re-stamped after every newline, per batch = stamped once per received chunk",
@@ -2050,7 +2545,10 @@ strings! {
         "Préfixe d'heure locale tel que [12:00:00.123] ; par ligne = ré-apposé après chaque saut de ligne, par lot = apposé une fois par bloc reçu",
         "Lokaler Zeitpräfix wie [12:00:00.123]; pro Zeile = nach jedem Zeilenumbruch neu gesetzt, pro Block = einmal pro empfangenem Block gesetzt",
         "[12:00:00.123] 형태의 로컬 시간 접두사. 줄마다 = 줄바꿈마다 다시 표시, 배치마다 = 데이터를 받을 때마다 한 번 표시",
-        "Tiền tố giờ cục bộ dạng [12:00:00.123]; mỗi dòng = đánh dấu lại sau mỗi lần xuống dòng, mỗi lô = đánh dấu một lần cho mỗi gói nhận được";
+        "Tiền tố giờ cục bộ dạng [12:00:00.123]; mỗi dòng = đánh dấu lại sau mỗi lần xuống dòng, mỗi lô = đánh dấu một lần cho mỗi gói nhận được",
+        "[12:00:00.123] biçiminde yerel saat öneki; satır başına = her satır sonunda yeniden damgalanır, blok başına = alınan her parça için bir kez",
+        "Префикс местного времени вида [12:00:00.123]; на строку = заново после каждого перевода строки, на блок = один раз на каждый принятый блок",
+        "Prefiks czasu lokalnego w postaci [12:00:00.123]; na wiersz = ponownie po każdym przejściu do nowego wiersza, na blok = raz na każdy odebrany fragment";
     ts_note_2:
         "前缀是显示注解而不是收到的数据：它会随接收区一起进导出文件与实时日志，但不会进入图表解析",
         "The prefix is a display annotation, not received data: it enters exports and the live log along with the receive area, but never chart parsing",
@@ -2063,7 +2561,10 @@ strings! {
         "Le préfixe est une annotation d'affichage, pas une donnée reçue : il entre dans les exports et le journal en direct avec la zone de réception, mais jamais dans l'analyse du graphique",
         "Das Präfix ist eine Anzeige-Annotation, keine empfangenen Daten: Es gelangt zusammen mit dem Empfangsbereich in Exporte und Live-Protokoll, aber nie in die Diagrammauswertung",
         "접두사는 수신 데이터가 아니라 표시용 주석입니다. 수신 영역과 함께 내보내기 파일과 실시간 로그에 들어가지만 차트 분석에는 들어가지 않습니다",
-        "Tiền tố là chú thích hiển thị, không phải dữ liệu nhận được: nó đi cùng vùng nhận vào tệp xuất và log trực tiếp, nhưng không bao giờ vào phân tích biểu đồ";
+        "Tiền tố là chú thích hiển thị, không phải dữ liệu nhận được: nó đi cùng vùng nhận vào tệp xuất và log trực tiếp, nhưng không bao giờ vào phân tích biểu đồ",
+        "Önek alınan veri değil, görüntüleme notudur: alım alanıyla birlikte dışa aktarma dosyasına ve canlı günlüğe girer, ancak grafik ayrıştırmasına hiç girmez",
+        "Префикс — это отображаемая пометка, а не принятые данные: он попадает в экспорт и в живой журнал вместе с областью приёма, но никогда не участвует в разборе графика",
+        "Prefiks to adnotacja wyświetlania, a nie odebrane dane: trafia do eksportu i dziennika na żywo razem z obszarem odbioru, ale nigdy do analizy wykresu";
     max_log_field: "日志长度上限", "Max log length",
         "日誌長度上限",
         "ログ長の上限",
@@ -2074,7 +2575,10 @@ strings! {
         "Longueur maximale du journal",
         "Maximale Protokolllänge",
         "로그 최대 길이",
-        "Giới hạn độ dài log";
+        "Giới hạn độ dài log",
+        "Günlük uzunluğu üst sınırı",
+        "Предел длины журнала",
+        "Limit długości dziennika";
     chars_unlimited: "字符（0 = 不限）", "characters (0 = unlimited)",
         "字元（0 = 不限）",
         "文字（0 = 無制限）",
@@ -2085,7 +2589,10 @@ strings! {
         "caractères (0 = illimité)",
         "Zeichen (0 = unbegrenzt)",
         "문자(0 = 무제한)",
-        "ký tự (0 = không giới hạn)";
+        "ký tự (0 = không giới hạn)",
+        "karakter (0 = sınırsız)",
+        "символов (0 = без ограничения)",
+        "znaków (0 = bez limitu)";
     max_log_note:
         "超出上限时从最旧的内容开始淘汰，三种接收视图同步裁剪",
         "When over the limit the oldest content is dropped; all three receive views are trimmed together",
@@ -2098,7 +2605,10 @@ strings! {
         "Au-delà de la limite, le contenu le plus ancien est supprimé ; les trois vues de réception sont tronquées ensemble",
         "Über dem Limit wird der älteste Inhalt verworfen; alle drei Empfangsansichten werden gemeinsam gekürzt",
         "상한을 넘으면 가장 오래된 내용부터 버려지고, 세 가지 수신 보기가 함께 잘립니다",
-        "Khi vượt giới hạn, nội dung cũ nhất bị loại bỏ; cả ba chế độ xem nhận được cắt đồng thời";
+        "Khi vượt giới hạn, nội dung cũ nhất bị loại bỏ; cả ba chế độ xem nhận được cắt đồng thời",
+        "Üst sınır aşıldığında en eski içerik atılır; üç alım görünümü birlikte kırpılır",
+        "При превышении предела отбрасывается самое старое содержимое; все три вида отображения приёма обрезаются вместе",
+        "Po przekroczeniu limitu odrzucana jest najstarsza treść; wszystkie trzy widoki odbioru są przycinane jednocześnie";
     auto_scroll_latest: "自动滚动到最新", "Auto scroll to newest",
         "自動捲動到最新",
         "最新まで自動スクロール",
@@ -2109,7 +2619,10 @@ strings! {
         "Défiler vers le plus récent",
         "Zum Neuesten scrollen",
         "최신으로 자동 스크롤",
-        "Tự động cuộn đến mới nhất";
+        "Tự động cuộn đến mới nhất",
+        "En yeniye otomatik kaydır",
+        "Автопрокрутка к новому",
+        "Przewijaj do najnowszego";
     repaint_field: "重绘间隔", "Repaint interval",
         "重繪間隔",
         "再描画間隔",
@@ -2120,7 +2633,10 @@ strings! {
         "Intervalle de rafraîchissement",
         "Neuzeichnungsintervall",
         "다시 그리기 간격",
-        "Khoảng vẽ lại";
+        "Khoảng vẽ lại",
+        "Yeniden çizim aralığı",
+        "Интервал перерисовки",
+        "Interwał odświeżania";
     repaint_note:
         "ms（16~1000，越小越跟手也越耗电）",
         "ms (16~1000; smaller is snappier and uses more power)",
@@ -2133,7 +2649,10 @@ strings! {
         "ms (16~1000 ; plus petit = plus réactif et plus énergivore)",
         "ms (16~1000; kleiner ist flüssiger und verbraucht mehr Energie)",
         "ms(16~1000, 작을수록 반응이 빠르고 전력 소모가 큽니다)",
-        "ms (16~1000; càng nhỏ càng mượt và càng tốn điện)";
+        "ms (16~1000; càng nhỏ càng mượt và càng tốn điện)",
+        "ms (16~1000; küçük değer daha akıcı ve daha fazla güç tüketir)",
+        "мс (16~1000; меньше — отзывчивее и энергозатратнее)",
+        "ms (16~1000; mniej — płynniej i więcej zużywa energii)";
 
     // —— panels/settings.rs：发送 ——
     payload_format: "负载格式", "Payload format",
@@ -2146,7 +2665,10 @@ strings! {
         "Format de charge utile",
         "Nutzlastformat",
         "페이로드 형식",
-        "Định dạng tải";
+        "Định dạng tải",
+        "Yük biçimi",
+        "Формат данных",
+        "Format danych";
     hex_note:
         "HEX 时输入按十六进制解析：允许空格 / 逗号分隔与 0x 前缀；解析失败不会发送，也不会清空输入框",
         "In HEX mode the input is parsed as hexadecimal: spaces/commas and a 0x prefix are allowed; a parse failure sends nothing and does not clear the input",
@@ -2159,7 +2681,10 @@ strings! {
         "En mode HEX, l'entrée est interprétée en hexadécimal : espaces/virgules et préfixe 0x autorisés ; en cas d'échec d'analyse, rien n'est envoyé et l'entrée n'est pas effacée",
         "Im HEX-Modus wird die Eingabe als Hexadezimal interpretiert: Leerzeichen/Kommas und das Präfix 0x sind erlaubt; bei einem Analysefehler wird nichts gesendet und das Feld nicht geleert",
         "HEX 모드에서는 입력을 16진수로 해석합니다. 공백/쉼표 구분과 0x 접두사를 허용합니다. 해석에 실패하면 전송하지 않고 입력 상자도 비우지 않습니다",
-        "Ở chế độ HEX, nội dung nhập được phân tích theo hệ thập lục phân: cho phép dấu cách / dấu phẩy và tiền tố 0x; nếu phân tích thất bại sẽ không gửi và không xóa ô nhập";
+        "Ở chế độ HEX, nội dung nhập được phân tích theo hệ thập lục phân: cho phép dấu cách / dấu phẩy và tiền tố 0x; nếu phân tích thất bại sẽ không gửi và không xóa ô nhập",
+        "HEX modunda girdi onaltılık olarak ayrıştırılır: boşluk/virgül ayırıcı ve 0x öneki kabul edilir; ayrıştırma başarısız olursa hiçbir şey gönderilmez ve giriş temizlenmez",
+        "В режиме HEX ввод разбирается как шестнадцатеричный: допускаются пробелы, запятые и префикс 0x; при ошибке разбора ничего не отправляется и поле не очищается",
+        "W trybie HEX dane wejściowe są analizowane jako szesnastkowe: dozwolone są spacje, przecinki i prefiks 0x; przy błędzie analizy nic nie zostanie wysłane ani wyczyszczone";
     escape_note:
         "转义时 \\r \\n \\t \\0 \\xNN \\\\ 会变成对应的字节，其余文字仍按上面的编码发送；认不出的转义不会发送，也不会清空输入框",
         "In escape mode \\r \\n \\t \\0 \\xNN \\\\ become raw bytes and the remaining text is still encoded as above; an unrecognised escape sends nothing and does not clear the input",
@@ -2172,7 +2697,10 @@ strings! {
         "En mode échappement, \\r \\n \\t \\0 \\xNN \\\\ deviennent les octets correspondants et le reste du texte est encodé comme ci-dessus ; un échappement non reconnu n'envoie rien et n'efface pas l'entrée",
         "Im Escape-Modus werden \\r \\n \\t \\0 \\xNN \\\\ zu den entsprechenden Bytes und der restliche Text wird wie oben kodiert; ein unbekanntes Escape sendet nichts und leert das Feld nicht",
         "이스케이프 모드에서는 \\r \\n \\t \\0 \\xNN \\\\ 이 해당 바이트가 되고 나머지 텍스트는 위의 인코딩으로 전송됩니다. 인식할 수 없는 이스케이프는 전송하지 않고 입력 상자도 비우지 않습니다",
-        "Ở chế độ thoát, \\r \\n \\t \\0 \\xNN \\\\ trở thành các byte tương ứng và phần văn bản còn lại vẫn được mã hóa như trên; ký tự thoát không nhận diện được sẽ không gửi và không xóa ô nhập";
+        "Ở chế độ thoát, \\r \\n \\t \\0 \\xNN \\\\ trở thành các byte tương ứng và phần văn bản còn lại vẫn được mã hóa như trên; ký tự thoát không nhận diện được sẽ không gửi và không xóa ô nhập",
+        "Kaçış modunda \\r \\n \\t \\0 \\xNN \\\\ karşılık gelen baytlara dönüşür ve kalan metin yine yukarıdaki kodlamayla gönderilir; tanınmayan bir kaçış hiçbir şey göndermez ve girişi temizlemez",
+        "В режиме экранирования \\r \\n \\t \\0 \\xNN \\\\ превращаются в соответствующие байты, а остальной текст по-прежнему кодируется как выше; нераспознанная последовательность ничего не отправляет и не очищает поле",
+        "W trybie znaków ucieczki \\r \\n \\t \\0 \\xNN \\\\ stają się odpowiednimi bajtami, a pozostały tekst jest nadal kodowany jak wyżej; nierozpoznana sekwencja nic nie wysyła i nie czyści pola";
     ending_note:
         "追加在字节层：HEX 模式下发出的是 0x0A / 0x0D 0x0A 两个字节，不是字符",
         "Appended at the byte level: in HEX mode this emits the bytes 0x0A / 0x0D 0x0A, not characters",
@@ -2185,7 +2713,10 @@ strings! {
         "Ajouté au niveau des octets : en mode HEX, émet les octets 0x0A / 0x0D 0x0A, pas des caractères",
         "Auf Byte-Ebene angehängt: im HEX-Modus werden die Bytes 0x0A / 0x0D 0x0A gesendet, keine Zeichen",
         "바이트 계층에서 추가됩니다. HEX 모드에서는 0x0A / 0x0D 0x0A 바이트가 전송되며 문자는 아닙니다",
-        "Được thêm ở tầng byte: ở chế độ HEX sẽ gửi các byte 0x0A / 0x0D 0x0A, không phải ký tự";
+        "Được thêm ở tầng byte: ở chế độ HEX sẽ gửi các byte 0x0A / 0x0D 0x0A, không phải ký tự",
+        "Bayt düzeyinde eklenir: HEX modunda 0x0A / 0x0D 0x0A baytları gönderilir, karakter değil",
+        "Добавляется на уровне байтов: в режиме HEX отправляются байты 0x0A / 0x0D 0x0A, а не символы",
+        "Dodawane na poziomie bajtów: w trybie HEX wysyłane są bajty 0x0A / 0x0D 0x0A, a nie znaki";
     clear_after_send: "发送后清空输入框", "Clear input after sending",
         "傳送後清空輸入框",
         "送信後に入力欄を消去",
@@ -2196,7 +2727,10 @@ strings! {
         "Effacer l'entrée après envoi",
         "Eingabe nach dem Senden löschen",
         "전송 후 입력 상자 비우기",
-        "Xóa ô nhập sau khi gửi";
+        "Xóa ô nhập sau khi gửi",
+        "Gönderdikten sonra girişi temizle",
+        "Очищать поле после отправки",
+        "Wyczyść pole po wysłaniu";
     repeat_interval_field: "定时发送间隔", "Repeat interval",
         "定時傳送間隔",
         "定期送信の間隔",
@@ -2207,7 +2741,10 @@ strings! {
         "Intervalle d'envoi périodique",
         "Intervall für wiederholtes Senden",
         "반복 전송 간격",
-        "Khoảng gửi định kỳ";
+        "Khoảng gửi định kỳ",
+        "Yineli gönderme aralığı",
+        "Интервал повторной отправки",
+        "Interwał wysyłania cyklicznego";
     repeat_interval_range: "ms（{}~{}）", "ms ({}~{})",
         "ms（{}~{}）",
         "ms（{}~{}）",
@@ -2218,6 +2755,9 @@ strings! {
         "ms ({}~{})",
         "ms ({}~{})",
         "ms ({}~{})",
+        "ms ({}~{})",
+        "ms ({}~{})",
+        "мс ({}~{})",
         "ms ({}~{})";
     repeat_note:
         "开关在发送区；断开连接会自动关掉，且不跨进程延续（重启后一定是关的）",
@@ -2231,7 +2771,10 @@ strings! {
         "L'interrupteur se trouve dans la zone d'envoi ; à la déconnexion, il s'éteint automatiquement et ne survit pas au redémarrage (toujours éteint après redémarrage)",
         "Der Schalter liegt im Sendebereich; beim Trennen schaltet er sich automatisch aus und überlebt keinen Neustart (nach dem Neustart immer aus)",
         "스위치는 송신 영역에 있습니다. 연결을 끊으면 자동으로 꺼지며 프로세스를 넘어 유지되지 않습니다(재시작 후에는 항상 꺼짐)",
-        "Công tắc nằm ở vùng gửi; khi ngắt kết nối sẽ tự tắt và không giữ qua lần chạy sau (sau khi khởi động lại luôn tắt)";
+        "Công tắc nằm ở vùng gửi; khi ngắt kết nối sẽ tự tắt và không giữ qua lần chạy sau (sau khi khởi động lại luôn tắt)",
+        "Anahtar gönderme alanındadır; bağlantı kesilince kendiliğinden kapanır ve yeniden başlatmayı aşmaz (yeniden başlatınca her zaman kapalıdır)",
+        "Переключатель находится в области отправки; при отключении выключается сам и не переживает перезапуск (после перезапуска всегда выключен)",
+        "Przełącznik znajduje się w obszarze wysyłania; przy rozłączeniu wyłącza się sam i nie przetrwa restartu (po restarcie zawsze wyłączony)";
     send_history_count_text: "{} / {} 条", "{} / {} entries",
         "{} / {} 筆",
         "{} / {} 件",
@@ -2242,7 +2785,10 @@ strings! {
         "{} / {} entrées",
         "{} / {} Einträge",
         "{} / {} 개",
-        "{} / {} mục";
+        "{} / {} mục",
+        "{} / {} kayıt",
+        "{} / {} записей",
+        "{} / {} pozycji";
     history_note:
         "↑ / ↓ 在输入框首行 / 末行时取历史（首行按 ↑、末行按 ↓）；连续发送相同内容只记一条",
         "↑ / ↓ recall history at the first/last line of the input (↑ on the first line, ↓ on the last); repeated identical sends are stored once",
@@ -2255,7 +2801,10 @@ strings! {
         "↑ / ↓ rappellent l'historique à la première/dernière ligne de l'entrée (↑ sur la première, ↓ sur la dernière) ; les envois identiques répétés ne sont enregistrés qu'une fois",
         "↑ / ↓ rufen den Verlauf in der ersten/letzten Zeile des Eingabefelds ab (↑ in der ersten, ↓ in der letzten); wiederholte identische Sendungen werden nur einmal gespeichert",
         "↑ / ↓ 는 입력 상자의 첫 줄/마지막 줄에서 기록을 불러옵니다(첫 줄에서 ↑, 마지막 줄에서 ↓). 같은 내용을 연속 전송해도 한 번만 기록합니다",
-        "↑ / ↓ gọi lịch sử ở dòng đầu/dòng cuối của ô nhập (↑ ở dòng đầu, ↓ ở dòng cuối); gửi liên tiếp cùng nội dung chỉ lưu một mục";
+        "↑ / ↓ gọi lịch sử ở dòng đầu/dòng cuối của ô nhập (↑ ở dòng đầu, ↓ ở dòng cuối); gửi liên tiếp cùng nội dung chỉ lưu một mục",
+        "↑ / ↓, girişin ilk/son satırındayken geçmişi çağırır (ilk satırda ↑, son satırda ↓); art arda aynı içeriği göndermek tek kayıt oluşturur",
+        "↑ / ↓ вызывают историю в первой/последней строке поля ввода (↑ в первой, ↓ в последней); повторная отправка одинакового текста сохраняется один раз",
+        "↑ / ↓ przywołują historię w pierwszym/ostatnim wierszu pola (↑ w pierwszym, ↓ w ostatnim); powtórne wysłanie tej samej treści zapisuje się raz";
 
     // —— panels/settings.rs：实时图表 ——
     chart_panel_checkbox:
@@ -2270,7 +2819,10 @@ strings! {
         "Afficher le panneau du graphique (aussi via Affichage → Panneaux)",
         "Diagrammbereich anzeigen (auch über Ansicht → Bereiche umschaltbar)",
         "차트 패널 표시(보기 → 패널에서도 전환 가능)",
-        "Hiện bảng biểu đồ (cũng chuyển được từ Xem → Bảng điều khiển)";
+        "Hiện bảng biểu đồ (cũng chuyển được từ Xem → Bảng điều khiển)",
+        "Grafik panelini göster (Görünüm → Paneller'den de değiştirilebilir)",
+        "Показывать панель графика (также переключается в «Вид → Панели»)",
+        "Pokaż panel wykresu (przełączysz też w Widok → Panele)";
     max_samples_field: "样本上限", "Max samples",
         "樣本上限",
         "サンプル上限",
@@ -2281,7 +2833,10 @@ strings! {
         "Maximum d'échantillons",
         "Max. Messwerte",
         "샘플 상한",
-        "Giới hạn mẫu";
+        "Giới hạn mẫu",
+        "Örnek üst sınırı",
+        "Предел значений",
+        "Limit próbek";
     samples_range: "点/曲线（{}~{}）", "points/curve ({}~{})",
         "點/曲線（{}~{}）",
         "点/曲線（{}~{}）",
@@ -2292,7 +2847,10 @@ strings! {
         "points/courbe ({}~{})",
         "Punkte/Kurve ({}~{})",
         "점/곡선 ({}~{})",
-        "điểm/đường ({}~{})";
+        "điểm/đường ({}~{})",
+        "nokta/eğri ({}~{})",
+        "точек/кривая ({}~{})",
+        "punktów/krzywa ({}~{})";
     samples_note:
         "超出上限时从最旧的样本开始淘汰；绘制时每条曲线最多取 4000 点",
         "When over the limit the oldest samples are dropped; each curve is drawn with at most 4000 points",
@@ -2305,7 +2863,10 @@ strings! {
         "Au-delà de la limite, les échantillons les plus anciens sont supprimés ; chaque courbe est tracée avec au plus 4000 points",
         "Über dem Limit werden die ältesten Messwerte verworfen; jede Kurve wird mit höchstens 4000 Punkten gezeichnet",
         "상한을 넘으면 가장 오래된 샘플부터 버립니다. 그릴 때 각 곡선은 최대 4000개 점을 사용합니다",
-        "Khi vượt giới hạn, mẫu cũ nhất bị loại bỏ; mỗi đường cong được vẽ với tối đa 4000 điểm";
+        "Khi vượt giới hạn, mẫu cũ nhất bị loại bỏ; mỗi đường cong được vẽ với tối đa 4000 điểm",
+        "Üst sınır aşıldığında en eski örnekler atılır; çizerken her eğri en fazla 4000 nokta kullanır",
+        "При превышении предела отбрасываются самые старые значения; при отрисовке каждая кривая использует не более 4000 точек",
+        "Po przekroczeniu limitu odrzucane są najstarsze próbki; przy rysowaniu każda krzywa używa maksymalnie 4000 punktów";
     auto_bounds_checkbox:
         "自动缩放（关掉后保留手动拖动/缩放的视图）",
         "Auto bounds (when off, your manual pan/zoom is kept)",
@@ -2318,7 +2879,10 @@ strings! {
         "Échelle automatique (si désactivée, le cadrage manuel est conservé)",
         "Automatischer Maßstab (wenn aus, bleibt die manuelle Ansicht erhalten)",
         "자동 크기 조정(끄면 수동 이동/확대 보기가 유지됨)",
-        "Tự động điều chỉnh (nếu tắt, giữ nguyên chế độ kéo/thu phóng thủ công)";
+        "Tự động điều chỉnh (nếu tắt, giữ nguyên chế độ kéo/thu phóng thủ công)",
+        "Otomatik sınırlar (kapatınca elle kaydırma/yakınlaştırma korunur)",
+        "Автомасштаб (при выключении сохраняется ручной сдвиг/масштаб)",
+        "Automatyczne granice (po wyłączeniu zachowywane jest ręczne przesuwanie/zbliżenie)";
     current_data: "当前数据", "Current data",
         "目前資料",
         "現在のデータ",
@@ -2329,7 +2893,10 @@ strings! {
         "Données actuelles",
         "Aktuelle Daten",
         "현재 데이터",
-        "Dữ liệu hiện tại";
+        "Dữ liệu hiện tại",
+        "Geçerli veriler",
+        "Текущие данные",
+        "Bieżące dane";
     chart_count_text: "{} 通道 · {} 样本", "{} channels · {} samples",
         "{} 通道 · {} 樣本",
         "{} チャネル · {} サンプル",
@@ -2340,7 +2907,10 @@ strings! {
         "{} canaux · {} échantillons",
         "{} Kanäle · {} Messwerte",
         "{} 채널 · {} 샘플",
-        "{} kênh · {} mẫu";
+        "{} kênh · {} mẫu",
+        "{} kanal · {} örnek",
+        "{} каналов · {} значений",
+        "{} kanałów · {} próbek";
     chart_format_note:
         "格式：一行一组样本，字段用逗号分隔（如 1.0,2.0,3.0）；与接收显示模式无关",
         "Format: one sample group per line, comma-separated fields (e.g. 1.0,2.0,3.0); independent of the receive display mode",
@@ -2353,7 +2923,10 @@ strings! {
         "Format : un groupe d'échantillons par ligne, champs séparés par des virgules (ex. 1.0,2.0,3.0) ; indépendant du mode d'affichage de la réception",
         "Format: eine Messwertgruppe pro Zeile, Felder durch Kommas getrennt (z. B. 1.0,2.0,3.0); unabhängig vom Anzeigemodus des Empfangs",
         "형식: 한 줄에 샘플 한 그룹, 필드는 쉼표로 구분(예: 1.0,2.0,3.0). 수신 표시 모드와는 무관합니다",
-        "Định dạng: một nhóm mẫu mỗi dòng, các trường cách nhau bằng dấu phẩy (ví dụ 1.0,2.0,3.0); không phụ thuộc chế độ hiển thị khi nhận";
+        "Định dạng: một nhóm mẫu mỗi dòng, các trường cách nhau bằng dấu phẩy (ví dụ 1.0,2.0,3.0); không phụ thuộc chế độ hiển thị khi nhận",
+        "Biçim: satır başına bir örnek grubu, alanlar virgülle ayrılır (örn. 1.0,2.0,3.0); alım görüntüleme modundan bağımsızdır",
+        "Формат: одна группа значений в строке, поля через запятую (например 1.0,2.0,3.0); не зависит от режима отображения приёма",
+        "Format: jedna grupa próbek w wierszu, pola oddzielone przecinkami (np. 1.0,2.0,3.0); niezależny od trybu wyświetlania odbioru";
 
     // —— panels/settings.rs：文件日志 ——
     file_name_template: "文件名模板", "File name template",
@@ -2366,7 +2939,10 @@ strings! {
         "Modèle de nom de fichier",
         "Dateinamensvorlage",
         "파일 이름 템플릿",
-        "Mẫu tên tệp";
+        "Mẫu tên tệp",
+        "Dosya adı şablonu",
+        "Шаблон имени файла",
+        "Szablon nazwy pliku";
     next_file_name:
         "下次开始记录时生成: {}",
         "Will be created when logging next starts: {}",
@@ -2379,7 +2955,10 @@ strings! {
         "Sera créé au prochain démarrage de la journalisation : {}",
         "Wird beim nächsten Aufzeichnungsstart erstellt: {}",
         "다음 기록 시작 시 생성됩니다: {}",
-        "Sẽ được tạo khi bắt đầu ghi lần sau: {}";
+        "Sẽ được tạo khi bắt đầu ghi lần sau: {}",
+        "Kayıt bir sonraki başlatıldığında oluşturulur: {}",
+        "Будет создан при следующем запуске записи: {}",
+        "Zostanie utworzony przy następnym uruchomieniu zapisu: {}";
     output_dir_field: "输出目录", "Output directory",
         "輸出目錄",
         "出力先",
@@ -2390,7 +2969,10 @@ strings! {
         "Dossier de sortie",
         "Ausgabeordner",
         "출력 디렉터리",
-        "Thư mục đầu ra";
+        "Thư mục đầu ra",
+        "Çıktı klasörü",
+        "Папка вывода",
+        "Katalog wyjściowy";
     restore_default: "恢复默认", "Restore default",
         "恢復預設",
         "既定に戻す",
@@ -2401,7 +2983,10 @@ strings! {
         "Rétablir par défaut",
         "Standard wiederherstellen",
         "기본값 복원",
-        "Khôi phục mặc định";
+        "Khôi phục mặc định",
+        "Varsayılana dön",
+        "Восстановить по умолчанию",
+        "Przywróć domyślne";
     logging_written: "记录中，已写 {} 字节", "Logging, {} bytes written",
         "記錄中，已寫 {} 位元組",
         "記録中、{} バイト書き込み済み",
@@ -2412,7 +2997,10 @@ strings! {
         "Journalisation, {} octets écrits",
         "Aufzeichnung läuft, {} Bytes geschrieben",
         "기록 중, {} 바이트 작성됨",
-        "Đang ghi, đã viết {} byte";
+        "Đang ghi, đã viết {} byte",
+        "Kaydediliyor, {} bayt yazıldı",
+        "Запись идёт, записано {} байт",
+        "Zapisywanie, zapisano {} bajtów";
     log_note:
         "接收区的内容会同步写入该文件；日志文件不受上面的长度上限约束",
         "Whatever appears in the receive area is written to this file; the file is not subject to the length limit above",
@@ -2425,7 +3013,10 @@ strings! {
         "Le contenu de la zone de réception est écrit dans ce fichier ; le fichier journal n'est pas soumis à la limite de longueur ci-dessus",
         "Der Inhalt des Empfangsbereichs wird in diese Datei geschrieben; die Protokolldatei unterliegt nicht der obigen Längenbegrenzung",
         "수신 영역의 내용이 이 파일에 함께 기록됩니다. 로그 파일은 위의 길이 상한에 제약받지 않습니다",
-        "Nội dung vùng nhận được ghi vào tệp này; tệp log không bị ràng buộc bởi giới hạn độ dài ở trên";
+        "Nội dung vùng nhận được ghi vào tệp này; tệp log không bị ràng buộc bởi giới hạn độ dài ở trên",
+        "Alım alanındaki içerik bu dosyaya eşzamanlı yazılır; günlük dosyası yukarıdaki uzunluk sınırına tabi değildir",
+        "Содержимое области приёма синхронно записывается в этот файл; на файл журнала предел длины выше не распространяется",
+        "Treść obszaru odbioru jest zapisywana na bieżąco w tym pliku; plik dziennika nie podlega powyższemu limitowi długości";
     prefs_note:
         "以上均为用户偏好，改动即时生效并在退出时自动保存",
         "Everything above is a user preference: changes apply immediately and are saved on exit",
@@ -2438,7 +3029,10 @@ strings! {
         "Tout ce qui précède relève des préférences utilisateur : les modifications prennent effet immédiatement et sont enregistrées à la fermeture",
         "Alles oben sind Nutzereinstellungen: Änderungen wirken sofort und werden beim Beenden gespeichert",
         "위 항목은 모두 사용자 환경설정입니다. 변경은 즉시 적용되며 종료 시 자동 저장됩니다",
-        "Tất cả nội dung trên là tùy chọn người dùng: thay đổi có hiệu lực ngay và được tự động lưu khi thoát";
+        "Tất cả nội dung trên là tùy chọn người dùng: thay đổi có hiệu lực ngay và được tự động lưu khi thoát",
+        "Yukarıdakilerin tümü kullanıcı tercihleridir: değişiklikler anında geçerli olur ve çıkışta otomatik kaydedilir",
+        "Всё выше — пользовательские предпочтения: изменения применяются сразу и сохраняются при выходе",
+        "Wszystko powyżej to preferencje użytkownika: zmiany działają natychmiast i są zapisywane przy wyjściu";
 
     // —— receive.rs：接收区右键菜单 ——
     copy_all_log: "复制全部日志", "Copy the whole log",
@@ -2451,7 +3045,10 @@ strings! {
         "Copier tout le journal",
         "Gesamtes Protokoll kopieren",
         "전체 로그 복사",
-        "Sao chép toàn bộ log";
+        "Sao chép toàn bộ log",
+        "Tüm günlüğü kopyala",
+        "Копировать весь журнал",
+        "Kopiuj cały dziennik";
 }
 
 impl Language {
@@ -2477,6 +3074,9 @@ impl Language {
             Self::De => &DE,
             Self::Ko => &KO,
             Self::Vi => &VI,
+            Self::Tr => &TR,
+            Self::Ru => &RU,
+            Self::Pl => &PL,
         }
     }
 }
@@ -2566,6 +3166,16 @@ mod tests {
         text.chars().any(|c| matches!(c, '\u{0E00}'..='\u{0E7F}'))
     }
 
+    /// 西里尔字母：基本区（U+0400–U+04FF）与补充区（U+0500–U+052F）。
+    ///
+    /// 第三批加俄语后**必须**有这个检测器：没有它，把俄语列整列换成波兰语
+    /// （纯拉丁）也不会被判红——两列都是"非 CJK"，粗看都正常。
+    /// 这正是本轮实测到的空缺（见 [`script_allowed`] 与本函数使用处的注释）。
+    fn has_cyrillic(text: &str) -> bool {
+        text.chars()
+            .any(|c| matches!(c, '\u{0400}'..='\u{04FF}' | '\u{0500}'..='\u{052F}'))
+    }
+
     /// 拉丁字母含变音符号（越南语、以及西/葡/法/德/意等都需要）。
     fn has_latin_ext(text: &str) -> bool {
         text.chars().any(|c| {
@@ -2583,8 +3193,14 @@ mod tests {
         match (language, script) {
             (_, "kana") => matches!(language, Ja),
             (_, "hangul") => matches!(language, Ko),
-            // 泰语尚未纳入（第三批，见 I18N_TARGET_LANGUAGES.md）；届时在此放行 `Th`。
+            // 泰语尚未纳入（第三批的下一档，见 I18N_REMAINING_LANGUAGES.md §5.1）；
+            // 届时在此放行 `Th`，并先跑叠置记号的实机探针。
             (_, "thai") => false,
+            // 西里尔：只有俄语允许。第三批加 `ru` 后补上——**这是本轮实测出的空缺**：
+            // 探针把 ru 列写成波兰语（拉丁）时，旧检测器集合（kana/hangul/thai/cjk）
+            // 全部不命中，守卫照样绿。注意本项只挡"别列混入西里尔"，
+            // "ru 列没有西里尔" 由 `third_batch_columns_use_their_own_alphabets` 反向兜。
+            (_, "cyrillic") => matches!(language, Ru),
             // 汉字：中文（简/繁）与日语允许；韩语技术文案里几乎不用汉字，这里也放开
             // （谚文 + 汉字混排是韩语正当写法，不该被这条守卫判成漏翻译）。
             (_, "cjk") => matches!(language, Zh | ZhHant | Ja | Ko),
@@ -2606,6 +3222,7 @@ mod tests {
             ("kana", has_kana as fn(&str) -> bool),
             ("hangul", has_hangul),
             ("thai", has_thai),
+            ("cyrillic", has_cyrillic),
             ("cjk", has_cjk),
         ];
 
@@ -2931,6 +3548,77 @@ mod tests {
              像是把简体列抄了一份，没有真正转换字形",
             distinct.len(),
             distinct
+        );
+    }
+
+    /// 俄语列必须**真的用西里尔字母**，波兰语列必须**真的用波兰语变音字母**。
+    ///
+    /// 与 [`script_allowed`] 的西里尔条目是一对，缺一不可：
+    /// - `script_allowed` 保证"**别的**语言列里没混进西里尔"；
+    /// - 但它管不住"**俄语列里一个西里尔都没有**"——整列抄成英文/波兰语照样能过。
+    ///   本轮实测证实了这个空缺：把 `ru` 列写成波兰语，旧检测器集合全部不命中。
+    /// - 这里从**数据自证**：俄语列必须有足够多的西里尔字符、波兰语列必须有
+    ///   `ą ć ę ł ń ó ś ź ż` 这类拉丁扩展字母。
+    ///
+    /// 与 [`vietnamese_column_uses_latin_extended`] 同一思路：判据来自被检查的
+    /// 数据本身，不依赖写死的字符表（写死的表极易夹进共用字符而失去意义）。
+    #[test]
+    fn third_batch_columns_use_their_own_alphabets() {
+        /// 波兰语**独有**的变音字母——即不出现在其它任何一种语言列里的字母。
+        ///
+        /// 实测（解析全部 15 列后取差集）：`ą ć ę ł ń ś ż` 这 7 个在别的列里一个都没有，
+        /// 出现在 **101** 条波兰语译文里。
+        ///
+        /// **为什么不用完整的波兰字母表**（`ą ć ę ł ń ó ś ź ż`）：`ó` 与 `ź` 会出现在
+        /// 别的罗曼语系列里（葡萄牙语 `não`、西班牙语 `Versión`），拿它们当判据，
+        /// 整列被换成西语也照样命中。判据必须是**差异集**，不是"看起来像波兰语"。
+        fn has_polish_only_letter(text: &str) -> bool {
+            text.chars().any(|c| "ąćęłńśżĄĆĘŁŃŚŻ".contains(c))
+        }
+
+        let index_of = |want: Language| {
+            Language::ALL
+                .iter()
+                .position(|l| *l == want)
+                .unwrap_or_else(|| panic!("Language::ALL 里必须有 {want:?}"))
+        };
+        let count_in = |index: usize, pred: fn(&str) -> bool| {
+            ALL.iter()
+                .filter(|(_, texts)| texts.get(index).is_some_and(|t| pred(t)))
+                .count()
+        };
+
+        // 俄语：西里尔条数必须够多（实测 195/199 条含西里尔）。
+        // 阈值取 100——远低于真实值，但整列被换成拉丁语种时会掉到 0。
+        let ru_cyrillic = count_in(index_of(Language::Ru), has_cyrillic);
+        assert!(
+            ru_cyrillic >= 100,
+            "俄语列只有 {ru_cyrillic}/{} 条含西里尔字母——像是抄了拉丁语种的列",
+            ALL.len()
+        );
+
+        // 波兰语：独有变音字母条数（实测 101 条）。
+        // 阈值取 40：低于真实值但仍高于"整列被换成其它拉丁语种"时的 0。
+        // 这条同时保证 `pl` 不是俄语列——西里尔列不会命中它。
+        let pl_only = count_in(index_of(Language::Pl), has_polish_only_letter);
+        assert!(
+            pl_only >= 40,
+            "波兰语列只有 {pl_only}/{} 条含 `ą ć ę ł ń ś ż` 这类波兰独有字母——\
+             像是丢了变音，或整列被换成了别的拉丁语种",
+            ALL.len()
+        );
+
+        // 土耳其语是纯拉丁（Ç ğ ı İ ö ş ü），不做字形归属断言；
+        // 但必须与中文列有实质差异，防"整列复制中文"。
+        let tr_index = index_of(Language::Tr);
+        let same_as_zh = ALL
+            .iter()
+            .filter(|(_, texts)| texts.first() == texts.get(tr_index))
+            .count();
+        assert!(
+            same_as_zh * 4 < ALL.len(),
+            "土耳其语列有 {same_as_zh}/{} 条与中文一字不差",
+            ALL.len()
         );
     }
 

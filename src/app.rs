@@ -75,6 +75,15 @@ pub enum Language {
     Ko,
     /// Tiếng Việt（越南语）。
     Vi,
+    // ── 第三批（tr / ru / pl；见 I18N_REMAINING_LANGUAGES.md §4）──
+    // 这三种语言的字体已被微软雅黑**全覆盖**（实测缺失数均为 0），复数成本也是 0
+    // （现有英文列本身即不做复数），所以属于"零前置工作"即可落地的档位。
+    /// Türkçe（土耳其语）。
+    Tr,
+    /// Русский（俄语）。
+    Ru,
+    /// Polski（波兰语）。
+    Pl,
 }
 
 impl Language {
@@ -95,6 +104,9 @@ impl Language {
         Self::De,
         Self::Ko,
         Self::Vi,
+        Self::Tr,
+        Self::Ru,
+        Self::Pl,
     ];
 
     /// 语言在设置窗口下拉里**显示的名字**（自名，endonym）。
@@ -119,6 +131,9 @@ impl Language {
             Self::De => "Deutsch",
             Self::Ko => "한국어",
             Self::Vi => "Tiếng Việt",
+            Self::Tr => "Türkçe",
+            Self::Ru => "Русский",
+            Self::Pl => "Polski",
         }
     }
 }
