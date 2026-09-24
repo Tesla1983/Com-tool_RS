@@ -44,6 +44,50 @@ use encoding_rs::{DecoderResult, Encoding, GB18030, GBK, UTF_8, UTF_16LE};
 /// 「清空日志」也用它把滚动状态一并复位。
 pub(crate) const SCROLL_AREA_ID: &str = "receive_scroll";
 
+/// 接收区滚动块的高度上限（像素）。
+///
+/// 与 [`SCROLL_AREA_ID`] 一样属于"布局预算"：日志竖向最多占这么多，剩下的留给
+/// 同一列里的其它区块。
+pub(crate) const RECEIVE_SCROLL_MAX_HEIGHT: f32 = 400.0;
+
+/// 滚动块的滚动方向。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ScrollAxis {
+    /// 只纵向滚动。内容按现有宽度折行时用。
+    Vertical,
+    /// 纵横双向都可滚。不折行的等宽日志用。
+    Both,
+}
+
+/// 造一块「高度有上限、放不下就自己滚」的内容容器。
+///
+/// **实时图表复用日志这一套**（2026-09-24 用户要求）：两块都是"挂在中央区里、
+/// 高度有上限、内容溢出时自己滚"的区块。共用同一个构造函数之后，`auto_shrink`
+/// 与上限语义只有一处定义，不会出现"日志改了、图表没跟上"。
+///
+/// ⚠️ `ScrollArea` 的 `max_height` 是**至多**：可用空间更小时它自己会缩，因此不会
+/// 越界。这恰好补上了 `egui_plot::Plot::height()` 的短板——后者同时写 `min_size.y`
+/// 与 `height` 并取 `at_least`，矩形**恒为该值**，可用空间再小也不缩（实测把中央区
+/// 挤爆、把下面的发送区顶出可视区，见 [`crate::panels::chart`] 的注释）。
+///
+/// ⚠️ 滚轮归属（读 egui 0.36.1 `containers/scroll_area.rs:1219-1254`）：滚动区
+/// **只在"内容确实超出可视区、且该方向还能滚"时**才消费 `smooth_scroll_delta`。内容
+/// 装得下时两个条件都不成立，滚轮原样留给内部控件——所以图表放在里面时，只要内容
+/// 恰好装下，滚轮缩放/平移照旧；只有矮到出现滚动条，滚动块才接管滚轮。
+pub(crate) fn capped_scroll_area(
+    axis: ScrollAxis,
+    id_salt: &str,
+    max_height: f32,
+) -> egui::ScrollArea {
+    let area = match axis {
+        ScrollAxis::Vertical => egui::ScrollArea::vertical(),
+        ScrollAxis::Both => egui::ScrollArea::both(),
+    };
+    area.auto_shrink([false, false])
+        .max_height(max_height)
+        .id_salt(id_salt)
+}
+
 /// ASCII 视图：`\r` `\n` `\t` 等常见控制字符的转义显示颜色（蓝）。
 const ASCII_CTRL_COLOR: egui::Color32 = egui::Color32::from_rgb(36, 114, 200);
 /// ASCII 视图：其余不可见字节（其它控制字符 / 高位字节）的显示颜色（灰）。
@@ -716,20 +760,21 @@ fn show_receive_scroll(
     copy_all_label: &str,
 ) -> bool {
     let mut copy_all = false;
-    egui::ScrollArea::vertical()
-        .stick_to_bottom(stick_to_bottom)
-        .auto_shrink([false, false])
-        .max_height(400.0)
-        .id_salt(SCROLL_AREA_ID)
-        .show(ui, |ui| {
-            let response = ui.add(egui::Label::new(job).wrap().selectable(true));
-            response.context_menu(|ui| {
-                if ui.button(copy_all_label).clicked() {
-                    copy_all = true;
-                    ui.close();
-                }
-            });
+    capped_scroll_area(
+        ScrollAxis::Vertical,
+        SCROLL_AREA_ID,
+        RECEIVE_SCROLL_MAX_HEIGHT,
+    )
+    .stick_to_bottom(stick_to_bottom)
+    .show(ui, |ui| {
+        let response = ui.add(egui::Label::new(job).wrap().selectable(true));
+        response.context_menu(|ui| {
+            if ui.button(copy_all_label).clicked() {
+                copy_all = true;
+                ui.close();
+            }
         });
+    });
     copy_all
 }
 
@@ -750,11 +795,8 @@ pub(crate) fn show_plain_receive(
         ui.visuals().text_color(),
         f32::INFINITY,
     );
-    egui::ScrollArea::both()
+    capped_scroll_area(ScrollAxis::Both, SCROLL_AREA_ID, RECEIVE_SCROLL_MAX_HEIGHT)
         .stick_to_bottom(stick_to_bottom)
-        .auto_shrink([false, false])
-        .max_height(400.0)
-        .id_salt(SCROLL_AREA_ID)
         .show(ui, |ui| {
             let response = ui.add(
                 egui::Label::new(job)
@@ -1302,6 +1344,72 @@ impl ComTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 在给定容器高度下画一次公共滚动块，返回 `(可视区高, 内容高)`。
+    fn drive_scroll_block(viewport_h: f32, cap: f32, content_h: f32) -> (f32, f32) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(500.0, viewport_h),
+            )),
+            ..Default::default()
+        };
+
+        let inner = std::cell::Cell::new(0.0_f32);
+        let content = std::cell::Cell::new(0.0_f32);
+        let mut out = ctx.run_ui(input, |ui| {
+            let out = capped_scroll_area(ScrollAxis::Vertical, "capped_scroll_area_test", cap)
+                .show(ui, |ui| {
+                    ui.allocate_space(egui::vec2(10.0, content_h));
+                });
+            inner.set(out.inner_rect.height());
+            content.set(out.content_size.y);
+        });
+        // `FullOutput` 带着纹理增量，直接 drop 会 panic（看着像抓到缺陷，其实是清理没做）。
+        out.textures_delta.clear();
+
+        (inner.get(), content.get())
+    }
+
+    /// 公共滚动块的两个性质——它们正是"图表复用日志滚动区"赖以成立的东西：
+    ///
+    /// ① `max_height` 是**至多**：容器比它高时只占上限那么高；
+    /// ② 内容比可视区高时，egui 会报"需要滚动"（`ScrollAreaOutput` 文档里的原文判据是
+    ///    "If this content_size is larger than inner_rect, then there was need for
+    ///    scrolling"）。
+    ///
+    /// ② 是这条的关键：只断 ① 的话，把上限设成"永远装得下"也照样绿，等于没测到"能滚"。
+    /// 图表那条路径依赖的正是 ②——矮窗口下夹住容器，而不是压扁绘图区。
+    #[test]
+    fn capped_scroll_area_caps_the_height_and_can_scroll() {
+        const CAP: f32 = 400.0;
+        const TALL_VIEWPORT: f32 = 600.0;
+        const SHORT_VIEWPORT: f32 = 120.0;
+        const CONTENT_H: f32 = 300.0;
+
+        // ① 容器(600) 比上限(400) 高 ⇒ 只占 400，而不是把 600 都用掉。
+        let (inner, content) = drive_scroll_block(TALL_VIEWPORT, CAP, CONTENT_H);
+        assert!(
+            inner <= CAP + 0.5,
+            "容器有 {TALL_VIEWPORT} 点高，滚动块却占了 {inner:.1} 点——上限 {CAP} 没生效"
+        );
+        assert!(
+            content <= inner + 0.5,
+            "内容 {content:.1} 点没能装进 {inner:.1} 点的可视区，这一段的场景不对"
+        );
+
+        // ② 容器(120) 比内容(300) 矮 ⇒ 可视区被夹住，且 egui 认为"需要滚动"。
+        let (inner, content) = drive_scroll_block(SHORT_VIEWPORT, CAP, CONTENT_H);
+        assert!(
+            inner <= SHORT_VIEWPORT + 0.5,
+            "可视区被内容顶到 {inner:.1} 点（容器只有 {SHORT_VIEWPORT} 点）"
+        );
+        assert!(
+            content > inner,
+            "content_size({content:.1}) 未超过 inner_rect({inner:.1})，egui 认为不需要滚动"
+        );
+    }
 
     // `with_ymd_and_hms` 由 trait 提供，调用 `chrono::Local` 时需要它在作用域内
     use chrono::TimeZone as _;

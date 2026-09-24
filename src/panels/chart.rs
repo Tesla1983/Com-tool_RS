@@ -15,38 +15,33 @@ use egui::Ui;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use std::collections::VecDeque;
 
-/// 绘图区高度的**上限**（像素）：空间充裕时的期望高度。
+/// 绘图区高度（像素）。
+///
+/// **这是固定值，不是"期望值"**：图表块的真实高度由外层滚动块
+/// （[`crate::receive::capped_scroll_area`]）决定——`ScrollArea::max_height` 是**至多**，
+/// 空间不够时它自己夹住并给出滚动条，绘图区本身始终保持这个高度。
+///
+/// 2026-09-24 这一天它演进过三次，三条都留着（每次都是用户目视后提出的）：
+///
+/// 1. **写死 220 当实际高度**：`Plot::height()` 会把 `min_size.y` 与 `height` 一起写成
+///    这个值并取 `at_least` ⇒ 矩形**恒为 220**，可用空间再小也不缩。中央区只剩 120 点时
+///    越界 131 点，而中央区没有滚动条，被裁掉的部分正好把夹在图表**下面**的发送区顶出
+///    可视区（实测中央区高 640 点时图表底已越界 53 点）。
+/// 2. **按可用高度在 `[90, 220]` 之间夹**（曾有个 `plot_height(available)`）：越界没了，
+///    但矮窗口下绘图区被压矮 ⇒ **纵横比失真**，曲线的趋势看起来比实际平缓——对"看趋势"
+///    这件事来说，这比"要滚动"更糟。
+/// 3. **交还给滚动块**（用户要求"复用日志滚动区"）：绘图区固定 220、等比例，放不下就
+///    滚动；越界仍由滚动块兜住，"压扁"的问题一并消失。
 const PLOT_HEIGHT_MAX: f32 = 220.0;
-
-/// 绘图区高度的**下限**（像素）。
-///
-/// 可用空间比它还小时只能照它画。再往下缩只会得到一条看不见的线：窗口已经小到放不下
-/// 中央区里的东西了，此时保留"至少看得见一条趋势"比继续让步更有意义。
-const PLOT_HEIGHT_MIN: f32 = 90.0;
-
-/// 由**当前可用高度**算出绘图区高度。
-///
-/// 2026-09-24 修（用户问"图表的窗口高度这么小，能够正常显示数据吗"）：
-/// 此前这里是写死的 [`PLOT_HEIGHT_MAX`]，实测有两个后果——
-///
-/// 1. **可用空间不足时它不会缩**：中央区只剩 120 点时，图表块仍然占用 251 点，
-///    越界 131 点。中央区没有滚动条，超出的部分会被面板裁掉，于是夹在图表**下面**
-///    的发送区整块落到可视区之外（实测：中央区高 640 点时图表底已经越界 53 点）。
-/// 2. **窗口拉高也不会变大**：写死的值既不会缩也不会涨。
-///
-/// 现在改成在 `[下限, 上限]` 之间跟着可用高度走：**空间充足时与从前逐点完全一致**
-/// （仍是 220），只在放不下时才让出高度。
-fn plot_height(available: f32) -> f32 {
-    if available.is_finite() {
-        available.clamp(PLOT_HEIGHT_MIN, PLOT_HEIGHT_MAX)
-    } else {
-        // 拿不到有限值（不该发生）时退回旧行为，不要算出 NaN 让布局整体失效。
-        PLOT_HEIGHT_MAX
-    }
-}
 
 /// 图表的持久化 ID。同一界面里不能与其它控件重名，否则状态会互相干扰。
 const PLOT_ID: &str = "realtime_chart";
+
+/// 图表滚动块的持久化 ID。
+///
+/// 与 [`PLOT_ID`] 必须不同：`ScrollArea` 的滚动位置与 `Plot` 的视图范围是两份独立
+/// 状态，共用一个 id 会让它们互相踩。
+const CHART_SCROLL_ID: &str = "realtime_chart_scroll";
 
 /// 单帧、单通道最多绘制的点数。
 ///
@@ -110,8 +105,12 @@ impl ComTool {
         let mut clear_requested = false;
         let s = self.language.strings();
 
+        // —— 页眉标题条 ——
+        //
+        // 与侧边栏顶部那条页眉同一套写法（`ui.heading` + 其下的分隔线），让"这一块
+        // 是什么"在第一眼就成立。右侧那一排仍是原样：自动缩放、清空、样本摘要。
         ui.horizontal(|ui| {
-            ui.label(s.chart_panel_label);
+            ui.heading(s.chart_panel_label);
             ui.checkbox(&mut self.chart_auto_bounds, s.auto_bounds);
             if crate::button::standard(ui, s.clear_chart).clicked() {
                 clear_requested = true;
@@ -125,6 +124,7 @@ impl ComTool {
                 ],
             ));
         });
+        ui.separator();
 
         // 解析异常时给出可诊断的提示。用户配置的格式对不上时，最需要看到的
         // 不是一片空白，而是"有东西被忽略了、忽略了多少"。
@@ -141,26 +141,44 @@ impl ComTool {
             ui.weak(fill(s.chart_format_hint, &[&detail.join(" · ")]));
         }
 
-        if self.chart.is_empty() {
-            ui.weak(s.waiting_data);
+        // 闭包要用的东西先全部取出来（数据、开关、高度），闭包便只捕获这些值，
+        // 不与 `self` 的其它借用打架。
+        let is_empty = self.chart.is_empty();
+        let auto_bounds = self.chart_auto_bounds;
+        let series: Vec<Vec<[f64; 2]>> = if is_empty {
+            Vec::new()
         } else {
-            // 先把要画的数据整理好再进闭包：`Plot::show` 的闭包捕获 `series`，
-            // 不借用 `self`，于是这段代码不会与 `self` 的其它可变借用打架。
-            let series: Vec<Vec<[f64; 2]>> = self
-                .chart
+            self.chart
                 .channels()
                 .iter()
                 .map(points_for_drawing)
-                .collect();
+                .collect()
+        };
 
+        // 绘图区高度**固定**为 [`PLOT_HEIGHT_MAX`]，不再按可用高度缩。
+        //
+        // 按可用高度缩是"复用日志滚动区"之前的做法：它能让图表在矮窗口下不被裁，但
+        // 代价是可视区变矮 ⇒ 纵横比失真，趋势看起来比实际平缓（见 [`PLOT_HEIGHT_MAX`]）。
+        //
+        // 现在高度交给滚动块：`ScrollArea::max_height` 是**至多**，空间不够时它自己夹住
+        // 并给出滚动条，绘图区仍是完整的 220 高、等比例，滚动即可看全。这一条也顺手
+        // 替掉了"按可用高度算高度"那套——`Plot::height()` 同时写 `min_size.y` 与
+        // `height` 并取 `at_least`，矩形恒为该值，曾经把它下面的发送区顶出可视区。
+        crate::receive::capped_scroll_area(
+            crate::receive::ScrollAxis::Vertical,
+            CHART_SCROLL_ID,
+            PLOT_HEIGHT_MAX,
+        )
+        .show(ui, |ui| {
+            if is_empty {
+                ui.weak(s.waiting_data);
+                return;
+            }
             // 图例常开：多通道时"哪条线是哪个通道"只能靠颜色对照，没有图例就得猜。
-            //
-            // 高度在**这一行之后**再问可用空间：标题行与格式提示行已经画完，此时
-            // `available_height()` 剩下的就是"还能给绘图区多少"——比预先减一个常数准。
             let mut plot = Plot::new(PLOT_ID)
-                .height(plot_height(ui.available_height()))
+                .height(PLOT_HEIGHT_MAX)
                 .legend(Legend::default());
-            if self.chart_auto_bounds {
+            if auto_bounds {
                 // 关掉时不设置，`egui_plot` 便会保留用户拖动 / 缩放后的视图。
                 plot = plot.auto_bounds(true);
             }
@@ -176,7 +194,7 @@ impl ComTool {
                     );
                 }
             });
-        }
+        });
 
         if clear_requested {
             self.clear_chart();
@@ -271,10 +289,13 @@ mod tests {
     ///
     /// 2026-09-24 实测（4 通道 × 60 点，宽 900）：
     ///
-    /// | 画布高 | 图表块占用 | 绘图区 | 曲线包围盒 y |
+    /// | 画布高 | 图表块占用 | 绘图区 | 说明 |
     /// |---|---|---|---|
-    /// | 480 | 251 | 886 × 206 | 40.4 – 227.6 |
-    /// | 180 | 180 | 886 × 135 | 跟随绘图区 |
+    /// | 480 | 251 | 886 × 206 | 空间够，与改动前逐点一致 |
+    /// | 180 | 180 | 886 × 206 | 块被滚动区夹住，**绘图区不变**，改为可滚动 |
+    ///
+    /// 第三列在矮画布下**不再跟着变小**——这正是"复用日志滚动区"要的效果：被夹住的
+    /// 是容器，不是内容。
     fn paint(available_height: f32, channels: usize, samples: usize) -> Painted {
         let mut app = ComTool {
             show_chart_panel: true,
@@ -338,34 +359,33 @@ mod tests {
         }
     }
 
-    /// 空间充足时绘图区高度**与修改前逐点一致**（220）。
+    /// 矮画布下：图表块被**夹住**（不越界），但绘图区**保持完整**——超出部分交给滚动块。
     ///
-    /// 阈值写死字面量、不引用 [`PLOT_HEIGHT_MAX`]——引用了就变成"常量改一改、断言跟着改"
-    /// 的自证（本项目在连接按钮的字号上正是这么栽过两次）。
+    /// 这条正是"复用日志滚动区"与"按可用高度缩"的分界：
+    ///
+    /// - 只断"不越界"，会放走"顺手把高度算小"——那种做法下曲线被压扁，断言照样绿；
+    /// - 只断"绘图区完整"，会放走越界——改动前的写死 220 正是"绘图区完整 + 越界 131 点"。
+    ///
+    /// 所以两条一起断：**块不越界** + **绘图区仍是 220**。
     #[test]
-    fn plot_height_keeps_its_documented_value_when_there_is_room() {
-        for available in [251.0, 400.0, 1000.0] {
-            assert_eq!(
-                plot_height(available),
-                220.0,
-                "可用 {available} 点时高度变了——空间够时不该有变化"
-            );
-        }
-        assert_eq!(
-            plot_height(f32::INFINITY),
-            220.0,
-            "拿不到有限值时应退回 220，而不是算出 NaN 让整块布局失效"
-        );
-    }
+    fn squeezed_chart_clips_its_block_but_keeps_the_plot_area_whole() {
+        const ROOM: f32 = 150.0;
 
-    /// 放不下时按可用高度缩，但不低于下限。
-    #[test]
-    fn plot_height_shrinks_to_fit_and_stops_at_the_floor() {
-        assert_eq!(plot_height(150.0), 150.0, "放得下就该照可用高度来");
-        assert_eq!(plot_height(90.0), 90.0);
-        for tiny in [50.0, 0.0, -30.0] {
-            assert_eq!(plot_height(tiny), 90.0, "可用 {tiny} 点时跌破了下限 90");
-        }
+        let painted = paint(ROOM, 4, 60);
+
+        assert!(
+            painted.consumed.max.y <= ROOM + 0.5,
+            "画布只有 {ROOM} 点高，图表块却占到了 {:.1} 点（越界 {:.1} 点）——\
+             滚动块没有把高度夹住",
+            painted.consumed.max.y,
+            painted.consumed.max.y - ROOM
+        );
+        assert!(
+            painted.data_area.height() >= 200.0,
+            "绘图区被压到只剩 {:.1} 点高（固定值是 220）——说明又退回\"按可用高度缩\"了，\
+             矮窗口下曲线的纵横比会失真",
+            painted.data_area.height()
+        );
     }
 
     /// ⚠️ 图表**永不占用超过给它的空间**。
@@ -395,9 +415,9 @@ mod tests {
         );
     }
 
-    /// 缩过之后**曲线照样落在绘图区里**：缩高度不能变成"画一片空白"。
+    /// 画布矮到需要滚动时，**曲线照样完整落在绘图区里**：夹高度不能变成"画一片空白"。
     #[test]
-    fn shrunk_chart_still_draws_the_curves_inside_the_plot_area() {
+    fn squeezed_chart_still_draws_the_curves_inside_the_plot_area() {
         let painted = paint(180.0, 4, 60);
 
         assert_eq!(painted.curves.len(), 4, "四条通道应各有一条曲线");

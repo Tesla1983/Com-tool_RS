@@ -1662,222 +1662,8 @@ impl eframe::App for ComTool {
         self.show_status_bar(ui);
 
         // ④ 中央区
-        let s = self.language.strings();
         egui::CentralPanel::default().show(ui, |ui| {
-            // 设置 / 信息两个窗口跟着中央区一起绘制（主界面的常驻部分）
-            self.show_settings_window(ui);
-            self.show_info_window(ui);
-
-            self.render_top_toolbar(ui);
-
-            ui.separator();
-
-            if self.show_receive_panel {
-                // 接收设置：文本/HEX 用 checkbox 表达（底层互斥，因为收到数据只能按一种格式解析）
-                let mut show_hex = self.hex_view;
-                let mut show_text = !self.hex_view;
-                // 「字节查看」与「HEX 接收」也互斥（见 `resolve_display_mode`）。这里必须
-                // 分别记下"哪个是刚被勾上的"，交给那一个函数统一裁决，而不是就地写
-                // `if hex { ascii = false; }`——规则两处各写一遍，迟早有一处忘了改。
-                let mut hex_just_enabled = false;
-                let mut ascii_just_enabled = false;
-                let mut color_just_enabled = false;
-                ui.horizontal(|ui| {
-                    ui.label(s.receive_settings);
-                    if ui.checkbox(&mut show_hex, s.hex).changed() && show_hex {
-                        show_text = false; // 勾 HEX → 取消文本
-                        hex_just_enabled = true;
-                    }
-                    if ui.checkbox(&mut show_text, s.text).changed() && show_text {
-                        show_hex = false; // 勾文本 → 取消 HEX
-                    }
-                    ui.horizontal(|ui| {
-                        // 「颜色」同样要交给互斥裁决：它与「字节查看」同时勾上时接收区会
-                        // 一片空白（两者写的不是同一份镜像）。这里只报"刚被勾上"，
-                        // 规则由 `resolve_display_mode` 唯一裁决。
-                        let mut color_view = self.color_view;
-                        if ui.checkbox(&mut color_view, s.color).changed() && color_view {
-                            color_just_enabled = true;
-                        }
-                        self.color_view = color_view;
-                        if ui.checkbox(&mut self.ascii_view, s.byte_view).changed()
-                            && self.ascii_view
-                        {
-                            ascii_just_enabled = true;
-                        }
-                    });
-                });
-                self.hex_view = show_hex; // 文本 = !hex_view；两个都取消时退回文本
-                self.resolve_display_mode(hex_just_enabled, ascii_just_enabled, color_just_enabled);
-
-                // 接收区：画哪一份镜像由 [`ComTool::display_mode`] 决定——与上面写镜像的
-                // 判定是同一个，所以不存在"写了一份、画另一份"的空视图。分发本身抽在
-                // `receive::ComTool::render_receive_area` 里，那条路有自动化测试。
-                self.render_receive_area(ui);
-            }
-
-            // 中央区里这几块是纵向堆叠的，分隔线只在"上面有东西、下面也有东西"
-            // 时才有意义；图表夹在接收区与发送区之间。
-            if self.show_receive_panel && (self.show_chart_panel || self.show_send_panel) {
-                ui.separator();
-            }
-
-            self.render_chart_panel(ui);
-
-            if self.show_chart_panel && self.show_send_panel {
-                ui.separator();
-            }
-
-            if self.show_send_panel {
-                // 发送区
-                self.render_send_settings_row(ui);
-
-                let send_edit_id = egui::Id::new("send_input");
-
-                // 焦点与箭头键都必须在绘制 `TextEdit` **之前**读：TextEdit 会消费
-                // 导航键事件，等它画完再读 `key_pressed` 有可能已经拿不到了。
-                let had_focus = ui.ctx().memory(|m| m.has_focus(send_edit_id));
-                let (up_pressed, down_pressed) = ui.input(|i| {
-                    (
-                        i.key_pressed(egui::Key::ArrowUp) && !i.modifiers.shift,
-                        i.key_pressed(egui::Key::ArrowDown) && !i.modifiers.shift,
-                    )
-                });
-
-                let out = egui::TextEdit::multiline(&mut self.send_text)
-                    .id(send_edit_id)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(4)
-                    // 字号跟随全局字体档位：写死 14.0 的话，用户把字体调大后
-                    // 发送框仍是小字，与接收区不一致（两者都是等宽内容，本该同号）。
-                    .font(crate::receive::monospace_font_id(
-                        ui,
-                        crate::receive::RECEIVE_MONOSPACE_BASE_SIZE,
-                    ))
-                    .return_key(egui::KeyboardShortcut::new(
-                        egui::Modifiers::SHIFT,
-                        egui::Key::Enter,
-                    ))
-                    .show(ui);
-                let send_has_focus = out.response.response.has_focus();
-
-                // 用**上一帧**的光标位置判断首行 / 末行：本帧的位置可能已经被 ↑ 自己
-                // 挪走，用它判断会让"在第二行按 ↑"当场变成"取历史"。
-                let cursor = self.send_cursor_index.unwrap_or(0);
-                let mut recalled = false;
-                if had_focus {
-                    let next = if up_pressed && on_first_line(&self.send_text, cursor) {
-                        // 注意 `send_history_nav` 与 `send_history` / `send_text` 是三个
-                        // 互不重叠的字段，借用检查器允许这样同时借。
-                        self.send_history_nav
-                            .older(&self.send_history, &self.send_text)
-                    } else if down_pressed && on_last_line(&self.send_text, cursor) {
-                        self.send_history_nav.newer(&self.send_history)
-                    } else {
-                        None
-                    };
-
-                    if let Some(text) = next {
-                        self.send_text = text;
-                        recalled = true;
-                        // 光标移到末尾：否则下一次 ↑ 会因为光标还停在旧位置而重复命中
-                        // 同一条历史（shell 里的 ↑ 也是这个行为）。
-                        let mut state = out.state.clone();
-                        let end = egui::text::CCursor::new(self.send_text.chars().count());
-                        state
-                            .cursor
-                            .set_char_range(Some(egui::text::CCursorRange::one(end)));
-                        state.store(ui.ctx(), send_edit_id);
-                    }
-                }
-
-                // 用户自己改了内容 → 退出浏览态，否则下一次 ↑ 会接着半截历史往下走。
-                // `recalled` 那一帧例外：本次改动是我们自己写进去的。
-                if out.response.response.changed() && !recalled {
-                    self.send_history_nav.reset();
-                }
-
-                // 记录本帧光标位置供下一帧使用；刚取过历史就按"光标已到末尾"记，
-                // 免得下一帧拿一个越界下标去判断。
-                // `CCursor::index` 是 `CharIndex` 这个 newtype（不是裸 usize），
-                // 取 `.0` 拿字符下标；`send.rs` 里的首行/末行判定也是按字符算的。
-                self.send_cursor_index = if recalled {
-                    Some(self.send_text.chars().count())
-                } else {
-                    out.cursor_range.map(|r| r.primary.index.0)
-                };
-
-                // 实时校验：HEX 写错了要当场看见，而不是点了发送才发现。
-                // 超长输入跳过——发送框里正常不会有这么大的文本，而每帧解析一遍
-                // 几十 KB 的十六进制字符串是白费。
-                // 全部挤在同一行里：这一行的高度固定，浏览历史时不会让下面的按钮跳位。
-                const PREVIEW_MAX_LEN: usize = 16 * 1024;
-                ui.horizontal(|ui| {
-                    if self.send_text.len() > PREVIEW_MAX_LEN {
-                        ui.weak(s.preview_too_long);
-                    } else {
-                        match build_payload(
-                            &self.send_text,
-                            self.send_format,
-                            self.send_line_ending,
-                            self.text_encoding,
-                        ) {
-                            Ok(payload) => {
-                                ui.weak(fill(s.will_send_bytes, &[&payload.bytes.len()]));
-                                if payload.had_unmappable {
-                                    let color = ui.visuals().error_fg_color;
-                                    ui.colored_label(
-                                        color,
-                                        fill(
-                                            s.unmappable_in_encoding,
-                                            &[&self.text_encoding.label()],
-                                        ),
-                                    );
-                                }
-                            }
-                            Err(reason) => {
-                                let error_color = ui.visuals().error_fg_color;
-                                ui.colored_label(error_color, fill(s.hex_parse_failed, &[&reason]));
-                            }
-                        }
-                    }
-                    // 让用户知道现在按 ↑ / ↓ 是在翻历史而不是在移光标
-                    if self.send_history_nav.is_active() {
-                        ui.separator();
-                        ui.weak(s.history_browsing);
-                    }
-                });
-
-                let enter_to_send = send_has_focus
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-
-                let mut do_send = false;
-                let mut do_clear = false;
-                ui.horizontal(|ui| {
-                    // 「发送」是这一区的主操作 ⇒ 绿；「清空」是普通操作 ⇒ 中性灰。
-                    if crate::button::primary(ui, s.send_title).clicked() {
-                        do_send = true;
-                    }
-                    if crate::button::standard(ui, s.clear_send_button).clicked() {
-                        do_clear = true;
-                    }
-                    if self.repeat_send && !self.connected {
-                        ui.weak(s.repeat_needs_connection);
-                    }
-                });
-                if enter_to_send {
-                    do_send = true;
-                }
-                if do_send {
-                    self.send_data();
-                }
-                if do_clear {
-                    self.send_text.clear();
-                    self.send_history_nav.reset();
-                }
-
-                self.render_send_presets(ui);
-            }
+            self.render_central_column(ui);
         });
     }
 
@@ -1887,10 +1673,300 @@ impl eframe::App for ComTool {
     }
 }
 
+impl ComTool {
+    /// 中央区那一列：实时图表 → 接收区 → 发送区，自上而下。
+    ///
+    /// 从 [`ComTool::ui`] 里抽出来的（项目约定：绘制逻辑要能脱离 `eframe::Frame` 被
+    /// 无头驱动）——`ui()` 需要 `eframe::Frame`，无头测试造不出来，写在里面等于一次
+    /// 也不会被 `cargo test` 画到。抽出来之后，"图表在接收区**之上**"这种纵向顺序
+    /// 才有一个能被真实反驳的判据（见 `tests::chart_sits_above_the_receive_area`）。
+    pub(crate) fn render_central_column(&mut self, ui: &mut egui::Ui) {
+        let s = self.language.strings();
+
+        // 设置 / 信息两个窗口跟着中央区一起绘制（主界面的常驻部分）
+        self.show_settings_window(ui);
+        self.show_info_window(ui);
+
+        self.render_top_toolbar(ui);
+
+        ui.separator();
+
+        // ① 实时图表（2026-09-24 用户要求移到中央区**顶部**）：它原先夹在接收区与
+        //    发送区中间，把同一列切成了三段；放到最上面之后，"看数据"的窗口第一眼
+        //    就能看到，也不会再把接收区与发送区从中间截断。
+        self.render_chart_panel(ui);
+
+        if self.show_chart_panel && self.show_receive_panel {
+            ui.separator();
+        }
+
+        if self.show_receive_panel {
+            // 接收设置：文本/HEX 用 checkbox 表达（底层互斥，因为收到数据只能按一种格式解析）
+            let mut show_hex = self.hex_view;
+            let mut show_text = !self.hex_view;
+            // 「字节查看」与「HEX 接收」也互斥（见 `resolve_display_mode`）。这里必须
+            // 分别记下"哪个是刚被勾上的"，交给那一个函数统一裁决，而不是就地写
+            // `if hex { ascii = false; }`——规则两处各写一遍，迟早有一处忘了改。
+            let mut hex_just_enabled = false;
+            let mut ascii_just_enabled = false;
+            let mut color_just_enabled = false;
+            ui.horizontal(|ui| {
+                ui.label(s.receive_settings);
+                if ui.checkbox(&mut show_hex, s.hex).changed() && show_hex {
+                    show_text = false; // 勾 HEX → 取消文本
+                    hex_just_enabled = true;
+                }
+                if ui.checkbox(&mut show_text, s.text).changed() && show_text {
+                    show_hex = false; // 勾文本 → 取消 HEX
+                }
+                ui.horizontal(|ui| {
+                    // 「颜色」同样要交给互斥裁决：它与「字节查看」同时勾上时接收区会
+                    // 一片空白（两者写的不是同一份镜像）。这里只报"刚被勾上"，
+                    // 规则由 `resolve_display_mode` 唯一裁决。
+                    let mut color_view = self.color_view;
+                    if ui.checkbox(&mut color_view, s.color).changed() && color_view {
+                        color_just_enabled = true;
+                    }
+                    self.color_view = color_view;
+                    if ui.checkbox(&mut self.ascii_view, s.byte_view).changed() && self.ascii_view {
+                        ascii_just_enabled = true;
+                    }
+                });
+            });
+            self.hex_view = show_hex; // 文本 = !hex_view；两个都取消时退回文本
+            self.resolve_display_mode(hex_just_enabled, ascii_just_enabled, color_just_enabled);
+
+            // 接收区：画哪一份镜像由 [`ComTool::display_mode`] 决定——与上面写镜像的
+            // 判定是同一个，所以不存在"写了一份、画另一份"的空视图。分发本身抽在
+            // `receive::ComTool::render_receive_area` 里，那条路有自动化测试。
+            self.render_receive_area(ui);
+        }
+
+        // 中央区里这几块是纵向堆叠的，分隔线只在"上面有东西、下面也有东西"
+        // 时才有意义。
+        if self.show_receive_panel && self.show_send_panel {
+            ui.separator();
+        }
+
+        if self.show_send_panel {
+            // 发送区
+            self.render_send_settings_row(ui);
+
+            let send_edit_id = egui::Id::new("send_input");
+
+            // 焦点与箭头键都必须在绘制 `TextEdit` **之前**读：TextEdit 会消费
+            // 导航键事件，等它画完再读 `key_pressed` 有可能已经拿不到了。
+            let had_focus = ui.ctx().memory(|m| m.has_focus(send_edit_id));
+            let (up_pressed, down_pressed) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp) && !i.modifiers.shift,
+                    i.key_pressed(egui::Key::ArrowDown) && !i.modifiers.shift,
+                )
+            });
+
+            let out = egui::TextEdit::multiline(&mut self.send_text)
+                .id(send_edit_id)
+                .desired_width(f32::INFINITY)
+                .desired_rows(4)
+                // 字号跟随全局字体档位：写死 14.0 的话，用户把字体调大后
+                // 发送框仍是小字，与接收区不一致（两者都是等宽内容，本该同号）。
+                .font(crate::receive::monospace_font_id(
+                    ui,
+                    crate::receive::RECEIVE_MONOSPACE_BASE_SIZE,
+                ))
+                .return_key(egui::KeyboardShortcut::new(
+                    egui::Modifiers::SHIFT,
+                    egui::Key::Enter,
+                ))
+                .show(ui);
+            let send_has_focus = out.response.response.has_focus();
+
+            // 用**上一帧**的光标位置判断首行 / 末行：本帧的位置可能已经被 ↑ 自己
+            // 挪走，用它判断会让"在第二行按 ↑"当场变成"取历史"。
+            let cursor = self.send_cursor_index.unwrap_or(0);
+            let mut recalled = false;
+            if had_focus {
+                let next = if up_pressed && on_first_line(&self.send_text, cursor) {
+                    // 注意 `send_history_nav` 与 `send_history` / `send_text` 是三个
+                    // 互不重叠的字段，借用检查器允许这样同时借。
+                    self.send_history_nav
+                        .older(&self.send_history, &self.send_text)
+                } else if down_pressed && on_last_line(&self.send_text, cursor) {
+                    self.send_history_nav.newer(&self.send_history)
+                } else {
+                    None
+                };
+
+                if let Some(text) = next {
+                    self.send_text = text;
+                    recalled = true;
+                    // 光标移到末尾：否则下一次 ↑ 会因为光标还停在旧位置而重复命中
+                    // 同一条历史（shell 里的 ↑ 也是这个行为）。
+                    let mut state = out.state.clone();
+                    let end = egui::text::CCursor::new(self.send_text.chars().count());
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                    state.store(ui.ctx(), send_edit_id);
+                }
+            }
+
+            // 用户自己改了内容 → 退出浏览态，否则下一次 ↑ 会接着半截历史往下走。
+            // `recalled` 那一帧例外：本次改动是我们自己写进去的。
+            if out.response.response.changed() && !recalled {
+                self.send_history_nav.reset();
+            }
+
+            // 记录本帧光标位置供下一帧使用；刚取过历史就按"光标已到末尾"记，
+            // 免得下一帧拿一个越界下标去判断。
+            // `CCursor::index` 是 `CharIndex` 这个 newtype（不是裸 usize），
+            // 取 `.0` 拿字符下标；`send.rs` 里的首行/末行判定也是按字符算的。
+            self.send_cursor_index = if recalled {
+                Some(self.send_text.chars().count())
+            } else {
+                out.cursor_range.map(|r| r.primary.index.0)
+            };
+
+            // 实时校验：HEX 写错了要当场看见，而不是点了发送才发现。
+            // 超长输入跳过——发送框里正常不会有这么大的文本，而每帧解析一遍
+            // 几十 KB 的十六进制字符串是白费。
+            // 全部挤在同一行里：这一行的高度固定，浏览历史时不会让下面的按钮跳位。
+            const PREVIEW_MAX_LEN: usize = 16 * 1024;
+            ui.horizontal(|ui| {
+                if self.send_text.len() > PREVIEW_MAX_LEN {
+                    ui.weak(s.preview_too_long);
+                } else {
+                    match build_payload(
+                        &self.send_text,
+                        self.send_format,
+                        self.send_line_ending,
+                        self.text_encoding,
+                    ) {
+                        Ok(payload) => {
+                            ui.weak(fill(s.will_send_bytes, &[&payload.bytes.len()]));
+                            if payload.had_unmappable {
+                                let color = ui.visuals().error_fg_color;
+                                ui.colored_label(
+                                    color,
+                                    fill(s.unmappable_in_encoding, &[&self.text_encoding.label()]),
+                                );
+                            }
+                        }
+                        Err(reason) => {
+                            let error_color = ui.visuals().error_fg_color;
+                            ui.colored_label(error_color, fill(s.hex_parse_failed, &[&reason]));
+                        }
+                    }
+                }
+                // 让用户知道现在按 ↑ / ↓ 是在翻历史而不是在移光标
+                if self.send_history_nav.is_active() {
+                    ui.separator();
+                    ui.weak(s.history_browsing);
+                }
+            });
+
+            let enter_to_send = send_has_focus
+                && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+
+            let mut do_send = false;
+            let mut do_clear = false;
+            ui.horizontal(|ui| {
+                // 「发送」是这一区的主操作 ⇒ 绿；「清空」是普通操作 ⇒ 中性灰。
+                if crate::button::primary(ui, s.send_title).clicked() {
+                    do_send = true;
+                }
+                if crate::button::standard(ui, s.clear_send_button).clicked() {
+                    do_clear = true;
+                }
+                if self.repeat_send && !self.connected {
+                    ui.weak(s.repeat_needs_connection);
+                }
+            });
+            if enter_to_send {
+                do_send = true;
+            }
+            if do_send {
+                self.send_data();
+            }
+            if do_clear {
+                self.send_text.clear();
+                self.send_history_nav.reset();
+            }
+
+            self.render_send_presets(ui);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::communicationtrait::fake::{FakeChannel, FakeHandle};
+
+    /// 实时图表画在中央区的**顶部**，排在接收区之上（2026-09-24 用户要求）。
+    ///
+    /// ⚠️ 判据是**位置先后**，不是"文字存在"：断言"画出的文字里有「实时图表」"是空转的
+    /// ——把它挪回底部照样通过。这里比的是两块各自落笔文字的 y 坐标：图表的页眉必须比
+    /// 接收区的内容高。
+    ///
+    /// ⚠️ 驱动的是 `render_central_column` 而不是 `eframe::App::ui`——后者需要一个无头
+    /// 环境构造不出的 `eframe::Frame`。这也正是把它抽出来的理由。
+    #[test]
+    fn chart_sits_above_the_receive_area() {
+        /// 接收区里独有的标记串，用来定位它落在哪一行。
+        const MARKER: &str = "RX-MARKER-8f3a";
+
+        let mut app = ComTool {
+            show_chart_panel: true,
+            show_receive_panel: true,
+            show_send_panel: true,
+            ..ComTool::default()
+        };
+        app.receive_text.push_str(MARKER);
+        app.chart.push_bytes(b"1,2\n", app.chart_max_samples);
+
+        // `Language::strings()` 给的是 `&'static`，所以下面闭包对 `app` 的可变借用不受影响。
+        let header = app.language.strings().chart_panel_label;
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                app.render_central_column(ui);
+            });
+        });
+
+        let mut texts: Vec<(String, f32)> = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                texts.push((t.galley.text().to_owned(), t.pos.y));
+            }
+        }
+        // 不清理纹理会 panic（与断言无关的清理问题，不是缺陷）。
+        out.textures_delta.clear();
+
+        let y_of = |needle: &str| -> f32 {
+            texts
+                .iter()
+                .find(|(text, _)| text == needle)
+                .map(|(_, y)| *y)
+                .unwrap_or_else(|| panic!("这一帧里没画出文字 {needle:?}——实际画出的有：{texts:?}"))
+        };
+
+        let header_y = y_of(header);
+        let marker_y = y_of(MARKER);
+        assert!(
+            header_y < marker_y,
+            "图表页眉落在 y={header_y:.1}，接收区内容落在 y={marker_y:.1}——\
+             图表不在接收区之上，它被挪回下面了？"
+        );
+    }
 
     /// 一台"已连接、通道是替身"的应用。
     ///
