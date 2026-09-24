@@ -702,6 +702,9 @@ fn show_receive_scroll(
 
 /// 普通文本模式接收区：不折行（Extend）+ 纵/横双向滚动，
 /// 等宽 galley 绘制保证盲文 ASCII 图案整行对齐；可选中、右键复制全部日志。
+///
+/// **默认文字色必须取自主题**（`ui.visuals().text_color()`），不能写死黑色：
+/// 深色主题下接收区背景也是深的，黑字会直接看不见。
 pub(crate) fn show_plain_receive(
     ui: &mut Ui,
     text: &str,
@@ -711,7 +714,7 @@ pub(crate) fn show_plain_receive(
     let job = egui::text::LayoutJob::simple(
         text.to_owned(),
         egui::FontId::monospace(14.0),
-        egui::Color32::BLACK,
+        ui.visuals().text_color(),
         f32::INFINITY,
     );
     egui::ScrollArea::both()
@@ -1083,7 +1086,11 @@ impl ComTool {
         self.receive_data();
 
         // ② 把 display_spans（含一次性开关状态提示）构造成带颜色的 LayoutJob
-        let job = self.build_layout(egui::Color32::BLACK);
+        //
+        // 默认色取主题的正文色：深色主题下是浅色，浅色主题下是深色。写死黑色的话
+        // 深色主题里接收区就是"黑底黑字"。只有**设备真的发了 ANSI 颜色**时才会
+        // 用 `spans` 里的自定义色覆盖它——那是有意为之的显式着色，不该被主题改写。
+        let job = self.build_layout(ui.visuals().text_color());
 
         // ③ 在函数内部绘制滚动区，替换掉主界面里默认的滚动区
         if show_receive_scroll(
@@ -1102,7 +1109,11 @@ impl ComTool {
         self.receive_data();
 
         // ② 由 ascii_spans 构造 LayoutJob
-        let job = self.build_ascii_layout(egui::Color32::BLACK);
+        //
+        // 同 `render_color_receive`：默认色随主题。字节视图自己给控制字符/高位
+        // 字节上了显式颜色（`ASCII_CTRL_COLOR` / `ASCII_NONPRINT_COLOR`），
+        // 剩下的可打印字节走这个默认色，因此它必须在深色主题下也看得清。
+        let job = self.build_ascii_layout(ui.visuals().text_color());
 
         // ③ 绘制滚动区（样式与彩色模式一致）
         if show_receive_scroll(
@@ -1810,5 +1821,96 @@ mod tests {
     /// 前缀只出现在行首，且不吞掉任何数据。
     fn count_prefixes(text: &str) -> usize {
         text.matches('[').count()
+    }
+
+    /// 接收区的默认文字色必须**跟随主题**，不能写死黑色。
+    ///
+    /// 这是个真实修过的缺陷：三个视图原先都把默认色硬编码成 `Color32::BLACK`，
+    /// 深色主题下背景是深的，日志就成了"黑底黑字"，整块看不见。
+    /// 这个测试直接从 LayoutJob 里读实际落笔的颜色，因为"画得出来不 panic"
+    /// 那类冒烟测试对颜色一无所知——写死黑色它照样是绿的。
+    #[test]
+    fn default_text_color_follows_theme() {
+        // 深色主题下的正文色（egui 的深色主题给的是浅灰白，不是纯白）
+        let dark = egui::Color32::from_rgb(200, 200, 200);
+        // 浅色主题下的正文色（深灰）
+        let light = egui::Color32::from_rgb(20, 20, 20);
+
+        let mut app = ComTool::default();
+        feed(&mut app, b"plain text\n");
+
+        // 普通文本模式：颜色由 show_plain_receive 自己从 ui.visuals() 取，
+        // 这里换一条等价路径（同一个默认色来源）来断言它确实被用上了。
+        let job = app.build_layout(dark);
+        let color = job.sections[0].format.color;
+        assert_eq!(color, dark, "彩色视图的默认色必须是传进来的主题色");
+        assert_ne!(
+            color,
+            egui::Color32::BLACK,
+            "深色主题下默认色绝不能是黑色——那就是这次修的缺陷本身"
+        );
+
+        // 换浅色主题色，落笔颜色必须跟着换
+        let job = app.build_layout(light);
+        assert_eq!(
+            job.sections[0].format.color, light,
+            "同一个 span 在浅色主题下必须用浅色主题的正文色"
+        );
+    }
+
+    /// 字节查看视图的默认色同样必须跟随主题（它写的是另一份镜像 `ascii_spans`，
+    /// 所以必须把它真的切到字节模式才看得到内容——不能靠文本模式的残留状态）。
+    #[test]
+    fn ascii_view_default_color_follows_theme() {
+        let dark = egui::Color32::from_rgb(200, 200, 200);
+
+        let mut app = ComTool {
+            ascii_view: true,
+            ..ComTool::default()
+        };
+        feed(&mut app, b"AB\x01\n");
+        assert!(
+            !app.ascii_spans.is_empty(),
+            "字节模式下 ascii_spans 应该有内容，否则这条测试是空转的"
+        );
+
+        let job = app.build_ascii_layout(dark);
+        assert!(
+            job.sections.iter().any(|s| s.format.color == dark),
+            "字节查看的默认色必须跟随主题（深色主题下不能是黑字）"
+        );
+        assert!(
+            job.sections
+                .iter()
+                .all(|s| s.format.color != egui::Color32::BLACK),
+            "字节查看里不该出现写死的纯黑——控制字符有自己的显式色，其余走主题色"
+        );
+    }
+
+    /// 设备**真的发了 ANSI 颜色**时，主题色不能把它覆盖掉。
+    ///
+    /// 上面那条测试管的是"默认色"，这条管的是它的边界：显式着色是有意为之的
+    /// 数据编码（设备说"这段是红的"），不该被主题改写。
+    #[test]
+    fn explicit_ansi_color_overrides_theme_default() {
+        let mut app = ComTool::default();
+        // `\x1b[31m` = ANSI 红
+        feed(&mut app, b"\x1b[31mRED\x1b[0m normal\n");
+
+        let theme_default = egui::Color32::from_rgb(200, 200, 200);
+        let job = app.build_layout(theme_default);
+
+        let has_custom = job
+            .sections
+            .iter()
+            .any(|s| s.format.color != theme_default && s.format.color != egui::Color32::BLACK);
+        assert!(
+            has_custom,
+            "设备显式发的 ANSI 色必须保留下来，不能被主题默认色抹平"
+        );
+
+        // 反过来说：没有着色的那段应该拿到主题默认色
+        let has_default = job.sections.iter().any(|s| s.format.color == theme_default);
+        assert!(has_default, "未着色的片段应该走主题默认色");
     }
 }

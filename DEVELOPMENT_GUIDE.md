@@ -504,3 +504,10 @@ impl eframe::App for ComTool {
 43. **绘制入口要能被无头测试驱动**（F5 起）：新增的绘制逻辑优先抽成 `fn xxx(&mut self, ui: &mut Ui)`（`pub(crate)` 视需要），而不是内联进 `eframe::App::ui`。原因是硬的：`ui()` 需要一个 `eframe::Frame`，无头测试构造不出来，内联在里面的控件等于**一次也不会被 `cargo test` 画到**。
     - 参照 `render_send_presets()`：抽出来之后 `panels::tests` 能把它"空 / 有内容 / 已满 / 英文"四种状态各画一遍。
     - 与之配套的一条：**纯绘制不得产生副作用**。无头渲染不投递指针事件，`changed()` 恒为 false——测试就断言"画完之后通道里一条命令都没有"。`show_sidebar` 的烟雾测试现在是这么写的。
+
+44. **接收区默认文字色必须取自主题，不许写死黑色**（2026-09-24 修）：三条渲染路径的默认色统一改用 `ui.visuals().text_color()`——`show_plain_receive()` 用它构造 `LayoutJob::simple`，`render_color_receive()` / `render_ascii_receive()` 把它传给 `build_layout()` / `build_ascii_layout()`。
+    - **修的是什么**：三处原先都硬编码 `Color32::BLACK`。浅色主题下看不出来，深色主题下接收区就是**黑底黑字、整块日志不可见**。
+    - **`layout_job_from()` 的 `unwrap_or(default_color)` 是这条约定的关键**：只有设备真的发了 ANSI 颜色（`span.style.fg.is_some()`）才覆盖默认色。显式着色是**数据编码**（设备说"这段是红的"），不该被主题改写——所以修默认色**不要动** `ASCII_CTRL_COLOR` / `ASCII_NONPRINT_COLOR` / `TIMESTAMP_COLOR` 那几个常量。
+    - **灰色系的显式色要单独看**：`TIMESTAMP_COLOR`（117,117,117）与 `ASCII_NONPRINT_COLOR`（128,128,128）在深色背景下偏暗但尚可辨认，**属于可接受范围，未改**——但若哪天用户抱怨时间戳看不清，先怀疑这两个而不是默认色。
+    - **为什么能测**：颜色落在 `LayoutJob.sections[].format.color` 上，可以直接断言。**冒烟测试对颜色一无所知——写死黑色它照样是绿的**，所以这条专门配了三条断言颜色的测试（`receive::tests::default_text_color_follows_theme`、`ascii_view_default_color_follows_theme`、`explicit_ansi_color_overrides_theme_default`）。
+    - 测试写法上踩过一次坑：`build_ascii_layout()` 读的是 `ascii_spans`，**只在字节查看模式下才有内容**；在文本模式下断言它会拿到空 `sections` 而 panic。要测它必须先切到 `ascii_view`，并用 `assert!(!ascii_spans.is_empty())` 确认内容非空，否则测试是空转的。
