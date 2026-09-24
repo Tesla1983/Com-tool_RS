@@ -139,16 +139,15 @@ impl ComTool {
         });
         ui.horizontal(|ui| {
             ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.language_label));
-            // 「中文」/「English」两档**各自写自己的名字**，不随界面语言变：
-            // 界面已经切成英文时，找中文那一档的人要认得出"中文"两个字。
+            // 每一档**写自己的名字**（自名 / endonym），不随界面语言变：
+            // 界面已经切成英文时，只想切回中文的人要认得出"中文"那一档。
+            // 档位清单只从 `Language::ALL` 取（顺序即表列顺序），这里不再手写。
             egui::ComboBox::from_id_salt("language")
-                .selected_text(match self.language {
-                    Language::Zh => "中文",
-                    Language::En => "English",
-                })
+                .selected_text(self.language.endonym())
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.language, Language::Zh, "中文");
-                    ui.selectable_value(&mut self.language, Language::En, "English");
+                    for language in Language::ALL {
+                        ui.selectable_value(&mut self.language, *language, language.endonym());
+                    }
                 });
         });
         ui.weak(s.language_applies_immediately);

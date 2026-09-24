@@ -29,56 +29,63 @@ pub const APP_TITLE: &str = "ComTool-RS";
 
 /// 配置 egui 字体回退链。
 ///
-/// Monospace 族：Hack（真等宽，ASCII 图案逐列对齐）→ 中文字体（汉字）→ Segoe UI Symbol（盲文点阵 ⣿⠿⠀，U+2800 区）
-/// Proportional 族：中文字体（保持界面原观感）→ Segoe UI Symbol
+/// Monospace 族：Hack（真等宽，ASCII 图案逐列对齐）→ 中文字体（汉字）→ 拉丁扩展字体（
+/// 越南语带调字母、泰文）→ 韩文字体 → Segoe UI Symbol（盲文点阵 ⣿⠿⠀，U+2800 区）
+/// Proportional 族：中文字体（保持界面原观感）→ 同上各补充字体 → Segoe UI Symbol
+///
+/// 挂载顺序即回退优先级：**先命中的字体出字形**。中文字体排在前，是因为界面默认中文；
+/// 拉丁扩展字体（tahoma）排在其后，只为补微软雅黑缺失的越南语/泰文字符，不会抢中文的字
+/// （雅黑已含全部汉字，前一步就命中了）。
 ///
 /// 任一系统字体缺失时自动跳过，不崩溃。
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
-    // 中文字体（微软雅黑优先，失败则试其它常见路径）
-    let chinese_paths = [
-        r"C:\Windows\Fonts\msyh.ttc",
-        r"C:\Windows\Fonts\msyhbd.ttc",
-        r"C:\Windows\Fonts\simsun.ttc",
-        r"C:\Windows\Fonts\simhei.ttf",
-    ];
-    if let Some(data) = chinese_paths.iter().find_map(|p| std::fs::read(p).ok()) {
-        fonts
-            .font_data
-            .insert("chinese".into(), FontData::from_owned(data).into());
-        fonts
-            .families
-            .entry(FontFamily::Proportional)
-            .or_default()
-            .push("chinese".into());
-        // 注意：Monospace 族把中文字体放在 Hack 之后，保证 ASCII/空格用真等宽字形
-        fonts
-            .families
-            .entry(FontFamily::Monospace)
-            .or_default()
-            .push("chinese".into());
-    }
+    // 往 Proportional 与 Monospace 两个族的回退链**末尾**各追加一个字体。
+    //
+    // 抽成闭包是因为下面有四个字体要挂，逐个写两遍 family 太啰嗦，也容易漏一个族
+    // （曾踩过：只挂 Proportional 忘了 Monospace，结果接收区的越南语仍是方框）。
+    let push = |fonts: &mut FontDefinitions, name: &str, paths: &[&str]| {
+        if let Some(data) = paths.iter().find_map(|p| std::fs::read(p).ok()) {
+            fonts
+                .font_data
+                .insert(name.to_owned(), FontData::from_owned(data).into());
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts.families.entry(family).or_default().push(name.into());
+            }
+        }
+    };
 
-    // 盲文点阵回退：微软雅黑与 Hack 均不含 U+2800-28FF，缺字形会显示 □
-    let symbol_paths = [
-        r"C:\Windows\Fonts\seguisym.ttf", // Segoe UI Symbol（完整覆盖 Braille Patterns）
-    ];
-    if let Some(data) = symbol_paths.iter().find_map(|p| std::fs::read(p).ok()) {
-        fonts
-            .font_data
-            .insert("symbol".into(), FontData::from_owned(data).into());
-        fonts
-            .families
-            .entry(FontFamily::Proportional)
-            .or_default()
-            .push("symbol".into());
-        fonts
-            .families
-            .entry(FontFamily::Monospace)
-            .or_default()
-            .push("symbol".into());
-    }
+    // 中文字体（微软雅黑优先，失败则试其它常见路径）。
+    // 注意：Monospace 族里它排在 Hack 之后，保证 ASCII/空格用真等宽字形。
+    push(
+        &mut fonts,
+        "chinese",
+        &[
+            r"C:\Windows\Fonts\msyh.ttc",
+            r"C:\Windows\Fonts\msyhbd.ttc",
+            r"C:\Windows\Fonts\simsun.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
+        ],
+    );
+
+    // 拉丁扩展 / 泰文字体（Tahoma）。
+    //
+    // 为什么需要它：微软雅黑**缺**越南语那 49 个带双变音调的预组合字符
+    // （ề ố ộ ờ ơ ư 等，U+1EA0–U+1EF9 区），也缺**全部**泰文字符。
+    // 实测 `tahoma.ttf` 对越南语全字母表与泰文全字符集**均为 0 缺失**，
+    // 是同时解决这两种语言的单一字体。缺它时越南语界面会"大部分正常、个别词变方框"，
+    // 比整片方框更隐蔽，所以这条挂载是必需项而非可选优化。
+    push(&mut fonts, "latin_ext", &[r"C:\Windows\Fonts\tahoma.ttf"]);
+
+    // 韩文字体（Malgun Gothic）。
+    //
+    // 微软雅黑、宋体、黑体、Segoe UI Symbol **都不含谚文**，缺它则韩语界面整片方框。
+    // `malgun.ttf` 是 Windows 自带的韩文字体，实测覆盖谚文全字符集。
+    push(&mut fonts, "korean", &[r"C:\Windows\Fonts\malgun.ttf"]);
+
+    // 盲文点阵回退：微软雅黑与 Hack 均不含 U+2800-28FF，缺字形会显示 □。
+    push(&mut fonts, "symbol", &[r"C:\Windows\Fonts\seguisym.ttf"]);
 
     // 注意：这里**没有**彩色 emoji 字体档。状态栏的圆点已经改成用 `Color32` 画的
     // 实心圆（见 `status_bar.rs` 的模块文档），不再依赖任何 emoji 字形——早先挂

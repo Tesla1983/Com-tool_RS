@@ -35,10 +35,92 @@ use std::time::{Duration, Instant};
 ///
 /// 它只决定一件事：`Language::strings()` 取哪张文案表（见 [`crate::strings`]）。
 /// 枚举本身不持有任何文案，所以加一种语言 = 在 `strings.rs` 的宏里加一列。
+///
+/// # 顺序即"表列顺序"
+///
+/// [`Language::ALL`] 的顺序**必须与 `strings.rs` 里 `langs:` 声明的列顺序一致**
+/// ——`Language::strings()` 按下标把枚举映射到表。两处顺序错位会让界面显示另一种
+/// 语言，所以 `strings::tests::langs_table_matches_language_order` 把它们钉在一起。
+///
+/// # 序列化兼容
+///
+/// `#[derive(Serialize, Deserialize)]` 用的是**变体名**，所以新语言只能**追加**到
+/// 末尾，不能插到 `Zh` / `En` 中间——否则既有存档里的 `"En"` 会读到错误的变体。
+/// （`Zh` / `En` 必须保持在前两位。）
 #[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Language {
+    /// 简体中文（默认）。
     Zh,
+    /// English。**保持在第二位**：既有存档里的 `"En"` 依赖这个位置。
     En,
+    // ── 第一批（风险最低，见 I18N_TARGET_LANGUAGES.md §0）──
+    /// 繁体中文。
+    ZhHant,
+    /// 日本語。
+    Ja,
+    /// Español.
+    Es,
+    /// Italiano.
+    It,
+    /// Português.
+    Pt,
+    /// Bahasa Indonesia.
+    Id,
+    // ── 第二批 ──
+    /// Français.
+    Fr,
+    /// Deutsch.
+    De,
+    /// 한국어（韩语）。
+    Ko,
+    /// Tiếng Việt（越南语）。
+    Vi,
+}
+
+impl Language {
+    /// 全部语言，顺序 = 文案表的列顺序 = 设置窗口下拉里的顺序。
+    ///
+    /// 下拉框与守卫测试都从这里取，不再各处手写一遍（早先设置窗口是手写两行的，
+    /// 加语言时容易漏）。
+    pub const ALL: &'static [Language] = &[
+        Self::Zh,
+        Self::En,
+        Self::ZhHant,
+        Self::Ja,
+        Self::Es,
+        Self::It,
+        Self::Pt,
+        Self::Id,
+        Self::Fr,
+        Self::De,
+        Self::Ko,
+        Self::Vi,
+    ];
+
+    /// 语言在设置窗口下拉里**显示的名字**（自名，endonym）。
+    ///
+    /// 用**该语言自己的写法**而不是当前界面语言：界面已经切成英文时，只想切回中文的人
+    /// 要能认出"中文"那一档。这与 `strings.rs` 里 `ui_sources_do_not_hardcode_chinese`
+    /// 的白名单是一回事——那些自名字符串是**唯一**允许硬编码在 UI 源码里的非 ASCII。
+    ///
+    /// 这些自名**同时是字体覆盖的证人**：日本语/한국어/Tiếng Việt 里的假名、谚文、
+    /// 越南语带调字母必须在字体链里有字形，否则下拉框自己就先变成方框。
+    pub const fn endonym(self) -> &'static str {
+        match self {
+            Self::Zh => "中文（简体）",
+            Self::En => "English",
+            Self::ZhHant => "中文（繁體）",
+            Self::Ja => "日本語",
+            Self::Es => "Español",
+            Self::It => "Italiano",
+            Self::Pt => "Português",
+            Self::Id => "Bahasa Indonesia",
+            Self::Fr => "Français",
+            Self::De => "Deutsch",
+            Self::Ko => "한국어",
+            Self::Vi => "Tiếng Việt",
+        }
+    }
 }
 
 /// 连接类型（F4 起）。
