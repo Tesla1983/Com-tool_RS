@@ -124,7 +124,7 @@ fn normalize_panel_visibility(app: &mut ComTool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{ConnectionKind, Language, ThemeChoice};
+    use crate::app::{ConnectionKind, Language, ThemeChoice, UiFontScale};
     use crate::receive::{AnsiStyle, ColoredSpan, TextEncoding, TimestampPrefix};
     use crate::send::{SendFormat, SendHistory, SendLineEnding, SendPresets};
     // 调用 `get_string`/`set_string` 需要 trait 本身在作用域内
@@ -189,6 +189,9 @@ mod tests {
             language: Language::En,
             last_opened_port: Some("COM42".to_string()),
             theme: ThemeChoice::Dark,
+            // 字体档位挑**非默认**的一档（默认是 `Normal`）：否则"字段根本没写进存档"
+            // 会被默认值掩盖成"往返成功"。
+            ui_font_scale: UiFontScale::ExtraLarge,
             auto_scroll: false,
             max_log_chars: 4_096,
             repaint_interval_ms: 40,
@@ -260,6 +263,10 @@ mod tests {
         assert_eq!(restored.last_opened_port, original.last_opened_port);
         // P2/P3 新增的偏好字段同样要能往返
         assert_eq!(restored.theme, original.theme);
+        assert_eq!(
+            restored.ui_font_scale, original.ui_font_scale,
+            "字体档位是用户偏好，必须跟着存档走——否则每次重启字体都会跳回标准档"
+        );
         assert_eq!(restored.auto_scroll, original.auto_scroll);
         assert_eq!(restored.max_log_chars, original.max_log_chars);
         assert_eq!(restored.repaint_interval_ms, original.repaint_interval_ms);
@@ -378,6 +385,12 @@ mod tests {
             !restored.baud_custom,
             "旧存档没有这个字段，必须落到「非自定义档」——否则一个 4800 会被\
              显示成「自定义」，而它明明就在下拉列表里"
+        );
+        assert_eq!(
+            restored.ui_font_scale,
+            UiFontScale::Normal,
+            "旧存档没有字体档位字段，必须落到「标准」——也就是和加这个功能之前\
+             一模一样，不能让老用户一升级就发现界面字号变了"
         );
     }
 

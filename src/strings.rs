@@ -259,6 +259,18 @@ strings! {
     language_applies_immediately:
         "切换语言立即生效，不需要重启",
         "Switching language takes effect immediately, no restart needed";
+    font_scale_label: "字体大小", "Font size";
+    font_scale_small: "小", "Small";
+    font_scale_normal: "标准", "Normal";
+    font_scale_large: "大", "Large";
+    font_scale_xlarge: "特大", "Extra large";
+    font_scale_note:
+        "整体缩放界面文字（标题、正文、按钮、等宽一起变），立即生效；接收区与发送框的等宽字号也跟着变。\
+         若调到「特大」后某些标签显得拥挤，属已知情况——它遇到的是界面里固定像素的标签列宽度",
+        "Scales all interface text together (headings, body, buttons, monospace), effective immediately; \
+         the monospace size in the receive area and send box follows too. If some labels look cramped at \
+         \"Extra large\", that is expected — they run into the fixed-pixel label column widths";
+    font_scale_preview: "预览：{}", "Preview: {}";
 
     // —— panels/settings.rs：文本编码 ——
     sec_text_encoding: "文本编码", "Text encoding";
@@ -561,6 +573,7 @@ mod tests {
             (s.chart_count_text, e.chart_count_text, 2),
             (s.next_file_name, e.next_file_name, 1),
             (s.logging_written, e.logging_written, 1),
+            (s.font_scale_preview, e.font_scale_preview, 1),
         ];
 
         for (zh, en, expected) in pinned {

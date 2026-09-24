@@ -526,3 +526,15 @@ impl eframe::App for ComTool {
     - **id 必须显式**（`SCROLL_ID = "settings_scroll"`）：默认 id 由调用栈位置推导，位置一变就等于换了个身份，之前记的滚动位置会神秘丢失；显式 id 也让将来「打开设置时复位到顶部」之类的需求有稳定名字可指。
     - **内容体要抽成 `pub(crate) fn xxx(&mut self, ui: &mut Ui)`**（这里是 `settings_body`）：`show_settings_window` 里套着 `Window::show` 的闭包，无头测试只能连窗口一起画——窗口画得出来不代表内容体本身没问题。抽出来后 `panels::tests::settings_body_renders_inside_a_short_viewport` 能在**很矮的可视区**里单独画它。约定 43 的同一道理。
     - **测"需要滚动"而不是"画得出来"**：只断言"没 panic"等于普通冒烟测试，把滚动区删掉照样绿。egui 在 `ScrollAreaOutput` 上给的判据是文档原文——*"If this [`content_size`] is larger than [`inner_rect`], then there was need for scrolling."* 再加一条"内容真实绘制高度 > 可视高度"（用闭包返回 `ui.min_rect().height()`）作为**防空转**断言。这两条在把内容体换成空壳时会立刻变红（已验证）。
+
+47. **全局字体档位：存"档位"不存"像素"，且每帧从固定基线重算**（2026-09-24 加）：设置窗口新增「字体大小」下拉（`UiFontScale::{Small, Normal, Large, ExtraLarge}`，系数 0.85 / 1.0 / 1.15 / 1.3）。
+    - **存枚举不存像素值**：像素是实现细节，存档里存 `13.0` 这种数字的话，将来换字号基线会让老存档"记住"一个错误的档位；存 `Large` 则语义稳定、显示层随便改。`#[default]` 必须落在 `Normal`（系数 1.0）——既有存档没有这个字段，反序列化要"和加功能之前一模一样"，不能让老用户一升级就发现字号变了（`config::tests::archive_missing_new_fields_still_loads` 末尾那两条断言就是钉这个的）。
+    - **每帧从 `FONT_SIZE_BASELINE` 重算，绝不乘上一帧的值**：写成"在 `style.text_styles[x].size` 上乘系数"的话，`ui()` 每帧调一次就是指数放大，几秒钟字号就能到几万像素、控件全飞出屏幕。固定基线表是**幂等**的唯一写法，也是"标准档等于 egui 默认"这一承诺的唯一真相。
+    - **`all_styles_mut` 而不是 `style_mut_of`**：深浅两份 `Style` 都要改，否则切主题时字号会跳回默认。用 `entry(..).or_default()` 而不是整个覆盖 `text_styles`，是为了让表里没登记的、egui 新增的 `TextStyle` 至少保留上游默认值。注意 `egui::TextStyle` **不是 `Copy`**（有 `Name(String)` 变体），当 BTreeMap 的键要 `.clone()`。
+    - **"全局"的诚实问题**：接收区三条渲染路径 + 发送框原先都硬编码 `FontId::monospace(14.0)`。只改正文样式的话，用户调到"特大"后正文按钮都变大、**日志和发送框纹丝不动**——"全局"就名不副实。解法是 `receive::monospace_font_id(ui, fallback)`：从 `style.text_styles[TextStyle::Monospace]` 取实际字号，档位一改自动跟随，**不需要在每条调用链上多传参数**。发送框同样调它。
+    - **`build_layout` / `build_ascii_layout` 的字体是必填参数**，不要改成 `Option` 加内部兜底：那样渲染路径哪天忘了传也会静默用一个默认字号，档位在这个视图上失效且无人察觉。
+    - **测三条**（都做了"故意改坏→确认变红→还原"的空转验证）：
+      ① `app::tests::font_scale_baseline_matches_egui_defaults` 把 `FONT_SIZE_BASELINE` 与 `egui::Style::default().text_styles` **双向**比对——正向防"上游改默认字号我们没跟"，反向防"egui 默认有的样式我们漏登记"（漏了的那档永不跟随档位）。
+      ② `font_scale_is_idempotent_across_frames` **除了首末相等，还必须断言绝对值**（`基线 × 系数`）。只断言首末相等是**空转的**：实测"先连乘、再被别的赋值盖掉"这种写法末值照样稳定、测试照样绿；加绝对值后立刻抓到（`17.1925` vs 期望 `14.95`）。
+      ③ `panels::tests::font_scale_dropdown_is_wired_to_the_field` 读 `FullOutput.shapes` 里**按落笔顺序**的文字，取「字体大小」标签**紧跟着的下一段**作为下拉选中文案。**不能**改成"整段文字里包含当前档位名"——`font_scale_preview`（「预览：{}」）本来就会写进当前档位名，那样把 `selected_text` 写死也测不出来（实测确实测不出来）。读输出要用 `Context::run_ui` 而不是 `__run_test_ui`（后者 `drop_without_applying_deltas()` 把输出丢了，什么也观察不到），且拿到 `FullOutput` 后要 `textures_delta.clear()`，否则 drop 时会 panic。
+    - **无头环境测不了"点一下"**：不投递指针事件，`changed()` 恒 false。写"模拟点击再断言字段变了"会得到**恒真**的空转测试（事件没送到，字段自然没变，断言永远成立）。只能测"字段 → 显示"这条已接通的连线。

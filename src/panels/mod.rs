@@ -355,4 +355,155 @@ mod tests {
         assert_eq!(app.chart.sample_count(), samples_before);
         assert_eq!(app.chart.channel_count(), channels_before);
     }
+
+    /// 字体档位下拉必须**接在 `ui_font_scale` 字段上**，而不是画一个写死的值。
+    ///
+    /// 这条测试针对的是一种很隐蔽的写错方式：`selected_text(...)` 传了个常量，
+    /// 界面上看起来完全正常，但下拉里显示的档位**从来不是用户选的那一档**。
+    ///
+    /// 断言方式是**按顺序读真实绘制输出**：把绘制出的文字按落笔顺序排成一串，
+    /// 找到「字体大小」这个标签，**紧跟在它后面的那一条**就是下拉的选中文案，
+    /// 它必须恰好等于当前档位名。
+    ///
+    /// ⚠️ 为什么不直接断言"画出的文字里包含当前档位名"——那样**是空转的**。
+    /// `font_scale_preview`（「预览：{}」）本来就会把当前档位名写进去，那正是
+    /// 预览的意思；只要预览行还在，把 `selected_text` 写成什么都不会被抓出来。
+    /// 实测过：把 `selected_text` 写死成标准档，用"包含"断言时测试照样绿；
+    /// 改成"紧跟标签之后的那一条"之后立刻变红。
+    ///
+    /// ⚠️ 无头环境不投递指针事件，所以**不能**用"模拟点一下再断言字段变了"——
+    /// 那会得到一条恒真的空转测试（事件根本没送到，字段自然"没变"，断言永远成立）。
+    /// 这里测的是"字段 → 显示"这条已经接通的连线，它是能被真实反驳的。
+    #[test]
+    fn font_scale_dropdown_is_wired_to_the_field() {
+        use crate::app::UiFontScale;
+
+        // 四档全来一遍（含默认档，覆盖"默认值也能正确显示"）。
+        for scale in UiFontScale::ALL {
+            let mut app = ComTool {
+                ui_font_scale: scale,
+                ..ComTool::default()
+            };
+            // 中英各来一遍：档位名必须来自文案表，不能写死中文。
+            for language in [Language::Zh, Language::En] {
+                app.language = language;
+                let s = app.language.strings();
+
+                let picked = match scale {
+                    UiFontScale::Small => s.font_scale_small,
+                    UiFontScale::Normal => s.font_scale_normal,
+                    UiFontScale::Large => s.font_scale_large,
+                    UiFontScale::ExtraLarge => s.font_scale_xlarge,
+                };
+
+                let shown = selected_font_scale_text(&mut app);
+
+                assert_eq!(
+                    shown, picked,
+                    "字体档位下拉显示的是 {shown:?}，但字段里存的是 {scale:?}\
+                     （应当显示 {picked:?}）——说明 selected_text 没有读取 \
+                     ui_font_scale，或者 selectable_value 接在了局部变量上"
+                );
+
+                // 绘制是只读的：画一遍不得改动字段。
+                assert_eq!(
+                    app.ui_font_scale, scale,
+                    "绘制设置内容体不得改动字体档位字段"
+                );
+            }
+        }
+    }
+
+    /// 取字体档位下拉**选中文案**的实际绘制值。
+    ///
+    /// 做法：按落笔顺序把所有文字抠成 `Vec<String>`，找到「字体大小」标签所在位置，
+    /// 取它**紧跟着的下一段**文字。egui 的绘制顺序与调用顺序一致，而下拉按钮就在
+    /// 标签之后、预览行之前，所以这个位置上的文字就是下拉的选中文案。
+    /// 语言相关的干扰项（预览行）排在更后面，不会落在这个位置上。
+    fn selected_font_scale_text(app: &mut ComTool) -> String {
+        let texts = painted_texts(app);
+
+        // 标签在不同语言下文案不同，所以从当前语言取。
+        let s = app.language.strings();
+        let label = s.font_scale_label;
+        let label_pos = texts.iter().position(|t| t == label).unwrap_or_else(|| {
+            panic!("画出的文字里找不到字体档位的标签 {label:?}——标签本身没画出来？实际：{texts:?}")
+        });
+
+        texts
+            .get(label_pos + 1)
+            .unwrap_or_else(|| {
+                panic!("「{label}」标签后面没有跟任何文字，下拉按钮是空的。实际：{texts:?}")
+            })
+            .clone()
+    }
+
+    /// 把一次绘制里**所有真实落笔的文字**按顺序抠出来。
+    ///
+    /// 走 `Context::run_ui` 拿 `FullOutput.shapes`，而不是 `__run_test_ui`——
+    /// 后者把输出丢掉了（`drop_without_applying_deltas`），什么也观察不到，
+    /// 正是"空转测试"的来源。
+    fn painted_texts(app: &mut ComTool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let s = app.language.strings();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.settings_body(ui, s);
+        });
+
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            // `Shape::Text` 装的是一个 `TextShape`，文字在它的 `galley` 里。
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                texts.push(text_shape.galley.text().to_owned());
+            }
+        }
+
+        // `FullOutput` 带着纹理增量，直接 drop 会 panic（这正是 `__run_test_ui`
+        // 内部要写 `drop_without_applying_deltas()` 的原因）。我们不需要纹理，
+        // 显式丢弃即可——否则这条测试会因为一个与断言无关的清理问题而"红"，
+        // 看起来像抓到了缺陷，其实是假的。
+        out.textures_delta.clear();
+        texts
+    }
+
+    /// 字体档位必须真的作用于**设置窗口自己**，而不只是接收区。
+    ///
+    /// 这条把两半接起来测：界面实际用的字号应当等于当前档位的字号。如果哪天有人把
+    /// `apply_font_scale` 从每帧调用里删掉，或者把它错放到接收区渲染内部，这条会红
+    /// ——而直接调 `apply_font_scale` 的那些单测不会（它们证明不了"它被调用了"）。
+    #[test]
+    fn font_scale_applies_to_the_settings_window_itself() {
+        use crate::app::UiFontScale;
+
+        let mut app = ComTool {
+            ui_font_scale: UiFontScale::ExtraLarge,
+            ..ComTool::default()
+        };
+        let s = app.language.strings();
+
+        let drawn_body_size = std::cell::Cell::new(0.0_f32);
+        egui::__run_test_ui(|ui| {
+            app.apply_font_scale(ui.ctx());
+            drawn_body_size.set(
+                ui.ctx()
+                    .global_style()
+                    .text_styles
+                    .get(&egui::TextStyle::Body)
+                    .expect("Body 样式必须存在")
+                    .size,
+            );
+            app.settings_body(ui, s);
+        });
+
+        let expected = 13.0 * UiFontScale::ExtraLarge.factor();
+        assert_eq!(
+            drawn_body_size.get(),
+            expected,
+            "设置窗口里的正文字号应当是「基线 13 × 特大档系数」= {expected}"
+        );
+        assert!(
+            drawn_body_size.get() > 13.0,
+            "特大档下正文字号必须大于标准档的 13，否则这个功能等于没接上"
+        );
+    }
 }

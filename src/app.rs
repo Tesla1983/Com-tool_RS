@@ -100,6 +100,53 @@ impl From<ThemeChoice> for egui::ThemePreference {
     }
 }
 
+/// 全局 UI 字体大小档位。
+///
+/// **存的是档位、不是像素值**：像素值是实现细节（egui 每个 `TextStyle` 各有自己的
+/// 基准字号，See `default_text_styles()`：Small 9 / Body 13 / Button 13 / Heading 18 /
+/// Monospace 13），档位才是用户能理解、也稳定的东西。改基准字号或改档位含义时，
+/// 存档里的 "Large" 仍然读得出来。
+///
+/// `#[default]` 落在 `Normal`（系数 1.0）：既有存档没有这个字段，反序列化必须
+/// "和以前一模一样"，否则升级一次程序字就变大了。
+///
+/// 换算成系数后统一乘在**每个** `TextStyle` 的 `FontId.size` 上（见
+/// [`ComTool::apply_font_scale`]），所以是"全局"缩放：标题、正文、按钮、等宽一起动，
+/// 不会出现"标题变大了、说明文字还是小字"的错位。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum UiFontScale {
+    /// 小（0.85×）
+    Small,
+    /// 标准（1.0×，与改动前完全一致）
+    #[default]
+    Normal,
+    /// 大（1.15×）
+    Large,
+    /// 特大（1.3×）
+    ExtraLarge,
+}
+
+impl UiFontScale {
+    /// 乘到各 `TextStyle` 基准字号上的系数。
+    ///
+    /// 四档刻意取"对称但不夸张"的步长：`Small` 0.85 与 `Large` 1.15 相对 `Normal`
+    /// 各差 15%，`ExtraLarge` 1.3 是再上一级。为什么不给更大的上限（比如 2.0）：
+    /// 界面里有多处 `add_sized([LABEL_WIDTH, 20.0], ..)` 这类固定像素的标签列与
+    /// 行高，字号放大过头会先撞上这些硬编码高度而挤成一团；真要更大的字，得先把
+    /// 那些尺寸也变成随档位缩放的量，那是另一件事。
+    pub const fn factor(self) -> f32 {
+        match self {
+            Self::Small => 0.85,
+            Self::Normal => 1.0,
+            Self::Large => 1.15,
+            Self::ExtraLarge => 1.3,
+        }
+    }
+
+    /// 全部档位，供设置窗口按固定顺序列出。
+    pub const ALL: [Self; 4] = [Self::Small, Self::Normal, Self::Large, Self::ExtraLarge];
+}
+
 /// 日志长度上限的默认值（字符数），与参考实现的默认档位一致。
 pub const DEFAULT_MAX_LOG_CHARS: usize = 30_000;
 
@@ -313,6 +360,8 @@ pub struct ComTool {
     // —— 界面与接收行为的用户偏好（全部落盘）——
     /// 主题偏好（浅色 / 深色 / 跟随系统）
     pub theme: ThemeChoice,
+    /// 全局 UI 字体大小档位（见 [`UiFontScale`]）
+    pub ui_font_scale: UiFontScale,
     /// 接收区是否自动滚动到最新
     pub auto_scroll: bool,
     /// 日志长度上限（字符数，0 = 不限）；超出后从最旧的内容开始淘汰
@@ -944,7 +993,51 @@ impl ComTool {
             ctx.set_theme(want);
         }
     }
+
+    /// 把全局字体档位下发到 egui。
+    ///
+    /// **为什么每帧都算一遍基准值、而不是"上一帧的 13.0 乘 1.15"**：后者会逐帧连乘，
+    /// 字体指数级膨胀。所以这里每次都从一个**固定基准表**出发，乘上当前系数，
+    /// 与上一帧的值无任何关系——同一档位算一万次，结果恒等（幂等）。
+    ///
+    /// 基准值取自 egui 的 `default_text_styles()`（Small 9 / Body 13 / Button 13 /
+    /// Heading 18 / Monospace 13）。**刻意抄成常量而不是调 `ctx.style()` 去读现有值**：
+    /// 读现有值就把上面的连乘问题带回来了。代价是 egui 若哪天改了默认字号，这里会落后
+    /// ——由 `font_scale_baseline_matches_egui_defaults` 这条测试盯着（它直接调
+    /// `egui::Style::default().text_styles` 比对），一改就红。
+    ///
+    /// 用 `all_styles_mut` 而不是 `style_mut`：前者同时改深色与浅色两套 `Style`
+    /// （egui 内部按主题各存一份）。只改当前主题那一份的话，用户在深色下调好字号、
+    /// 切成浅色就变回去了。
+    pub fn apply_font_scale(&self, ctx: &egui::Context) {
+        let factor = self.ui_font_scale.factor();
+        ctx.all_styles_mut(|style| {
+            for (text_style, base_size) in FONT_SIZE_BASELINE {
+                // `entry` 而不是覆盖整个 `text_styles`：表里若将来多出 egui 新增、
+                // 而我们还没登记的 TextStyle，它至少保留 egui 的默认值而不是消失。
+                //
+                // `clone()`：`TextStyle` 不是 `Copy`（它有 `Name(String)` 变体），
+                // 即使这里只用得上那五个内建变体。
+                style
+                    .text_styles
+                    .entry(text_style.clone())
+                    .or_default()
+                    .size = base_size * factor;
+            }
+        });
+    }
 }
+
+/// 各 `TextStyle` 的**基准字号**（系数为 1.0 时的值）。
+///
+/// 与 egui `default_text_styles()` 一一对应，见 [`ComTool::apply_font_scale`] 的说明。
+const FONT_SIZE_BASELINE: &[(egui::TextStyle, f32)] = &[
+    (egui::TextStyle::Small, 9.0),
+    (egui::TextStyle::Body, 13.0),
+    (egui::TextStyle::Button, 13.0),
+    (egui::TextStyle::Heading, 18.0),
+    (egui::TextStyle::Monospace, 13.0),
+];
 
 impl Default for ComTool {
     fn default() -> Self {
@@ -999,6 +1092,7 @@ impl Default for ComTool {
             ascii_text: String::new(),
             ascii_spans: Vec::new(),
             theme: ThemeChoice::default(),
+            ui_font_scale: UiFontScale::default(),
             auto_scroll: true,
             max_log_chars: DEFAULT_MAX_LOG_CHARS,
             timestamp_prefix: TimestampPrefix::default(),
@@ -1135,6 +1229,10 @@ impl eframe::App for ComTool {
 
         // 主题偏好只在与当前生效值不同时下发一次
         self.apply_theme(ui.ctx());
+
+        // 字体档位每帧重建（幂等，不会连乘）——它没有"便宜的比较"可做：
+        // 要判断"是否已生效"就得遍历所有 TextStyle 逐个比对，跟直接写一遍差不多。
+        self.apply_font_scale(ui.ctx());
 
         // 不断刷新 GUI；间隔可配，越界值（手改存档）在这里夹回合法区间
         let repaint_ms = self.repaint_interval_ms.clamp(16, 1000);
@@ -1300,7 +1398,12 @@ impl eframe::App for ComTool {
                     .id(send_edit_id)
                     .desired_width(f32::INFINITY)
                     .desired_rows(4)
-                    .font(egui::FontId::monospace(14.0))
+                    // 字号跟随全局字体档位：写死 14.0 的话，用户把字体调大后
+                    // 发送框仍是小字，与接收区不一致（两者都是等宽内容，本该同号）。
+                    .font(crate::receive::monospace_font_id(
+                        ui,
+                        crate::receive::RECEIVE_MONOSPACE_BASE_SIZE,
+                    ))
                     .return_key(egui::KeyboardShortcut::new(
                         egui::Modifiers::SHIFT,
                         egui::Key::Enter,
@@ -2198,5 +2301,136 @@ mod tests {
             app.selected_port, "NOT_A_REAL_PORT",
             "手动刷新要修掉失效的选择，否则点「打开串口」只会失败"
         );
+    }
+
+    // ——— 全局字体档位 ———
+
+    /// 从 context 里把某一档文字样式的实际字号读出来。
+    ///
+    /// 用 `global_style()`（"当前生效的那份"）而不是 `style_of(Theme::Dark)`：
+    /// `apply_font_scale` 走的是 `all_styles_mut`，深浅两份都改了，读哪份都一样。
+    /// 读"当前生效的那份"才是用户真正看到的那份。
+    fn body_size(ctx: &egui::Context) -> f32 {
+        ctx.global_style()
+            .text_styles
+            .get(&egui::TextStyle::Body)
+            .expect("Body 样式必须存在")
+            .size
+    }
+
+    /// 档位必须真的改变字号，而不是"存了个字段但没人用"。
+    ///
+    /// 断言的是**相对关系**而不是具体像素值：像素值是实现细节，将来换字号基线
+    /// 不该让这条测试红。真正要钉死的是"大 > 标准 > 小"这个单调性，以及
+    /// `Normal` 恰好等于 egui 的默认字号（那是"升级后界面不变"的承诺）。
+    #[test]
+    fn font_scale_changes_text_sizes() {
+        let ctx = egui::Context::default();
+        let mut app = ComTool {
+            ui_font_scale: UiFontScale::Normal,
+            ..ComTool::default()
+        };
+
+        app.apply_font_scale(&ctx);
+        let normal = body_size(&ctx);
+
+        app.ui_font_scale = UiFontScale::Small;
+        app.apply_font_scale(&ctx);
+        let small = body_size(&ctx);
+
+        app.ui_font_scale = UiFontScale::ExtraLarge;
+        app.apply_font_scale(&ctx);
+        let xlarge = body_size(&ctx);
+
+        assert!(
+            small < normal,
+            "「小」档必须比「标准」小（小={small} 标准={normal}）"
+        );
+        assert!(
+            xlarge > normal,
+            "「特大」档必须比「标准」大（特大={xlarge} 标准={normal}）"
+        );
+    }
+
+    /// 反复调用必须幂等——**这是最容易写错的一处**。
+    ///
+    /// 如果实现写成"在当前字号上乘系数"，每帧调用一次就会指数级放大：三秒钟就能
+    /// 把界面字号顶到几万像素、控件全部飞出屏幕。正确的写法是每次都从**固定基线表**
+    /// 重算，这条测试就是钉住这一点（连调 6 次，字号必须一动不动）。
+    ///
+    /// ⚠️ 只断言"第一次和第六次相等"是**不够的**：如果实现是"先连乘、再被别的
+    /// 赋值盖掉"，末值照样稳定，测试会绿着放行。所以这里额外钉一条**绝对值**——
+    /// 字号必须恰好等于 `基线 × 系数`。绝对值只可能由"从基线重算"得到，
+    /// 任何"在上一帧结果上做文章"的写法都过不了这一条。
+    #[test]
+    fn font_scale_is_idempotent_across_frames() {
+        let ctx = egui::Context::default();
+        let app = ComTool {
+            ui_font_scale: UiFontScale::Large,
+            ..ComTool::default()
+        };
+        let baseline = FONT_SIZE_BASELINE
+            .iter()
+            .find(|(text_style, _)| *text_style == egui::TextStyle::Body)
+            .map(|(_, base_size)| *base_size)
+            .expect("基线表必须有 Body");
+
+        app.apply_font_scale(&ctx);
+        let first = body_size(&ctx);
+
+        // 绝对值：只可能由"基线 × 系数"得到
+        assert_eq!(
+            first,
+            baseline * UiFontScale::Large.factor(),
+            "字号必须恰好等于「基线 × 系数」（基线 {baseline} × 系数 {}），\
+             实际是 {first}——说明它不是从固定基线重算出来的",
+            UiFontScale::Large.factor()
+        );
+
+        for _ in 0..5 {
+            app.apply_font_scale(&ctx);
+        }
+        let after = body_size(&ctx);
+
+        assert_eq!(
+            first, after,
+            "字体档位每帧重建必须幂等：连调 6 次后字号从 {first} 变到 {after}，\
+             说明实现是在上一帧的结果上连乘（会指数放大）"
+        );
+    }
+
+    /// 基线表必须与 egui 的默认字号一致。
+    ///
+    /// `apply_font_scale` 每次从 `FONT_SIZE_BASELINE` 重算，所以这张表是"标准档
+    /// 长什么样"的唯一真相。它与 egui 自身默认值漂移的后果很隐蔽：上游把 Body
+    /// 从 13 调到 14，我们的"标准"档却还写 13——用户选了标准，界面反而比不设时小。
+    /// 这条测试就是防这个漂移的（表里加了新样式却忘了同步，也会在这里红）。
+    #[test]
+    fn font_scale_baseline_matches_egui_defaults() {
+        let defaults = egui::Style::default().text_styles;
+
+        for (text_style, base_size) in FONT_SIZE_BASELINE {
+            let upstream = defaults
+                .get(text_style)
+                .unwrap_or_else(|| panic!("基线表里的 {text_style:?} 在 egui 默认样式里不存在"));
+            assert_eq!(
+                base_size, &upstream.size,
+                "{text_style:?} 的基线字号（{base_size}）与 egui 默认值（{}）不一致——\
+                 上游改了默认字号，我们的「标准」档必须跟着改",
+                upstream.size
+            );
+        }
+
+        // 反向：egui 默认有的样式，基线表里不该漏——漏了的那一档会永远停在
+        // 上游默认值上，用户调大字体时它纹丝不动（比如标题不变、正文变大）。
+        for text_style in defaults.keys() {
+            assert!(
+                FONT_SIZE_BASELINE
+                    .iter()
+                    .any(|(pinned, _)| pinned == text_style),
+                "{text_style:?} 在 egui 默认样式里存在，却没进 FONT_SIZE_BASELINE——\
+                 这一档不会跟随全局字体档位"
+            );
+        }
     }
 }

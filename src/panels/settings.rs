@@ -9,13 +9,13 @@
 //! - **已移除**：启动时检查更新。P6 决定不做版本检查——内网环境访问不到检查地址，
 //!   留一个「开了也没用」的开关比没有更糟，因此连同设置项一并删除。
 
-use crate::app::{ComTool, Language};
+use crate::app::{ComTool, Language, UiFontScale};
 use crate::chart::{MAX_SAMPLES, MIN_SAMPLES};
 use crate::log_file::render_log_file_name;
 use crate::send::{
     MAX_REPEAT_INTERVAL_MS, MAX_SEND_HISTORY, MAX_SEND_PRESETS, MIN_REPEAT_INTERVAL_MS, SendFormat,
 };
-use crate::strings::fill;
+use crate::strings::{Strings, fill};
 use chrono::Local;
 use eframe::egui;
 use egui::Ui;
@@ -47,6 +47,22 @@ const SETTINGS_MAX_HEIGHT: f32 = 720.0;
 /// 或将来别的调用点若也要复位滚动位置，得有一个稳定的名字可指。默认 id 由调用栈位置推导，
 /// 位置一变就换了个"身份"，之前存的滚动位置会神秘丢失。
 const SCROLL_ID: &str = "settings_scroll";
+
+/// 字体档位在界面上的名字。
+///
+/// 抽成函数而不是四处 `match`：下拉的 `selected_text` 与列表项、以及预览串都要用同一份
+/// 名字，写散了就会出现"选中的写着『大』、列表里那一行写着『Large』"这类不一致。
+///
+/// 与语言下拉不同，这里**跟随界面语言**：字体档位不是自名概念（没人需要凭"大"这个
+/// 汉字才能认出自己选的是哪一档），英文界面下就该显示 Small/Normal/Large/Extra large。
+fn font_scale_name(scale: UiFontScale, s: &Strings) -> &'static str {
+    match scale {
+        UiFontScale::Small => s.font_scale_small,
+        UiFontScale::Normal => s.font_scale_normal,
+        UiFontScale::Large => s.font_scale_large,
+        UiFontScale::ExtraLarge => s.font_scale_xlarge,
+    }
+}
 
 impl ComTool {
     /// 绘制设置窗口（`show_settings` 为 false 时直接返回）。
@@ -136,6 +152,30 @@ impl ComTool {
                 });
         });
         ui.weak(s.language_applies_immediately);
+
+        ui.horizontal(|ui| {
+            ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.font_scale_label));
+            egui::ComboBox::from_id_salt("ui_font_scale")
+                .selected_text(font_scale_name(self.ui_font_scale, s))
+                .show_ui(ui, |ui| {
+                    // 用 `UiFontScale::ALL` 而不是在这里手写四行：顺序与齐全性只有
+                    // 一处定义，将来加档位不会漏掉这个下拉。
+                    for scale in UiFontScale::ALL {
+                        ui.selectable_value(
+                            &mut self.ui_font_scale,
+                            scale,
+                            font_scale_name(scale, s),
+                        );
+                    }
+                });
+        });
+        // 档位名字是"小/标准/大/特大"，光看名字不知道到底变多大。给一个当场按当前
+        // 字号渲染的预览串，用户不用反复切档去试（也顺带证明了字号真的生效了）。
+        ui.weak(fill(
+            s.font_scale_preview,
+            &[&font_scale_name(self.ui_font_scale, s)],
+        ));
+        ui.weak(s.font_scale_note);
 
         ui.separator();
         ui.heading(s.sec_text_encoding);

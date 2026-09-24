@@ -591,15 +591,48 @@ fn ascii_spans_from_bytes(bytes: &[u8]) -> Vec<ColoredSpan> {
     spans
 }
 
-/// 由一组 `ColoredSpan` 构造等宽 14px 的 `LayoutJob`（彩色/字节查看两种视图共用）。
-fn layout_job_from(spans: &[ColoredSpan], default_color: egui::Color32) -> egui::text::LayoutJob {
+/// 接收区等宽文字的**基准**字号。
+///
+/// 用它的地方一律先乘上全局字体档位系数（见 [`monospace_font_id`]）——
+/// 这个常量只表示"档位为标准时是多大"。
+pub(crate) const RECEIVE_MONOSPACE_BASE_SIZE: f32 = 14.0;
+
+/// 按当前全局字体档位取接收区/发送框用的等宽 `FontId`。
+///
+/// **为什么不直接写 `FontId::monospace(14.0)`**：那样全局字体档位对接收区完全不起作用
+/// ——用户在设置里把字体调到"特大"，结果日志和发送框还是 14px，"全局字体大小"就名不副实。
+/// 从 `style.text_styles` 里取 `TextStyle::Monospace` 的实际字号，档位一改它自动跟着变，
+/// 不需要在每条调用链上多传一个参数。
+///
+/// `fallback_size` 是 `ui` 拿不到（或表里缺 Monospace 项）时用的基准值；正常情况下
+/// 取到的就是 `RECEIVE_MONOSPACE_BASE_SIZE × 档位系数`。
+pub(crate) fn monospace_font_id(ui: &egui::Ui, fallback_size: f32) -> egui::FontId {
+    if let Some(font_id) = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Monospace)
+        .cloned()
+    {
+        return font_id;
+    }
+    egui::FontId::monospace(fallback_size)
+}
+
+/// 由一组 `ColoredSpan` 构造 `LayoutJob`（彩色/字节查看两种视图共用）。
+///
+/// `font_id` 由调用方给出：通常是 [`monospace_font_id`] 的结果，于是字号跟随全局档位。
+fn layout_job_from(
+    spans: &[ColoredSpan],
+    default_color: egui::Color32,
+    font_id: egui::FontId,
+) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     for span in spans {
         job.append(
             span.text.as_str(),
             0.0,
             egui::TextFormat {
-                font_id: egui::FontId::monospace(14.0),
+                font_id: font_id.clone(),
                 color: span.style.fg.unwrap_or(default_color),
                 ..Default::default()
             },
@@ -713,7 +746,7 @@ pub(crate) fn show_plain_receive(
 ) {
     let job = egui::text::LayoutJob::simple(
         text.to_owned(),
-        egui::FontId::monospace(14.0),
+        monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE),
         ui.visuals().text_color(),
         f32::INFINITY,
     );
@@ -1072,13 +1105,26 @@ impl ComTool {
         egui::scroll_area::State::default().store(ui.ctx(), id);
     }
 
-    pub fn build_layout(&self, default_color: egui::Color32) -> egui::text::LayoutJob {
-        layout_job_from(&self.display_spans, default_color)
+    /// 彩色视图的 `LayoutJob`。
+    ///
+    /// `font_id` 由调用方给：渲染路径传 [`monospace_font_id`]（跟随全局字体档位），
+    /// 测试传 `FontId::monospace(RECEIVE_MONOSPACE_BASE_SIZE)`（只关心颜色，与档位无关）。
+    /// **不接受 `Option` 然后内部兜底**：那样渲染路径写错了也看不出来，兜底会静默生效。
+    pub fn build_layout(
+        &self,
+        default_color: egui::Color32,
+        font_id: egui::FontId,
+    ) -> egui::text::LayoutJob {
+        layout_job_from(&self.display_spans, default_color, font_id)
     }
 
-    /// ASCII 视图的 LayoutJob（与彩色视图同款等宽 14px 样式）
-    pub fn build_ascii_layout(&self, default_color: egui::Color32) -> egui::text::LayoutJob {
-        layout_job_from(&self.ascii_spans, default_color)
+    /// ASCII（字节查看）视图的 `LayoutJob`，与彩色视图同款等宽字形。
+    pub fn build_ascii_layout(
+        &self,
+        default_color: egui::Color32,
+        font_id: egui::FontId,
+    ) -> egui::text::LayoutJob {
+        layout_job_from(&self.ascii_spans, default_color, font_id)
     }
 
     pub fn render_color_receive(&mut self, ui: &mut Ui) {
@@ -1090,7 +1136,10 @@ impl ComTool {
         // 默认色取主题的正文色：深色主题下是浅色，浅色主题下是深色。写死黑色的话
         // 深色主题里接收区就是"黑底黑字"。只有**设备真的发了 ANSI 颜色**时才会
         // 用 `spans` 里的自定义色覆盖它——那是有意为之的显式着色，不该被主题改写。
-        let job = self.build_layout(ui.visuals().text_color());
+        let job = self.build_layout(
+            ui.visuals().text_color(),
+            monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE),
+        );
 
         // ③ 在函数内部绘制滚动区，替换掉主界面里默认的滚动区
         if show_receive_scroll(
@@ -1113,7 +1162,10 @@ impl ComTool {
         // 同 `render_color_receive`：默认色随主题。字节视图自己给控制字符/高位
         // 字节上了显式颜色（`ASCII_CTRL_COLOR` / `ASCII_NONPRINT_COLOR`），
         // 剩下的可打印字节走这个默认色，因此它必须在深色主题下也看得清。
-        let job = self.build_ascii_layout(ui.visuals().text_color());
+        let job = self.build_ascii_layout(
+            ui.visuals().text_color(),
+            monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE),
+        );
 
         // ③ 绘制滚动区（样式与彩色模式一致）
         if show_receive_scroll(
@@ -1134,6 +1186,13 @@ mod tests {
     // `with_ymd_and_hms` 由 trait 提供，调用 `chrono::Local` 时需要它在作用域内
     use chrono::TimeZone as _;
     use std::sync::mpsc;
+
+    /// 测试用的等宽字体。
+    ///
+    /// 这里**故意写死基准字号**而不是走 [`monospace_font_id`]：这批测试断言的是
+    /// "颜色/换行怎么落笔"，与全局字体档位无关。若跟着档位走，将来有人改了默认档位，
+    /// 这些测试会跟着一起变——那是另一条测试（字体档位那条）该管的事，不该在这里混着测。
+    const TEST_MONO: egui::FontId = egui::FontId::monospace(RECEIVE_MONOSPACE_BASE_SIZE);
 
     /// 把解析结果拼成纯文本，便于断言
     fn joined(bytes: &[u8]) -> String {
@@ -1841,7 +1900,7 @@ mod tests {
 
         // 普通文本模式：颜色由 show_plain_receive 自己从 ui.visuals() 取，
         // 这里换一条等价路径（同一个默认色来源）来断言它确实被用上了。
-        let job = app.build_layout(dark);
+        let job = app.build_layout(dark, TEST_MONO);
         let color = job.sections[0].format.color;
         assert_eq!(color, dark, "彩色视图的默认色必须是传进来的主题色");
         assert_ne!(
@@ -1851,7 +1910,7 @@ mod tests {
         );
 
         // 换浅色主题色，落笔颜色必须跟着换
-        let job = app.build_layout(light);
+        let job = app.build_layout(light, TEST_MONO);
         assert_eq!(
             job.sections[0].format.color, light,
             "同一个 span 在浅色主题下必须用浅色主题的正文色"
@@ -1874,7 +1933,7 @@ mod tests {
             "字节模式下 ascii_spans 应该有内容，否则这条测试是空转的"
         );
 
-        let job = app.build_ascii_layout(dark);
+        let job = app.build_ascii_layout(dark, TEST_MONO);
         assert!(
             job.sections.iter().any(|s| s.format.color == dark),
             "字节查看的默认色必须跟随主题（深色主题下不能是黑字）"
@@ -1898,7 +1957,7 @@ mod tests {
         feed(&mut app, b"\x1b[31mRED\x1b[0m normal\n");
 
         let theme_default = egui::Color32::from_rgb(200, 200, 200);
-        let job = app.build_layout(theme_default);
+        let job = app.build_layout(theme_default, TEST_MONO);
 
         let has_custom = job
             .sections
@@ -1912,5 +1971,74 @@ mod tests {
         // 反过来说：没有着色的那段应该拿到主题默认色
         let has_default = job.sections.iter().any(|s| s.format.color == theme_default);
         assert!(has_default, "未着色的片段应该走主题默认色");
+    }
+
+    // ——— 等宽字号必须跟随全局字体档位 ———
+
+    /// `monospace_font_id` 必须**从样式表里读**当前等宽字号，而不是返回一个写死的值。
+    ///
+    /// 这条是"全局字体大小"这个功能能对接收区/发送框生效的**唯一支点**：
+    /// 三处接收视图 + 发送框都调它。如果它被写回 `FontId::monospace(14.0)`，
+    /// 那么用户把字体调到"特大"后，正文、按钮都变大了，日志和发送框却纹丝不动——
+    /// 而所有"画得出来不 panic"的冒烟测试都会照样绿（它们不关心字号）。
+    ///
+    /// 这里把样式表里的 Monospace 字号**改掉**，再看函数是不是跟着变。
+    /// 只断言"返回了一个等宽 FontId"是空转的：写死的那种实现也满足。
+    #[test]
+    fn monospace_font_id_follows_the_style_not_a_constant() {
+        // 故意用一个**远离基准值**的字号，避免与 `RECEIVE_MONOSPACE_BASE_SIZE`
+        // 恰好相等导致"写死也能过"。
+        const SENTINEL: f32 = 37.5;
+
+        let mut seen = None;
+        egui::__run_test_ui(|ui| {
+            ui.style_mut().text_styles.insert(
+                egui::TextStyle::Monospace,
+                egui::FontId::monospace(SENTINEL),
+            );
+
+            let font_id = monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE);
+            seen = Some(font_id.size);
+        });
+
+        assert_eq!(
+            seen,
+            Some(SENTINEL),
+            "样式表里 Monospace 是 {SENTINEL}px，函数却返回了别的大小——\
+             说明它没读样式表（而是返回了写死的 {}）。全局字体档位对接收区就失效了",
+            RECEIVE_MONOSPACE_BASE_SIZE
+        );
+    }
+
+    /// 样式表里没有 Monospace 项时才用 `fallback_size`。
+    ///
+    /// 与上一条配对：上一条钉"优先读样式表"，这一条钉"读不到时的退路"。
+    /// 少了这条，`fallback_size` 这个参数就是死的——删掉它测试也不会红，
+    /// 那样将来有人把 `get(...)` 改成 `unwrap()` 就会在缺项时 panic。
+    #[test]
+    fn monospace_font_id_falls_back_when_the_style_lacks_it() {
+        const FALLBACK: f32 = 21.0;
+
+        let mut seen = None;
+        egui::__run_test_ui(|ui| {
+            ui.style_mut()
+                .text_styles
+                .remove(&egui::TextStyle::Monospace);
+            assert!(
+                !ui.style()
+                    .text_styles
+                    .contains_key(&egui::TextStyle::Monospace),
+                "先确认 Monospace 项确实被移除了，否则这条测试测的是另一条路径"
+            );
+
+            let font_id = monospace_font_id(ui, FALLBACK);
+            seen = Some(font_id.size);
+        });
+
+        assert_eq!(
+            seen,
+            Some(FALLBACK),
+            "样式表缺 Monospace 项时应当退到 fallback_size({FALLBACK})"
+        );
     }
 }

@@ -85,12 +85,12 @@ src/
 │                           + F5：发送字节计数行、波特率自由输入、控制线 RTS/DTR 一行
 ├── send.rs      (1014)     发送侧纯逻辑：HEX 解析 / 行尾 / 编码 / 历史浏览
 │                           + F5：转义解析（parse_escapes/EscItem）、常用数据（SendPresets）（37 测试）
-├── strings.rs    (723)     界面文案表（中英同宏臂）+ fill（9 测试，含源码级守卫）
-├── config.rs     (621)     持久化策略 + 启动不变量修复（16 测试）
+├── strings.rs    (738)     界面文案表（中英同宏臂）+ fill（9 测试，含源码级守卫）
+├── config.rs     (647)     持久化策略 + 启动不变量修复（16 测试）
 ├── panels/
-│   ├── mod.rs     (358)    面板模块出口（9 条无头 UI 冒烟测试，含英文界面、已连接侧边栏、设置窗口滚动）
+│   ├── mod.rs     (509)    面板模块出口（11 条无头 UI 测试，含英文界面、已连接侧边栏、设置窗口滚动、字体档位下拉接线）
 │   ├── menu_bar.rs(263)    顶部菜单栏；返回 MenuAction；主题/时间戳/编码/发送格式单选共用入口
-│   ├── settings.rs(332)    设置窗口外壳（限高 + 纵向滚动区）+ settings_body 内容体
+│   ├── settings.rs(372)    设置窗口外壳（限高 + 纵向滚动区）+ settings_body 内容体（含语言、字体档位下拉）
 │   ├── chart.rs   (224)    实时图表面板：egui_plot 绘制 + 绘制点抽样（5 测试）
 │   └── info.rs    (52)     信息窗口
 ├── communicationtrait.rs (310)  ByteChannel trait（open/close/is_active/write/configure/
@@ -565,8 +565,9 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 **门禁**：`cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** ·
 `cargo test` **230 passed / 1 ignored** · clippy **8 条**（与之前逐条相同；期间同样新增过
 1 条 `field_reassign_with_default`，改掉后回到既有 8 条）。
-（截至 2026-09-24：深色主题修复 +3 条测试、自定义波特率档 +5 条测试、设置窗口滚动 +1 条测试，
-合计 **239 passed / 1 ignored**。）
+（截至 2026-09-24：深色主题修复 +3 条测试、自定义波特率档 +5 条测试、设置窗口滚动 +1 条测试、
+全局字体档位 +7 条测试（含 `panels::tests` 两条、`receive::tests` 两条、`app::tests` 三条），
+合计 **246 passed / 1 ignored**。）
 
 **未做 / 未验证**：F5 同样**没有实机运行过**，六项全部只经 `cargo test` 验证。其中三项
 **只能由所有者实机确认**（已加入 §4② 清单）：控制线能否真的复位板子、硬件流控档下手动
@@ -761,6 +762,24 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
     自动化部分由 `panels::tests::settings_body_renders_inside_a_short_viewport` 覆盖
     （在 120px 高的可视区里画内容体，断言内容确实溢出）。**它证明不了外观**——
     滚动条长得对不对、有没有遮挡控件，只能人眼看。
+
+63. **全局字体档位**（2026-09-24 加；接线已自动化验证，观感需人看）：
+    设置窗口中段「字体大小」下拉，四档（小 / 标准 / 大 / 特大）逐档切一遍，确认——
+    - **标题、正文、按钮、等宽文字一起变**；尤其注意**接收区和发送框**有没有跟着变
+      ——它们是唯一原先写死过 14px 的地方，也正是「全局」这个词最容易名不副实的位置；
+    - 切到「特大」后，**标签列（`LABEL_WIDTH = 104`）是固定像素宽**，某些较长标签
+      （如「日志长度上限」）可能与右侧控件挤在一起——这是已知的取舍，记下是哪几行、
+      挤压到什么程度，再决定要不要把标签列也改成随档位缩放；
+    - **深色与浅色主题下各看一遍**（`all_styles_mut` 改的是两份 Style，如果只有一份变了，
+      切主题时字号会跳回去——这正是那条约定要防的，但只有人眼能发现「切了才发现」）；
+    - 打开设置窗口上下滚动时，**滚动条宽度是否随字号变化**而挡住控件；
+    - 关闭程序再打开，**档位应当保持在上次选的那一档**（已由 `config` 往返测试覆盖，
+      这里确认端到端真的落盘了——尤其确认换了档位后确实触发了一次保存）。
+    自动化部分由三条测试覆盖：`app::tests::font_scale_baseline_matches_egui_defaults`、
+    `app::tests::font_scale_is_idempotent_across_frames`、
+    `panels::tests::font_scale_dropdown_is_wired_to_the_field`，外加
+    `receive::tests::monospace_font_id_follows_the_style_not_a_constant` 钉住等宽那一路。
+    **它们都证明不了「字真的变大了、变得好不好看」**——断言的是字号数值与接线关系。
 
 ### ③ 仓库状态
 
