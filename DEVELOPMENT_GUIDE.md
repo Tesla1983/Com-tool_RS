@@ -518,3 +518,11 @@ impl eframe::App for ComTool {
     - **点击语义只有一份实现**：`sidebar::apply_baud_pick(baud_rate, baud_custom, BaudPick)`。绘制那段**只攒一个 `Option<BaudPick>`**，闭包结束后再调它——不在闭包里就地改字段（同约定 43 的道理：纯函数才测得到）。四条语义各配一条测试，见 `sidebar::tests`。
     - **种子值 `BAUD_CUSTOM_SEED`（250000）不是标记**：只在"点自定义且当前值在列表里"时替换，目的是省掉用户删字符的动作；若当前值**本来就不在**列表里（典型是从旧存档读回的 74880）必须原样保留。有一条测试专门钉住"种子值本身不在 `BAUD_RATES` 里"，否则这个"省事"是假的。
     - **老存档兼容**：`baud_custom` 是新字段，旧存档没有该键，靠容器级 `#[serde(default)]` 落到 `false`（即"列表档"）。`config::tests::archive_missing_new_fields_still_loads` 里有断言，别把它删了。
+
+46. **长内容窗口必须"限高 + 自带滚动区"，两件事缺一不可**（2026-09-24 加）：设置窗口的项数已经超过一屏，只在窗口上加滚动是不够的。
+    - **限高**：`egui::Window` 默认按内容无限长高（`auto_sized` 语义），底部控件会被顶出屏幕，而且**没有滚动条够得着**——`Window` 的默认滚动状态是 `ScrollArea::neither()`。所以先给内容区一个 `max_height` 上限，超出部分才有"落在哪"这一说。设置窗口用的是 `SETTINGS_MAX_HEIGHT`（720）；窗口本身仍 `resizable(true)`，手动拉高那条路径不受该默认值限制。
+    - **滚动区**：内容整体套 `egui::ScrollArea::vertical()`。**宽度必须 `auto_shrink([false, true])`**——纵向滚动条默认挤占宽度，若让滚动区随内容宽度收缩，`ui.separator()` 这类填满宽度的控件会跟着变窄，滚动条一出现/消失整排控件就左右抖。
+    - **为什么不用 `Window::vscroll()`**：窗口确实有这个开关，但滚动条会长在标题栏下方、跟随窗口 frame 的圆角与内边距，视觉细节受上游实现变动影响；只要"内容可滚"就用内容级滚动区，更稳定。
+    - **id 必须显式**（`SCROLL_ID = "settings_scroll"`）：默认 id 由调用栈位置推导，位置一变就等于换了个身份，之前记的滚动位置会神秘丢失；显式 id 也让将来「打开设置时复位到顶部」之类的需求有稳定名字可指。
+    - **内容体要抽成 `pub(crate) fn xxx(&mut self, ui: &mut Ui)`**（这里是 `settings_body`）：`show_settings_window` 里套着 `Window::show` 的闭包，无头测试只能连窗口一起画——窗口画得出来不代表内容体本身没问题。抽出来后 `panels::tests::settings_body_renders_inside_a_short_viewport` 能在**很矮的可视区**里单独画它。约定 43 的同一道理。
+    - **测"需要滚动"而不是"画得出来"**：只断言"没 panic"等于普通冒烟测试，把滚动区删掉照样绿。egui 在 `ScrollAreaOutput` 上给的判据是文档原文——*"If this [`content_size`] is larger than [`inner_rect`], then there was need for scrolling."* 再加一条"内容真实绘制高度 > 可视高度"（用闭包返回 `ui.min_rect().height()`）作为**防空转**断言。这两条在把内容体换成空壳时会立刻变红（已验证）。

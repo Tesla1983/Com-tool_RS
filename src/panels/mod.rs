@@ -144,6 +144,81 @@ mod tests {
         });
     }
 
+    /// 设置窗口的内容体要能单独画出来，并且**画得进去一个有限高度的容器**。
+    ///
+    /// 这条测的是"设置窗口加了滚动条"那个改动的两半：
+    ///
+    /// 1. 内容体 `settings_body` 被抽成了独立方法，所以能单独驱动。以前它整个长在
+    ///    `Window::show` 的闭包里，无头测试只能连窗口一起画——窗口画得出来，并不代表
+    ///    内容体本身没问题（比如某一项漏了 `ui.horizontal` 把宽度撑爆）。
+    /// 2. 内容**确实"需要滚动"**——也就是它比可视区高。egui 在 `ScrollAreaOutput` 上
+    ///    给这个信号的原文是："If this [`content_size`] is larger than [`inner_rect`],
+    ///    then there was need for scrolling." 没有这一条，上面第 1 条只是"画得出来"，
+    ///    退化成普通冒烟测试：把滚动区删掉、或者内容短到塞得下，它照样绿。
+    #[test]
+    fn settings_body_renders_inside_a_short_viewport() {
+        let mut app = ComTool::default();
+        let s = app.language.strings();
+        let dir_before = app.log_dir.clone();
+
+        const VIEWPORT_H: f32 = 120.0;
+
+        let content_h = std::cell::Cell::new(0.0_f32);
+        let viewport_h = std::cell::Cell::new(0.0_f32);
+        // 内容实际被画到了多高（不受可视区裁剪影响的真实占位）。
+        let painted_h = std::cell::Cell::new(0.0_f32);
+
+        egui::__run_test_ui(|ui| {
+            let short = egui::Rect::from_min_size(
+                ui.max_rect().min,
+                egui::vec2(ui.max_rect().width(), VIEWPORT_H),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(short), |ui| {
+                let out = egui::ScrollArea::vertical()
+                    .id_salt("settings_body_short_viewport_test")
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        app.settings_body(ui, s);
+                        // `content_ui` 的 min_rect 就是内容真实占用的高度：
+                        // 它**应当**超过可视区——那正是需要滚动条的原因。
+                        ui.min_rect().height()
+                    });
+                content_h.set(out.content_size.y);
+                viewport_h.set(out.inner_rect.height());
+                painted_h.set(out.inner);
+            });
+        });
+
+        // ① 内容画得出来，且真的比可视区高。
+        assert!(
+            painted_h.get() > VIEWPORT_H,
+            "设置内容只画了 {}px，没超过 {}px 的可视高度——这条测试退化成了普通冒烟测试",
+            painted_h.get(),
+            VIEWPORT_H
+        );
+        // ② egui 文档指定的"需要滚动"判据。
+        assert!(
+            content_h.get() > viewport_h.get(),
+            "content_size({}px) 未超过 inner_rect({}px)，egui 认为不需要滚动",
+            content_h.get(),
+            viewport_h.get()
+        );
+        // ③ 可视区本身没有被内容顶开——滚动区的职责就是把这两者解耦。
+        assert!(
+            viewport_h.get() <= VIEWPORT_H + 1.0,
+            "可视区被内容撑高了({}px > {}px)，滚动条就失去意义",
+            viewport_h.get(),
+            VIEWPORT_H
+        );
+
+        // ④ 绘制阶段**只准记录意图**，不准弹模态框：无头环境弹不了，真弹出会挂死。
+        // `log_dir` 是"用户选了目录"的唯一落点，它没变就说明按钮确实没被点触发。
+        assert_eq!(
+            app.log_dir, dir_before,
+            "绘制设置内容体不得直接触发目录选择或改动已选目录"
+        );
+    }
+
     /// 英文界面同样要能画出来。
     ///
     /// 文案表换了整整一列，这里才会暴露"英文那一列写坏了"的问题：`{}` 个数对不上
