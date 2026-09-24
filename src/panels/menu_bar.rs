@@ -215,7 +215,12 @@ impl ComTool {
     pub(crate) fn send_history_menu(&mut self, ui: &mut Ui) {
         let s = self.language.strings();
         if self.send_history.is_empty() {
-            ui.add_enabled(false, egui::Button::new(s.send_history_label));
+            // 历史为空时这颗按钮**留在原地但置灰**（而不是整个消失）：位置稳定，
+            // 用户不会看到表头那一行的控件左右跳动。禁用态用 `add_enabled_ui` 下发，
+            // 自绘按钮读 `ui.is_enabled()` 取禁用配色、且灰着就点不动。
+            ui.add_enabled_ui(false, |ui| {
+                crate::button::standard(ui, s.send_history_label);
+            });
             ui.weak(s.no_send_history);
             return;
         }

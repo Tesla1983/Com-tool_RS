@@ -483,9 +483,13 @@ impl ComTool {
                 ui.horizontal(|ui| {
                     ui.heading(s.nav_sidebar);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn = egui::Button::new(egui::RichText::new(">>").size(20.0))
-                            .min_size(egui::vec2(32.0, 32.0));
-                        if ui.add(btn).on_hover_text(s.collapse).clicked() {
+                        // 2026-09-24 起走全界面统一的按钮外观（见 `crate::button`）：
+                        // 原先这里是 `Button::new(">>").min_size(vec2(32, 32))`，即
+                        // egui 默认的"灰标签"外观，与「打开串口」不是一套语言。
+                        if crate::button::standard(ui, ">>")
+                            .on_hover_text(s.collapse)
+                            .clicked()
+                        {
                             action.close_requested = true;
                         }
                     });
@@ -622,7 +626,9 @@ impl ComTool {
                                         );
                                     }
                                 });
-                            if ui.button(s.refresh).clicked() {
+                            // 紧凑档：这一行还有标签与下拉框，「刷新」用 24 高的小号，
+                            // 免得把整行顶高（见 `crate::button::ButtonSize`）。
+                            if crate::button::compact(ui, s.refresh).clicked() {
                                 self.refresh_ports();
                             }
                         });
@@ -846,10 +852,10 @@ impl ComTool {
 
                     // —— 再往上：清空日志 / 导出日志 ——
                     ui.horizontal(|ui| {
-                        if ui.button(s.clear_log).clicked() {
+                        if crate::button::standard(ui, s.clear_log).clicked() {
                             action.clear_requested = true;
                         }
-                        if ui.button(s.export_log).clicked() {
+                        if crate::button::standard(ui, s.export_log).clicked() {
                             action.export_requested = true;
                         }
                     });
@@ -865,10 +871,21 @@ impl ComTool {
                                 } else {
                                     s.start_logging
                                 };
-                                if ui.button(label).clicked() {
+                                // 底色跟**按下去会做什么**走（与连接按钮同一条规则）：
+                                // 还没记录时按下去是"开始"，属主操作 ⇒ 绿；已经在记录时
+                                // 按下去是"停止"，不是发起动作 ⇒ 退回中性灰。
+                                // 既不给"停止"上红色——本项目刻意没有红色档（见
+                                // `crate::button` 的模块文档），也不让它继续绿着，
+                                // 否则"绿的停止键"会让人以为按下去还会开始。
+                                let toggle = if is_logging {
+                                    crate::button::standard(ui, label)
+                                } else {
+                                    crate::button::primary(ui, label)
+                                };
+                                if toggle.clicked() {
                                     action.log_toggle_requested = true;
                                 }
-                                if ui.button(s.pick_dir).clicked() {
+                                if crate::button::standard(ui, s.pick_dir).clicked() {
                                     action.pick_log_dir_requested = true;
                                 }
                             });
@@ -1653,6 +1670,50 @@ mod tests {
             size >= MIN_LABEL_SIZE,
             "按钮文案字号 {size}，小于下限 {MIN_LABEL_SIZE}（正文才 {body_size}）——\
              用户反馈过这几个字太小"
+        );
+    }
+
+    // ——— 以下一条锁定 2026-09-24 "全界面按钮统一外观" ———
+
+    /// **侧边栏里的命令按钮真的换成了统一外观**（高 28 + 中性灰实心底），
+    /// 而不是 egui 默认那块"灰标签"（高约一行字、圆角 2、没有实心底色）。
+    ///
+    /// 这条与 `button.rs` 里那些纯函数测试分开写，正是为了防"函数写得对、界面没
+    /// 调用"——它断言的是**这一帧画面里**真的出现了统一外观的实心块。
+    ///
+    /// `ComTool::default()` 下画得到的高 28 中性灰按钮有三个：「>> 收起」「清空日志」
+    /// 「导出日志」。「开始/停止记录」与「选择目录」在默认收起的「文件日志」折叠头里，
+    /// 这一帧画不到；它们的主操作那一颗还是绿的（`primary`），也不在这条判据的范围内。
+    #[test]
+    fn sidebar_buttons_use_the_shared_button_style() {
+        let mut app = ComTool::default();
+        let frame = painted_frame(&mut app, egui::ThemePreference::Dark);
+
+        // 深色主题、常态、可用状态下的中性灰——就是 `crate::button::standard` 画的底。
+        let expected = crate::button::button_fill(
+            crate::button::ButtonTone::Neutral,
+            true,
+            false,
+            false,
+            true,
+        );
+        let matching: Vec<egui::Rect> = frame
+            .rects
+            .iter()
+            .filter(|(rect, fill)| (rect.height() - 28.0).abs() < 0.5 && *fill == expected)
+            .map(|(rect, _)| *rect)
+            .collect();
+
+        assert!(
+            matching.len() >= 3,
+            "侧边栏里只有 {} 个「高 28 + 中性灰实心底」的按钮（期望 ≥ 3：「>> 收起」\
+             「清空日志」「导出日志」），说明它们没走统一外观。实际矩形：{:?}",
+            matching.len(),
+            frame
+                .rects
+                .iter()
+                .map(|(rect, fill)| (*rect, *fill))
+                .collect::<Vec<_>>()
         );
     }
 }

@@ -86,7 +86,7 @@ impl ComTool {
         ui.horizontal(|ui| {
             ui.label(s.chart_panel_label);
             ui.checkbox(&mut self.chart_auto_bounds, s.auto_bounds);
-            if ui.button(s.clear_chart).clicked() {
+            if crate::button::standard(ui, s.clear_chart).clicked() {
                 clear_requested = true;
             }
             ui.weak(fill(

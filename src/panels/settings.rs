@@ -265,7 +265,7 @@ impl ComTool {
                 s.send_history_count_text,
                 &[&self.send_history.len(), &MAX_SEND_HISTORY],
             ));
-            if ui.button(s.clear_history).clicked() {
+            if crate::button::standard(ui, s.clear_history).clicked() {
                 clear_send_history = true;
             }
         });
@@ -279,7 +279,7 @@ impl ComTool {
                 s.preset_count_text,
                 &[&self.send_presets.len(), &MAX_SEND_PRESETS],
             ));
-            if ui.button(s.clear_presets).clicked() {
+            if crate::button::standard(ui, s.clear_presets).clicked() {
                 clear_send_presets = true;
             }
         });
@@ -300,7 +300,7 @@ impl ComTool {
         ui.checkbox(&mut self.chart_auto_bounds, s.auto_bounds_checkbox);
         ui.horizontal(|ui| {
             ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(s.current_data));
-            if ui.button(s.clear_chart).clicked() {
+            if crate::button::standard(ui, s.clear_chart).clicked() {
                 clear_chart = true;
             }
             ui.label(fill(
@@ -334,10 +334,10 @@ impl ComTool {
         });
         ui.horizontal(|ui| {
             ui.add_sized([LABEL_WIDTH, 20.0], egui::Label::new(""));
-            if ui.button(s.pick_dir).clicked() {
+            if crate::button::standard(ui, s.pick_dir).clicked() {
                 pick_dir = true;
             }
-            if ui.button(s.restore_default).clicked() {
+            if crate::button::standard(ui, s.restore_default).clicked() {
                 reset_dir = true;
             }
             if self.is_logging() {

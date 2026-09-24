@@ -1439,7 +1439,14 @@ impl ComTool {
             ui.label(s.presets_header);
             ui.separator();
 
-            let save_button = ui.add_enabled(can_save_preset, egui::Button::new(s.save_preset));
+            // 走全界面统一的按钮外观（见 `crate::button`）。禁用态用 `add_enabled_ui`
+            // 下发而不是自己传标志：自绘按钮读 `ui.is_enabled()` 取禁用配色，同时把
+            // `Sense` 降成 hover——灰着就点不动，不会出现"看起来禁用、点下去有反应"。
+            let save_button = ui
+                .add_enabled_ui(can_save_preset, |ui| {
+                    crate::button::primary(ui, s.save_preset)
+                })
+                .inner;
             if save_button.clicked() {
                 do_save_preset = true;
             } else if !can_save_preset {
@@ -1470,10 +1477,8 @@ impl ComTool {
                 for (index, entry) in preset_entries.iter().enumerate() {
                     // 按钮上只放**短的**标签，完整内容挂在悬停里：一条几十字节的
                     // 指令直接把按钮撑爆，把整行挤成一条。
-                    let button = ui.button(crate::send::preset_label(
-                        entry,
-                        crate::send::PRESET_LABEL_CHARS,
-                    ));
+                    let label = crate::send::preset_label(entry, crate::send::PRESET_LABEL_CHARS);
+                    let button = crate::button::standard(ui, &label);
                     // 左键发、右键删。不做右键菜单：只有"删"一个动作，为它弹一层
                     // 菜单要用户多点一次，还没有任何好处。
                     if button.clicked() {
@@ -1849,10 +1854,11 @@ impl eframe::App for ComTool {
                 let mut do_send = false;
                 let mut do_clear = false;
                 ui.horizontal(|ui| {
-                    if ui.button(s.send_title).clicked() {
+                    // 「发送」是这一区的主操作 ⇒ 绿；「清空」是普通操作 ⇒ 中性灰。
+                    if crate::button::primary(ui, s.send_title).clicked() {
                         do_send = true;
                     }
-                    if ui.button(s.clear_send_button).clicked() {
+                    if crate::button::standard(ui, s.clear_send_button).clicked() {
                         do_clear = true;
                     }
                     if self.repeat_send && !self.connected {

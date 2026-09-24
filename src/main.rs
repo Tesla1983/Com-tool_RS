@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 mod app;
 mod app_icon;
+mod button;
 mod chart;
 mod communicationtrait;
 mod config;
