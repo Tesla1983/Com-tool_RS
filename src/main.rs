@@ -30,7 +30,7 @@ pub const APP_TITLE: &str = "ComTool-RS";
 /// 配置 egui 字体回退链。
 ///
 /// Monospace 族：Hack（真等宽，ASCII 图案逐列对齐）→ 中文字体（汉字）→ Segoe UI Symbol（盲文点阵 ⣿⠿⠀，U+2800 区）
-/// Proportional 族：中文字体（保持界面原观感）→ Segoe UI Symbol → Segoe UI Emoji（🟢🔴 等彩色圆点）
+/// Proportional 族：中文字体（保持界面原观感）→ Segoe UI Symbol
 ///
 /// 任一系统字体缺失时自动跳过，不崩溃。
 fn setup_fonts(ctx: &egui::Context) {
@@ -80,23 +80,11 @@ fn setup_fonts(ctx: &egui::Context) {
             .push("symbol".into());
     }
 
-    // 彩色 emoji 回退：状态栏的 🟢(U+1F7E2) / 🔴(U+1F534) 属于 Emoji 区，
-    // **Segoe UI Symbol 只含 🔴、不含 🟢**（实测：U+1F534 有字形、U+1F7E2 没有），
-    // 不加这一档的话绿色圆点会渲染成方框 □。只挂到 Proportional 族——等宽族
-    // （接收区日志）不需要彩色 emoji，多挂一档只会让字体栈更长。
-    let emoji_paths = [
-        r"C:\Windows\Fonts\seguiemj.ttf", // Segoe UI Emoji
-    ];
-    if let Some(data) = emoji_paths.iter().find_map(|p| std::fs::read(p).ok()) {
-        fonts
-            .font_data
-            .insert("emoji".into(), FontData::from_owned(data).into());
-        fonts
-            .families
-            .entry(FontFamily::Proportional)
-            .or_default()
-            .push("emoji".into());
-    }
+    // 注意：这里**没有**彩色 emoji 字体档。状态栏的圆点已经改成用 `Color32` 画的
+    // 实心圆（见 `status_bar.rs` 的模块文档），不再依赖任何 emoji 字形——早先挂
+    // `seguiemj.ttf` 也没用，因为 egui 只光栅化字体的矢量轮廓，不读 COLR/CPAL
+    // 彩色图层，拿到的是那个单色圆。为将来可能出现的 emoji 需求留个位置，
+    // 但**不要**为了让圆点有颜色而加回来。
 
     ctx.set_fonts(fonts);
 }

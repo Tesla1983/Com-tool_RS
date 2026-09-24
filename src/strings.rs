@@ -152,13 +152,10 @@ strings! {
     statusbar_disconnected: "未连接", "Not connected";
     statusbar_bound: "已绑定", "Bound";
     statusbar_unbound: "未绑定", "Not bound";
-    // 圆点是纯视觉标记，**不带文字含义**，所以中英共用同一份（`Language::Zh` 那一列
-    // 也只是"没有第二列"的意思）。用变量而不是在绘制处写死字符串：将来若要换成
-    // 非 emoji 的符号，只有这一处要改。
-    // 注意这两个字符能否渲染**取决于字体回退链**——见 `main.rs::setup_fonts` 与
-    // `status_bar::tests::status_dot_glyphs_are_covered_by_the_font_chain`。
-    statusbar_dot_on: "🟢", "🟢";
-    statusbar_dot_off: "🔴", "🔴";
+    // 圆点**不是一个字符**，是用 `Color32` 画的实心圆（见 `status_bar.rs`）。
+    // 早期版本用 🟢/🔴 两个 emoji，但 egui 的文本管线只光栅化字体的**矢量轮廓**，
+    // 拿不到 COLR/CPAL 彩色图层，结果是两个大小不一、颜色灰黑的圆——不是字体选错，
+    // 是根本渲染不了彩色字形。整个状态栏已不依赖任何 emoji 字体。
 
     // —— sidebar.rs：连接参数控件 ——
     port_field: "端口", "Port";

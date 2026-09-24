@@ -539,15 +539,15 @@ impl eframe::App for ComTool {
       ③ `panels::tests::font_scale_dropdown_is_wired_to_the_field` 读 `FullOutput.shapes` 里**按落笔顺序**的文字，取「字体大小」标签**紧跟着的下一段**作为下拉选中文案。**不能**改成"整段文字里包含当前档位名"——`font_scale_preview`（「预览：{}」）本来就会写进当前档位名，那样把 `selected_text` 写死也测不出来（实测确实测不出来）。读输出要用 `Context::run_ui` 而不是 `__run_test_ui`（后者 `drop_without_applying_deltas()` 把输出丢了，什么也观察不到），且拿到 `FullOutput` 后要 `textures_delta.clear()`，否则 drop 时会 panic。
     - **无头环境测不了"点一下"**：不投递指针事件，`changed()` 恒 false。写"模拟点击再断言字段变了"会得到**恒真**的空转测试（事件没送到，字段自然没变，断言永远成立）。只能测"字段 → 显示"这条已接通的连线。
 
-48. **底部状态栏：面板画在 `CentralPanel` 之前；圆点字符依赖字体回退链**（2026-09-24 加）：主界面底部常驻一条状态栏（`status_bar.rs`），显示一颗圆点 + 一句话。
+48. **底部状态栏：面板画在 `CentralPanel` 之前；圆点是自己画的实心圆，不是 emoji 字符**（2026-09-24 加）：主界面底部常驻一条状态栏（`status_bar.rs`），显示一颗圆点 + 一句话。
     - **绘制时序是硬约束**：`Panel::bottom("status_bar")` 必须在 `egui::CentralPanel` **之前**画。egui 的面板"先画先占位"，后画的只能拿到剩余空间——放在中央区之后，状态栏只横跨中央区剩余宽度，左右露出缝隙，看起来像一条没对齐的横条。与顶部菜单栏同理（`ui()` 里 ① 菜单栏 / ② 侧边栏 / ③ 状态栏 / ④ 中央区，编号即顺序）。
-    - **判据是纯函数**（`status_bar::connection_indicator(connected, kind, s)`）返回 `ConnectionIndicator { dot, label, is_on }`，绘制只负责画。这样"UDP 该显示已绑定"这类规则可以直接断言，不必先画一遍再猜像素（同约定 43 的道理）。`is_on` 与 `dot` 分开存：将来换图标字体或用第三种颜色时，判据仍只在一处。
+    - **判据是纯函数**（`status_bar::connection_indicator(connected, kind, s)`）返回 `ConnectionIndicator { is_on, label }`，绘制只负责画。这样"UDP 该显示已绑定"这类规则可以直接断言，不必先画一遍再猜像素（同约定 43 的道理）。`is_on` 存的是**语义**（亮/灭）而非颜色值，颜色由 `ConnectionIndicator::color()` 单独给出——将来换配色、或加第三态时，判据这层不用动。
     - **必须沿用侧边栏的四态**：`ConnectionKind::Udp` 下 `connected == true` 只表示**套接字绑定成功**，不是"对端在线"。显示成"已连接"会让用户以为掉线会被发现——侧边栏早就为此分了 `status_bound` / `status_unbound` 两档（见 `sidebar.rs`）。状态栏若只做两态，同一个窗口里两处指示会互相打脸。有一条测试（`status_bar_agrees_with_the_sidebar_on_udp`）把两者的分叉绑在一起。
-    - **圆点用 🟢(U+1F7E2) / 🔴(U+1F534)，但它们不是"随便挑的系统字符"**：egui 默认字体、Hack、微软雅黑**都不含**这两个码点；`seguisym.ttf`（已在回退链里）有 U+1F534 却**没有** U+1F7E2。只有 `seguiemj.ttf`（Segoe UI Emoji）两个都有。因此 `main.rs::setup_fonts` 里那档 emoji 字体是**功能必需项**，删掉它绿色圆点就变成方框 □——而且上面所有测字符串的测试都不会红。
-      `status_bar::tests::status_dot_glyphs_are_covered_by_the_font_chain` 直接读字体文件的 `cmap` 表确认字形存在（字体缺失时跳过而非失败，因为开发机可能是精简系统）。字体文件路径与 `setup_fonts` 里的常量必须同步改。
-    - **emoji 字体只挂 `Proportional` 族**，不挂 `Monospace`：接收区日志不需要彩色 emoji，多挂一档只会让字体栈更长。
-    - **圆点不要上色**：🟢/🔴 是彩色 emoji，`ui.label` 的 `color` 对彩色字形无效（字形自带颜色），着色只会自找困惑。它作为纯视觉标记，用 `on_hover_text` 把有意义的文案挂上去，读屏软件才不至于只念出一个 emoji。
-    - **文案是短词**（"已连接"/"未连接"），与侧边栏的 `"状态: 已连接"` 分开写：侧边栏是逐行读数（前缀有助于扫读），状态栏是常驻指示（前缀是噪音）。圆点字符在文案表里也放两列同值——将来换符号只有一处要改。
+    - **⛔ 圆点绝不要改回 emoji 字符**（这是本条最容易踩的坑，初版就踩过）：初版用 🟢(U+1F7E2)/🔴(U+1F534)，结果界面上是**两个大小不一、且都是灰黑色**的圆。根因不在字体选错，而在 egui 的文本管线：`epaint` 光栅化字形走的是 `skrifa` 的 `outline_glyphs()`（见 `epaint-0.36.1/src/text/font.rs::allocate_glyph_uncached`），**只取矢量轮廓**再填充成当前文字色；彩色 emoji 的颜色来自 `COLR`/`CPAL`（分层）或 `CBDT`/`CBLC`（位图）表，这些表 egui **从不读取**。实测两个候选字体的表结构：`seguiemj.ttf` 有 `COLR`+`CPAL`，但同一码点也有普通 `glyf` 轮廓（就是被当成单色圆画出来的那个）；`seguisym.ttf` 连 `COLR` 都没有。**所以换任何字体都得不到彩色——这是架构限制，不是配置问题。**
+    - **正确做法**：用 `ui.painter().circle_filled(center, radius, color)` 画一个 `Color32` 实心圆。尺寸取 `ui.text_style_height(&TextStyle::Body) * DOT_SIZE_RATIO`（0.72，必须 < 1，否则满行高的圆会顶到相邻行），圆心取分配矩形的 `rect.center()` 而不是左上角——`allocate_exact_size` 按行高分配高度、比直径大，不居中会顶在上边缘。这样同时解决了三件事：颜色正确、两态大小一致（不再受 emoji 字形自带 advance 摆布）、垂直对齐（按行高居中而非跟字体基线漂移）。**副作用是状态栏对字体回退链的依赖归零**，`main.rs::setup_fonts` 里那档 emoji 字体已随之删除。
+    - **颜色方向要断言，不能只断言"两色不同"**：只比"绿≠红"会被"亮=红、灭=绿"这种反色实现骗过。`the_dot_changes_colour_with_the_state` 额外断言 `green.g() > green.r() && green.g() > green.b()`（亮方确实偏绿）与对称的红方条件。
+    - **绘制测试读 `Shape::Circle` 而不是 `Shape::Text`**：圆点是几何图形不是字符。`status_dot_is_painted_as_a_filled_circle_in_the_right_colour` 从 `FullOutput.shapes` 里取 `(radius, fill)`，断言**恰好一枚**颜色等于 `indicator.color()` 的圆——这同时拦住"没画出来"和"颜色写死"两种回归（两条都做过空转验证：把绘制注释掉 → 2 条红；把颜色改成 `Color32::GRAY` → 1 条红）。
+    - **文案是短词**（"已连接"/"未连接"），与侧边栏的 `"状态: 已连接"` 分开写：侧边栏是逐行读数（前缀有助于扫读），状态栏是常驻指示（前缀是噪音）。
 
 49. **请用户"目视 / 目测审查"之前，必须先把 exe 编译出来**（2026-09-24 用户明确要求，属交付前置条件）：凡是交付物包含 **界面外观**（新增面板 / 控件 / 配色 / 字体 / 图标），而最终判定"好不好、对不对"只能靠人眼时，**必须在提出目视请求之前跑 `cargo build --release`**，并核对 exe 的时间戳晚于最后一次源码改动。
     - **为什么单列一条**：`cargo check` / `cargo test` / `cargo clippy` **都不产出可执行文件**。只跑这三样（再加 `cargo fmt`）的时候，`target/release/comtool-rs.exe` 要么是上一轮的陈旧产物、要么根本不存在，用户双击到的是**不含本次改动**的程序——他会看着旧界面找新功能，然后得出"没做出来"的结论。这不是用户看错，是交付没做完整。

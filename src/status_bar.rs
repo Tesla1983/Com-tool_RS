@@ -7,10 +7,38 @@
 //! 词义与侧边栏的 [`crate::sidebar`] 那套**必须一致**：同一个窗口里两处状态指示
 //! 给出不同结论，比只有一处更容易让人误判。所以这里同样按四态走
 //! （串口/TCP 的已连接/未连接 + UDP 的已绑定/未绑定）。
+//!
+//! # 圆点为什么是画出来的，而不是一个 emoji 字符
+//!
+//! 初版用 🟢(U+1F7E2) / 🔴(U+1F534) 两个字符当圆点，结果是**两个大小不一、
+//! 且都是灰黑色**的圆。原因不在字体选错，而在 egui 的文本管线：
+//! `epaint` 光栅化字形时走的是 `skrifa` 的 `outline_glyphs()`
+//! （`epaint-0.36.1/src/text/font.rs` 的 `allocate_glyph_uncached`），
+//! 即**只取字体的矢量轮廓**并填充成当前文字色。而彩色 emoji 的颜色来自
+//! `COLR`/`CPAL`（分层）或 `CBDT`/`CBLC`（位图）表——这些表 egui **从不读取**。
+//!
+//! 实测两个候选系统字体：`seguiemj.ttf` 有 `COLR`+`CPAL`，但同一码点也有普通的
+//! `glyf` 轮廓（就是那个被当成单色圆画出来的东西）；`seguisym.ttf` 连 `COLR` 都没有。
+//! 所以**换任何字体都得不到彩色**——这是架构限制，不是配置问题。
+//!
+//! 于是改成自己画：一个 `Color32` 填充的圆，尺寸与文字行高挂钩。好处不只是颜色
+//! 正确，还顺带解决了大小不一（不再受 emoji 字形自带 advance 的摆布）、
+//! 垂直对齐（圆按行高居中，不跟字体基线漂移），以及**对字体回退链的依赖归零**。
 
 use crate::app::{ComTool, ConnectionKind};
 use crate::strings::Strings;
-use egui::Ui;
+use egui::{Color32, Ui};
+
+/// 圆点直径相对行高的比例。
+///
+/// 取 0.72 而不是 1.0：满行高的实心圆会顶到相邻行、看起来比文字"重"；
+/// 略小于行高才像一个指示灯泡。圆点大小随全局字体档位（`UiFontScale`）
+/// 一起变，因为它读的是实时行高。
+const DOT_SIZE_RATIO: f32 = 0.72;
+
+// 比例必须 < 1：满行高的实心圆会顶到相邻行、看起来比文字"重"。这是**常量之间**的
+// 关系，所以用编译期断言——写成运行期 `assert!` 会被 clippy 判为恒真。
+const _: () = assert!(DOT_SIZE_RATIO < 1.0, "圆点比例必须小于一行高度");
 
 /// 状态栏要显示的内容。
 ///
@@ -18,15 +46,30 @@ use egui::Ui;
 /// 测试不必去解析绘制出的文字，直接比较两个字段即可。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConnectionIndicator {
-    /// 圆点用哪个字符（🟢 / 🔴）。
-    pub dot: &'static str,
+    /// 圆点亮不亮（绿 / 红）。
+    ///
+    /// 这里存**语义**（亮/灭）而不是颜色值：颜色是"亮/灭"的一种表现，将来若换成
+    /// 灰/绿、或加第三态，判据这层不用动。真颜色由 [`ConnectionIndicator::color`] 给。
+    pub is_on: bool,
     /// 圆点右边的文字（已连接 / 未连接 / 已绑定 / 未绑定）。
     pub label: &'static str,
-    /// 灯是不是"亮"的（绿）。
+}
+
+impl ConnectionIndicator {
+    /// 圆点该用什么颜色画。
     ///
-    /// 与 `dot` 分开存而不是"看文字猜"：将来若把圆点换成图标字体、或给 UDP
-    /// 用第三种颜色，判据仍然只有这一处。
-    pub is_on: bool,
+    /// 单独一个方法而不是在绘制处写 `if is_on { GREEN } else { RED }`：
+    /// 颜色是"亮/灭"的**唯一**落点，测试可以不必绘制就断言颜色。
+    pub(crate) fn color(&self) -> Color32 {
+        if self.is_on {
+            // 与 `Color32::GREEN` 不同，这里用略深一点的绿：纯 `#00FF00` 在浅色主题的
+            // 白底上偏刺眼，`#22C55E` 这类更接近常见状态灯。
+            Color32::from_rgb(0x22, 0xC5, 0x5E)
+        } else {
+            // 同理，不用 `Color32::RED`（#FF0000），用饱和度略低的红。
+            Color32::from_rgb(0xEF, 0x44, 0x44)
+        }
+    }
 }
 
 /// 按当前连接状态算出状态栏该显示什么。
@@ -41,24 +84,20 @@ pub(crate) fn connection_indicator(
 ) -> ConnectionIndicator {
     match (connected, kind) {
         (true, ConnectionKind::Udp) => ConnectionIndicator {
-            dot: s.statusbar_dot_on,
-            label: s.statusbar_bound,
             is_on: true,
+            label: s.statusbar_bound,
         },
         (true, _) => ConnectionIndicator {
-            dot: s.statusbar_dot_on,
-            label: s.statusbar_connected,
             is_on: true,
+            label: s.statusbar_connected,
         },
         (false, ConnectionKind::Udp) => ConnectionIndicator {
-            dot: s.statusbar_dot_off,
-            label: s.statusbar_unbound,
             is_on: false,
+            label: s.statusbar_unbound,
         },
         (false, _) => ConnectionIndicator {
-            dot: s.statusbar_dot_off,
-            label: s.statusbar_disconnected,
             is_on: false,
+            label: s.statusbar_disconnected,
         },
     }
 }
@@ -81,17 +120,32 @@ impl ComTool {
             // 唯一的视觉分界（面板默认没有背景色差）。
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    // 圆点单独上色没必要：🟢/🔴 本身就是彩色 emoji，着色反而会被
-                    // 字体回退链丢弃（彩色字形不跟随 `color`）。这里只保证它
-                    // **画得出来**——字形覆盖由 `main.rs::setup_fonts` 的 emoji 档负责。
-                    let dot = ui.label(indicator.dot);
-                    // 圆点是纯视觉标记，读屏软件拿到"🟢"没有意义，所以把有意义的
-                    // 那句话挂成它的标签，而不是让它成为一条独立的读屏条目。
-                    dot.on_hover_text(indicator.label);
+                    draw_status_dot(ui, indicator);
                     ui.label(indicator.label);
                 });
             });
     }
+}
+
+/// 画状态灯圆点。
+///
+/// 尺寸取**行高**而不是字号：圆是竖直居中的几何图形，用行高才与旁边那行文字的
+/// 视觉重心对齐；用字号会让它偏下（字号的度量不含行距）。
+fn draw_status_dot(ui: &mut Ui, indicator: ConnectionIndicator) {
+    let line_height = ui.text_style_height(&egui::TextStyle::Body);
+    let diameter = (line_height * DOT_SIZE_RATIO).max(6.0);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(diameter, line_height), egui::Sense::hover());
+
+    // 在分配到的矩形里居中画圆。`rect.center()` 而非左上角：`allocate_exact_size`
+    // 返回的矩形可能比直径高（我们按行高分配），不居中会顶在上边缘。
+    let radius = diameter / 2.0;
+    ui.painter()
+        .circle_filled(rect.center(), radius, indicator.color());
+
+    // 圆点是纯视觉标记，读屏软件念不出颜色，所以把有意义的文案挂成它的提示，
+    // 而不是让它成为一个不可读的独立条目。
+    response.on_hover_text(indicator.label);
 }
 
 #[cfg(test)]
@@ -109,12 +163,10 @@ mod tests {
         // 串口 / TCP：连上就是"已连接"，断开就是"未连接"
         let on = connection_indicator(true, ConnectionKind::Serial, zh);
         assert_eq!(on.label, zh.statusbar_connected);
-        assert_eq!(on.dot, zh.statusbar_dot_on);
         assert!(on.is_on, "连接成功时灯必须是亮的");
 
         let off = connection_indicator(false, ConnectionKind::Serial, zh);
         assert_eq!(off.label, zh.statusbar_disconnected);
-        assert_eq!(off.dot, zh.statusbar_dot_off);
         assert!(!off.is_on, "断开时灯必须是灭的");
 
         // UDP 单独一档：绑定成功≠对端在线，措辞必须避开"已连接"
@@ -133,25 +185,37 @@ mod tests {
         assert_ne!(udp_off.label, zh.statusbar_disconnected);
     }
 
-    /// 灯的颜色必须跟着状态走，而不是写死一个字符。
+    /// 灯的颜色必须跟着状态走，而不是写死一种。
     ///
-    /// 这是最容易被写错的地方：把 `dot` 固定成 `🟢`，其余全对——文字对、开关对，
-    /// 只有灯永远绿着。所以这条**单独**断言两个状态的 `dot` 互不相同。
+    /// 这是最容易被写错的地方：把 `color()` 固定成绿色，其余全对——文字对、
+    /// 开关对，只有灯永远绿着。所以这条**单独**断言两个状态的颜色互不相同，
+    /// 并钉住"亮=偏绿、灭=偏红"这个方向（不是随便两种颜色都算过）。
     #[test]
-    fn the_dot_changes_with_the_state() {
+    fn the_dot_changes_colour_with_the_state() {
         let zh = crate::app::Language::Zh.strings();
         let on = connection_indicator(true, ConnectionKind::Serial, zh);
         let off = connection_indicator(false, ConnectionKind::Serial, zh);
 
         assert_ne!(
-            on.dot, off.dot,
-            "连接与断开必须用**不同**的圆点字符，否则灯是个装饰、不指示任何东西"
+            on.color(),
+            off.color(),
+            "连接与断开必须用**不同**的颜色，否则灯是个装饰、不指示任何东西"
         );
-        assert_eq!(on.dot, "🟢");
-        assert_eq!(off.dot, "🔴");
+
+        // 方向断言：只断言"两色不同"会被"亮=红、灭=绿"这种反色实现骗过。
+        let green = on.color();
+        let red = off.color();
+        assert!(
+            green.g() > green.r() && green.g() > green.b(),
+            "「亮」的圆点必须是绿的（当前 {green:?}）"
+        );
+        assert!(
+            red.r() > red.g() && red.r() > red.b(),
+            "「灭」的圆点必须是红的（当前 {red:?}）"
+        );
     }
 
-    /// 英文界面下文案必须换成英文，但圆点不变。
+    /// 英文界面下文案必须换成英文，但颜色不随语言变。
     #[test]
     fn indicator_follows_the_language() {
         let en = crate::app::Language::En.strings();
@@ -160,9 +224,18 @@ mod tests {
 
         assert_eq!(on.label, "Connected");
         assert_eq!(off.label, "Not connected");
-        // 圆点是通用符号，不随语言变
-        assert_eq!(on.dot, "🟢");
-        assert_eq!(off.dot, "🔴");
+
+        // 颜色是通用视觉信号，不该随界面语言变
+        let zh_on = connection_indicator(true, ConnectionKind::Serial, zh_strings());
+        assert_eq!(
+            on.color(),
+            zh_on.color(),
+            "状态灯的颜色不该因为界面切成英文而改变"
+        );
+    }
+
+    fn zh_strings() -> &'static Strings {
+        crate::app::Language::Zh.strings()
     }
 
     /// **状态栏与侧边栏必须不会同时给出矛盾结论**。
@@ -212,6 +285,59 @@ mod tests {
         );
     }
 
+    /// 圆点必须作为**一个真实画出的圆**出现在绘制输出里，且用对了颜色。
+    ///
+    /// 这条替换掉了早期的"emoji 字形覆盖"测试——那个测试现在没有意义了，因为状态栏
+    /// 已经完全不依赖任何 emoji 字体（原因见模块文档：egui 只光栅化矢量轮廓，
+    /// 拿不到 COLR/CPAL 彩色图层）。取而代之要防的回归是"圆点没画出来"或"颜色写死"。
+    ///
+    /// 读的是 `Shape::Circle` 而不是 `Shape::Text`：圆点是几何图形，不是字符。
+    /// 断言里同时查**颜色**，所以"只画一个灰圆"或"永远画绿圆"都会被拦下。
+    #[test]
+    fn status_dot_is_painted_as_a_filled_circle_in_the_right_colour() {
+        let mut app = ComTool::default();
+        let expected = connection_indicator(
+            false,
+            ConnectionKind::Serial,
+            crate::app::Language::Zh.strings(),
+        );
+
+        let circles = painted_circles(&mut app);
+        assert!(
+            !circles.is_empty(),
+            "状态栏没有画出任何圆点——圆点是这个功能的主体，不是可选项"
+        );
+
+        // 默认状态是"未连接"，所以应当恰好有一枚红色的圆。
+        let matching = circles
+            .iter()
+            .filter(|(_, fill)| *fill == expected.color())
+            .count();
+        assert_eq!(
+            matching,
+            1,
+            "期望恰好一枚填充色为 {:?}（未连接=红）的圆，实际画出：{circles:?}",
+            expected.color()
+        );
+    }
+
+    /// 圆点直径必须随全局字体档位一起变，且小于行高（否则会顶到相邻行）。
+    #[test]
+    fn dot_size_tracks_the_line_height_but_stays_smaller_than_it() {
+        let mut app = ComTool::default();
+        let circles = painted_circles(&mut app);
+        let (radius, _) = circles.first().copied().expect("没画出圆点");
+
+        // 半径来自行高：`行高 * DOT_SIZE_RATIO / 2`。这里只断言它是有限正数，
+        // 且换算回去的行高落在合理范围（egui 默认 Body 约 14~22pt）。
+        assert!(radius.is_finite() && radius > 0.0, "半径非法：{radius}");
+        let line_height = radius * 2.0 / DOT_SIZE_RATIO;
+        assert!(
+            (10.0..=40.0).contains(&line_height),
+            "由半径 {radius} 反推出的行高 {line_height} 不合理，尺寸计算可能挂了"
+        );
+    }
+
     /// 取出一次绘制里所有落笔的文字。
     fn painted_labels(app: &mut ComTool) -> Vec<String> {
         let ctx = egui::Context::default();
@@ -230,116 +356,20 @@ mod tests {
         texts
     }
 
-    /// **圆点字形必须真的在字体回退链覆盖范围内**。
-    ///
-    /// 这是这条功能的隐性依赖：🟢(U+1F7E2) 与 🔴(U+1F534) 都在 Emoji 区，
-    /// 而 egui 默认字体、Hack、微软雅黑**都不含**它们中的至少一个。
-    /// 实测（读字体 cmap 得到）：`seguisym.ttf` 有 U+1F534 却**没有** U+1F7E2；
-    /// 只有 `seguiemj.ttf` 两个都有。所以 `main.rs::setup_fonts` 里那一档
-    /// emoji 字体是**必需的**，不是锦上添花。
-    ///
-    /// 上面几条测试全都测不出"界面上是两个方块"——它们只看字符串内容。
-    /// 这条直接去读字体文件确认字形存在，把"依赖某个系统字体"这件事钉下来。
-    ///
-    /// 字体缺失时**跳过**而不是失败：开发机可能是精简系统，那不是代码的问题。
-    /// 但只要字体在，就必须真的含有这两个字形——那才是这条测试要拦的回归。
-    #[test]
-    fn status_dot_glyphs_are_covered_by_the_font_chain() {
-        // 与 `main.rs::setup_fonts` 里的 `emoji_paths` 保持一致。
-        const EMOJI_FONT: &str = r"C:\Windows\Fonts\seguiemj.ttf";
+    /// 取出一次绘制里所有圆：(半径, 填充色)。
+    fn painted_circles(app: &mut ComTool) -> Vec<(f32, Color32)> {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.show_status_bar(ui);
+        });
 
-        let Ok(data) = std::fs::read(EMOJI_FONT) else {
-            eprintln!("跳过：本机没有 {EMOJI_FONT}，无法校验 emoji 字形覆盖");
-            return;
-        };
-
-        let zh = crate::app::Language::Zh.strings();
-        for (name, s) in [
-            ("绿色圆点", zh.statusbar_dot_on),
-            ("红色圆点", zh.statusbar_dot_off),
-        ] {
-            let cp = s.chars().next().unwrap_or_else(|| panic!("{name} 是空串")) as u32;
-            assert!(
-                font_has_codepoint(&data, cp),
-                "{name} {s:?}(U+{cp:04X}) 不在 {EMOJI_FONT} 里——\
-                 界面会把它渲染成方框 □。要么换一个系统覆盖的圆点字符，\
-                 要么在 setup_fonts 里换一档字体"
-            );
-        }
-    }
-
-    /// 在 TrueType/OpenType 的 `cmap` 表里查某个码点是否有字形。
-    ///
-    /// 只实现了 format 4 与 format 12 两个子表——Windows 系统字体都是这两种之一，
-    /// 其余格式（0/2/6）在这个用途下不会出现。查不到就当"没有"，
-    /// 宁可误报也不要放过（这条测试的目的是拦截，不是宽容）。
-    fn font_has_codepoint(data: &[u8], codepoint: u32) -> bool {
-        let be16 = |o: usize| u16::from_be_bytes([data[o], data[o + 1]]) as usize;
-        let be32 = |o: usize| {
-            u32::from_be_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as usize
-        };
-
-        let cp = codepoint as usize;
-        let num_tables = be16(4);
-        let mut cmap_off = None;
-        for i in 0..num_tables {
-            let rec = 12 + i * 16;
-            if &data[rec..rec + 4] == b"cmap" {
-                cmap_off = Some(be32(rec + 8));
+        let mut circles = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Circle(circle) = &clipped.shape {
+                circles.push((circle.radius, circle.fill));
             }
         }
-        let Some(cmap_off) = cmap_off else {
-            return false;
-        };
-
-        // 选一个子表：优先 format 12（能覆盖 U+FFFF 以上），否则 format 4。
-        let n_sub = be16(cmap_off + 2);
-        let mut chosen = None;
-        for i in 0..n_sub {
-            let rec = cmap_off + 4 + i * 8;
-            let (pid, eid, off) = (be16(rec), be16(rec + 2), be32(rec + 4));
-            let sub = cmap_off + off;
-            let format = be16(sub);
-            if format == 12 {
-                chosen = Some(sub);
-                break;
-            }
-            if format == 4 && chosen.is_none() {
-                chosen = Some(sub);
-            }
-            let _ = (pid, eid);
-        }
-        let Some(sub) = chosen else {
-            return false;
-        };
-
-        match be16(sub) {
-            // format 12：一组组 (start, end, glyphId) 的区间
-            12 => {
-                let n_groups = be32(sub + 12);
-                (0..n_groups).any(|i| {
-                    let g = sub + 16 + i * 12;
-                    let start = be32(g);
-                    let end = be32(g + 4);
-                    start <= cp && cp <= end
-                })
-            }
-            // format 4：段表，U+FFFF 以内的码点
-            4 => {
-                if cp > 0xFFFF {
-                    return false;
-                }
-                let seg_x2 = be16(sub + 6);
-                let segs = seg_x2 / 2;
-                let ends = sub + 14;
-                let starts = ends + seg_x2;
-                (0..segs).any(|i| {
-                    let s = be16(starts + i * 2);
-                    let e = be16(ends + i * 2);
-                    s != 0xFFFF && s <= cp && cp <= e
-                })
-            }
-            _ => false,
-        }
+        out.textures_delta.clear();
+        circles
     }
 }
