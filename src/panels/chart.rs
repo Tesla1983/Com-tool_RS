@@ -15,8 +15,35 @@ use egui::Ui;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use std::collections::VecDeque;
 
-/// 绘图区高度（像素）。
-const PLOT_HEIGHT: f32 = 220.0;
+/// 绘图区高度的**上限**（像素）：空间充裕时的期望高度。
+const PLOT_HEIGHT_MAX: f32 = 220.0;
+
+/// 绘图区高度的**下限**（像素）。
+///
+/// 可用空间比它还小时只能照它画。再往下缩只会得到一条看不见的线：窗口已经小到放不下
+/// 中央区里的东西了，此时保留"至少看得见一条趋势"比继续让步更有意义。
+const PLOT_HEIGHT_MIN: f32 = 90.0;
+
+/// 由**当前可用高度**算出绘图区高度。
+///
+/// 2026-09-24 修（用户问"图表的窗口高度这么小，能够正常显示数据吗"）：
+/// 此前这里是写死的 [`PLOT_HEIGHT_MAX`]，实测有两个后果——
+///
+/// 1. **可用空间不足时它不会缩**：中央区只剩 120 点时，图表块仍然占用 251 点，
+///    越界 131 点。中央区没有滚动条，超出的部分会被面板裁掉，于是夹在图表**下面**
+///    的发送区整块落到可视区之外（实测：中央区高 640 点时图表底已经越界 53 点）。
+/// 2. **窗口拉高也不会变大**：写死的值既不会缩也不会涨。
+///
+/// 现在改成在 `[下限, 上限]` 之间跟着可用高度走：**空间充足时与从前逐点完全一致**
+/// （仍是 220），只在放不下时才让出高度。
+fn plot_height(available: f32) -> f32 {
+    if available.is_finite() {
+        available.clamp(PLOT_HEIGHT_MIN, PLOT_HEIGHT_MAX)
+    } else {
+        // 拿不到有限值（不该发生）时退回旧行为，不要算出 NaN 让布局整体失效。
+        PLOT_HEIGHT_MAX
+    }
+}
 
 /// 图表的持久化 ID。同一界面里不能与其它控件重名，否则状态会互相干扰。
 const PLOT_ID: &str = "realtime_chart";
@@ -127,8 +154,11 @@ impl ComTool {
                 .collect();
 
             // 图例常开：多通道时"哪条线是哪个通道"只能靠颜色对照，没有图例就得猜。
+            //
+            // 高度在**这一行之后**再问可用空间：标题行与格式提示行已经画完，此时
+            // `available_height()` 剩下的就是"还能给绘图区多少"——比预先减一个常数准。
             let mut plot = Plot::new(PLOT_ID)
-                .height(PLOT_HEIGHT)
+                .height(plot_height(ui.available_height()))
                 .legend(Legend::default());
             if self.chart_auto_bounds {
                 // 关掉时不设置，`egui_plot` 便会保留用户拖动 / 缩放后的视图。
@@ -209,6 +239,204 @@ mod tests {
                 "抽样点 {point:?} 不在原序列里或顺序被打乱"
             );
         }
+    }
+
+    /// 一次无头绘制取回的素材。
+    struct Painted {
+        /// 这次绘制占用的矩形（从画布原点算起）。
+        consumed: egui::Rect,
+        /// 绘图区：真正画曲线的矩形，已扣掉坐标轴。
+        data_area: egui::Rect,
+        /// 每条曲线的顶点。
+        curves: Vec<Vec<egui::Pos2>>,
+    }
+
+    impl Painted {
+        /// 全部曲线的包围盒。
+        fn curve_bbox(&self) -> egui::Rect {
+            let mut bbox = egui::Rect::NOTHING;
+            for curve in &self.curves {
+                for point in curve {
+                    bbox.extend_with(*point);
+                }
+            }
+            bbox
+        }
+    }
+
+    /// 在给定可用高度下画一次图表，取回素材。
+    ///
+    /// 画布的**高度就是"中央区还能给图表多少"**——`Context::run_ui` 造的根 `Ui` 铺满
+    /// 整幅画面，把画布收窄等价于把图表放进一个没有余量的容器。
+    ///
+    /// 2026-09-24 实测（4 通道 × 60 点，宽 900）：
+    ///
+    /// | 画布高 | 图表块占用 | 绘图区 | 曲线包围盒 y |
+    /// |---|---|---|---|
+    /// | 480 | 251 | 886 × 206 | 40.4 – 227.6 |
+    /// | 180 | 180 | 886 × 135 | 跟随绘图区 |
+    fn paint(available_height: f32, channels: usize, samples: usize) -> Painted {
+        let mut app = ComTool {
+            show_chart_panel: true,
+            ..ComTool::default()
+        };
+        for i in 0..samples {
+            let line: String = (0..channels)
+                .map(|channel| format!("{}", 50 + ((i * 7 + channel * 13) % 40)))
+                .collect::<Vec<_>>()
+                .join(",")
+                + "\n";
+            app.chart.push_bytes(line.as_bytes(), app.chart_max_samples);
+        }
+
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::ThemePreference::Dark);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, available_height),
+            )),
+            ..Default::default()
+        };
+
+        let mut consumed = egui::Rect::NOTHING;
+        let mut extreme = egui::Color32::PLACEHOLDER;
+        let mut out = ctx.run_ui(input, |ui| {
+            extreme = ui.visuals().extreme_bg_color;
+            app.render_chart_panel(ui);
+            consumed = ui.min_rect();
+        });
+
+        let mut data_area = None;
+        let mut curves = Vec::new();
+        for clipped in &out.shapes {
+            match &clipped.shape {
+                // 绘图区：`paint_background` 用 `extreme_bg_color` 填充并带一圈描边。
+                // 图例的背景框同色，但它被 `background_alpha` 乘过透明度，所以"填充色
+                // 恰好等于 `extreme_bg_color`"这一条就足以把它排除在外。
+                egui::epaint::Shape::Rect(rect)
+                    if rect.fill == extreme && rect.stroke.width > 0.0 =>
+                {
+                    data_area = Some(rect.rect);
+                }
+                // 曲线：`Line` 画成一条多点 `Path`；网格线与坐标轴的点数少得多，
+                // 用点数把两者分开。
+                egui::epaint::Shape::Path(path) if path.points.len() >= 10 => {
+                    curves.push(path.points.clone());
+                }
+                _ => {}
+            }
+        }
+        // 不清理这个 delta 会在 drop 时 panic——看着像抓到缺陷，其实是清理没做。
+        out.textures_delta.clear();
+
+        Painted {
+            consumed,
+            data_area: data_area
+                .unwrap_or_else(|| panic!("没找到绘图区矩形——图表没画出来，或底色/描边改了")),
+            curves,
+        }
+    }
+
+    /// 空间充足时绘图区高度**与修改前逐点一致**（220）。
+    ///
+    /// 阈值写死字面量、不引用 [`PLOT_HEIGHT_MAX`]——引用了就变成"常量改一改、断言跟着改"
+    /// 的自证（本项目在连接按钮的字号上正是这么栽过两次）。
+    #[test]
+    fn plot_height_keeps_its_documented_value_when_there_is_room() {
+        for available in [251.0, 400.0, 1000.0] {
+            assert_eq!(
+                plot_height(available),
+                220.0,
+                "可用 {available} 点时高度变了——空间够时不该有变化"
+            );
+        }
+        assert_eq!(
+            plot_height(f32::INFINITY),
+            220.0,
+            "拿不到有限值时应退回 220，而不是算出 NaN 让整块布局失效"
+        );
+    }
+
+    /// 放不下时按可用高度缩，但不低于下限。
+    #[test]
+    fn plot_height_shrinks_to_fit_and_stops_at_the_floor() {
+        assert_eq!(plot_height(150.0), 150.0, "放得下就该照可用高度来");
+        assert_eq!(plot_height(90.0), 90.0);
+        for tiny in [50.0, 0.0, -30.0] {
+            assert_eq!(plot_height(tiny), 90.0, "可用 {tiny} 点时跌破了下限 90");
+        }
+    }
+
+    /// ⚠️ 图表**永不占用超过给它的空间**。
+    ///
+    /// 用户 2026-09-24 问"图表的窗口高度这么小，能正常显示数据吗"时暴露的正是这一条的
+    /// 反面：此前高度写死 220，中央区只剩 180 点时图表块仍占用 251 点，越界的 71 点被
+    /// 面板裁掉，而夹在图表**下面**的发送区整块落到可视区之外（中央区没有滚动条，
+    /// 用户够不着）。
+    #[test]
+    fn chart_never_claims_more_than_the_room_it_has() {
+        const ROOM: f32 = 180.0;
+
+        let painted = paint(ROOM, 4, 60);
+
+        assert!(
+            painted.consumed.max.y <= ROOM + 0.5,
+            "画布只有 {ROOM} 点高，图表却占到了 {:.1} 点——越界 {:.1} 点，\
+             下面的发送区会被挤出可视区",
+            painted.consumed.max.y,
+            painted.consumed.max.y - ROOM
+        );
+        assert!(
+            painted.consumed.max.y > ROOM - 1.0,
+            "只用到 {:.1} 点、留了 {:.1} 点空白——高度算小了",
+            painted.consumed.max.y,
+            ROOM - painted.consumed.max.y
+        );
+    }
+
+    /// 缩过之后**曲线照样落在绘图区里**：缩高度不能变成"画一片空白"。
+    #[test]
+    fn shrunk_chart_still_draws_the_curves_inside_the_plot_area() {
+        let painted = paint(180.0, 4, 60);
+
+        assert_eq!(painted.curves.len(), 4, "四条通道应各有一条曲线");
+        for curve in &painted.curves {
+            assert!(
+                curve.len() >= 59,
+                "曲线只剩 {} 个点，这个数据量下不该发生抽样",
+                curve.len()
+            );
+            for point in curve {
+                assert!(
+                    painted.data_area.contains(*point),
+                    "曲线点 {point:?} 跑到绘图区 {:?} 外面了",
+                    painted.data_area
+                );
+            }
+        }
+        assert!(
+            painted.curve_bbox().height() >= painted.data_area.height() * 0.7,
+            "曲线只占绘图区高度的 {:.0}%——自动缩放没生效，看不出数据的变化",
+            painted.curve_bbox().height() / painted.data_area.height() * 100.0
+        );
+    }
+
+    /// 容器够高时，留给数据的面积与修改前一模一样（绘图区 886 × 206）。
+    #[test]
+    fn roomy_container_gets_the_same_plot_area_as_before() {
+        let painted = paint(480.0, 4, 60);
+
+        assert!(
+            painted.data_area.height() >= 200.0,
+            "容器够高时绘图区只剩 {:.1} 点高（改前是 206）",
+            painted.data_area.height()
+        );
+        assert!(
+            painted.data_area.width() >= 800.0,
+            "绘图区宽度只剩 {:.1} 点",
+            painted.data_area.width()
+        );
     }
 
     #[test]
