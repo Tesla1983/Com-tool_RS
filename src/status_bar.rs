@@ -1,4 +1,5 @@
-//! 底部状态栏：左侧一颗彩色圆点 + 一句话常驻显示连接状态，右侧常驻显示收发字节数。
+//! 底部状态栏：一颗彩色圆点 + 一句话常驻显示连接状态，紧跟收发字节数；
+//! 整组内容在栏内**水平居中、垂直居中**。
 //!
 //! **为什么单独一个模块**：状态栏的判据（哪颗灯、哪句话）是一个纯函数
 //! （[`connection_indicator`]），与绘制分开。这样"UDP 该显示已绑定而不是已连接"
@@ -13,7 +14,7 @@
 //! 「接收统计」原先挂在右侧边栏，但它是一**读数**不是**控件**：用户扫一眼就知道
 //! 收了多少、发了多少，不该占侧边栏一块竖向空间、也不该需要展开折叠区才看得见。
 //! 底部状态栏本来就是"常驻读数"该待的地方，所以把**两个字节计数**挪了过来
-//! （左侧状态、右侧读数，符合状态栏惯例）。
+//! （与连接状态同处一排，整组居中显示）。
 //!
 //! 口径不同的两行**不在这里**：「显示模式」「时间戳前缀」描述的是当前设置，
 //! 不是累计量，随「串口信息」一起展示更自然——见 `sidebar.rs` 的 `serial_info` 区。
@@ -49,6 +50,25 @@ const DOT_SIZE_RATIO: f32 = 0.72;
 // 比例必须 < 1：满行高的实心圆会顶到相邻行、看起来比文字"重"。这是**常量之间**的
 // 关系，所以用编译期断言——写成运行期 `assert!` 会被 clippy 判为恒真。
 const _: () = assert!(DOT_SIZE_RATIO < 1.0, "圆点比例必须小于一行高度");
+
+/// 状态栏内容四周的**垂直**留白（上下各一份），单位是 egui 点。
+///
+/// 为什么要留：内容贴着面板上下边缘时，文字视觉上会与上方中央区的分隔线、
+/// 以及窗口底边"粘"在一起，看着像被挤在缝里。留出这段空白后，整条内容在栏内
+/// 垂直居中，上下都透气，视觉上就与两条边框脱开了。
+///
+/// 取 10 而不是更大：太小（<6）留白看不出来、等于没做；太大（>16）状态栏会显得
+/// 空旷、抢中央区的纵向空间。10 点约等于三分之二行高，在四档字体下都还合身。
+const BAR_PADDING_Y: i8 = 10;
+
+/// 状态栏内容左右的留白。
+///
+/// 左右各留一点，是为了让居中的内容与窗口左右边缘保持同等距离；取小值即可，
+/// 因为内容本身已在栏内水平居中，不会贴边。
+const BAR_PADDING_X: i8 = 12;
+
+// 垂直留白必须为正：为 0 时"加高"这件事就落空了，且不会有任何编译期报错。
+const _: () = assert!(BAR_PADDING_Y > 0, "状态栏垂直留白必须为正，否则加高无效");
 
 /// 状态栏要显示的内容。
 ///
@@ -120,9 +140,16 @@ impl ComTool {
     /// 状态栏只会横跨中央区剩余的宽度，左边露出侧边栏、右边露出边缘，
     /// 看起来像一条没对齐的横条。
     ///
-    /// 版式：左半是圆点 + 连接状态；右半是收发字节数（右对齐）。
-    /// 两侧要放在**同一行**里才能形成"左……右"的布局——所以外层先开一个
-    /// `horizontal`，右侧那段再套一层 `right_to_left` 布局把读数推到最右。
+    /// # 版式：整行水平居中、栏内垂直居中
+    ///
+    /// 内容是"圆点 + 连接状态 + 收发字节数"三件，作为**一整组**在栏内**水平居中**，
+    /// 而不是左状态右读数各贴一边——后者在宽窗口下会把两件信息甩到两个极端，
+    /// 中间空出一大片，看起来像没画完。三件之间用分隔符隔开、整组居中，读起来更紧凑。
+    ///
+    /// 栏内**垂直**居中靠 [`BAR_PADDING_Y`] 的上下等量留白实现；同时关掉面板自带的
+    /// 分隔线（`show_separator_line(false)`）——那条线是"边框感"的主要来源之一，
+    /// 关掉后内容与上方中央区之间只靠留白分隔，视觉上就与边框脱开了。窗口底边那条
+    /// 外框仍由操作系统/egui 保留，无法也不应由这里去掉。
     pub(crate) fn show_status_bar(&mut self, ui: &mut Ui) {
         let s = self.language.strings();
         let indicator = connection_indicator(self.connected, self.connection_kind, s);
@@ -138,25 +165,98 @@ impl ComTool {
 
         egui::Panel::bottom("status_bar")
             .resizable(false)
-            // 状态栏是**指示**不是**控件**：它不该抢走点击焦点，也不该让用户能把
-            // 它拖大拖小。`show_separator_line` 保留——上面那条细线是它与主内容区
-            // 唯一的视觉分界（面板默认没有背景色差）。
+            // 关掉面板自带的顶部分隔线：它是"贴着上面那条边框"的观感来源之一。
+            // 去掉后，栏内内容与中央区之间只剩留白，视觉上更"飘"、更像一条独立信息带。
+            .show_separator_line(false)
+            // 上下左右都留白：纵向留白把状态栏"垫高"、让内容在栏内垂直居中；
+            // 横向留白让居中内容与窗口左右边缘等距。`Frame::NONE` 不带背景填充，
+            // 沿用主题底色，不与深/浅主题打架。
+            .frame(
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(BAR_PADDING_X, BAR_PADDING_Y)),
+            )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    draw_status_dot(ui, indicator);
-                    ui.label(indicator.label);
+                // 整组内容水平居中。
+                //
+                // **为什么不用 egui 的声明式居中**（实测踩过四次）：`with_layout`
+                // 配 `with_main_align(Center)`、`vertical_centered`、
+                // `allocate_ui_with_layout` 配 `top_down(Center)`、`horizontal_centered`
+                // ——这四种写法在无头渲染下产出的**文字落笔位置全在 x=0**（贴左）。
+                // 原因：这些 API 只重排"区域矩形"，而形状一旦 emit 就不会回移；
+                // 且整行默认撑满可用宽度，"居中一条满宽的行"本就没有可居之处。
+                // 与其依赖这层不确定的行为，不如**把居中算清楚**：
+                // 先量出这一行实际要多宽，再用 `add_space` 补左侧偏移。确定性、
+                // 可断言、与 egui 内部实现解耦。
+                let avail = ui.available_width();
+                let row_width = self.status_bar_row_width(ui, indicator, rx_bytes, tx_bytes);
+                let pad = ((avail - row_width) / 2.0).max(0.0);
 
-                    // 右侧读数：用 `right_to_left` 布局把内容推到本行的最右边。
-                    // 顺序要**反着给**——该布局从右往左排，先 add 的贴最右。
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(fill(s.tx_bytes_label, &[&tx_bytes]))
-                            .on_hover_text(s.tx_bytes_hover);
-                        ui.separator();
-                        ui.label(fill(s.rx_bytes_label, &[&rx_bytes]))
-                            .on_hover_text(s.rx_bytes_hover);
-                    });
+                ui.horizontal(|ui| {
+                    ui.add_space(pad);
+                    self.status_bar_row(ui, indicator, rx_bytes, tx_bytes);
                 });
             });
+    }
+
+    /// 按当前内容渲染状态栏那一行（圆点 + 状态词 + 分隔符 + 两个字节读数）。
+    ///
+    /// 抽成方法是因为它要**被画两遍**：一次用于量宽度（[`Self::status_bar_row_width`]），
+    /// 一次用于真正落笔。两遍必须画出**完全相同**的内容，否则量出的宽度与实画不符、
+    /// 居中就会偏——所以内容只能在这一个地方定义。
+    fn status_bar_row(
+        &self,
+        ui: &mut Ui,
+        indicator: ConnectionIndicator,
+        rx_bytes: usize,
+        tx_bytes: u64,
+    ) {
+        let s = self.language.strings();
+        draw_status_dot(ui, indicator);
+        ui.label(indicator.label);
+
+        // 读数与状态之间加一条竖直分隔，避免"未连接 收: 0 字节"
+        // 连成一句读过去像在说"未连接收了 0 字节"的因果。
+        ui.separator();
+        ui.label(fill(s.rx_bytes_label, &[&rx_bytes]))
+            .on_hover_text(s.rx_bytes_hover);
+        ui.label(fill(s.tx_bytes_label, &[&tx_bytes]))
+            .on_hover_text(s.tx_bytes_hover);
+    }
+
+    /// 量出状态栏那一行需要多宽（用于水平居中）。
+    ///
+    /// 做法：把同一行画进一个**不可见**的探测 `Ui`（`UiBuilder::invisible(true)`），
+    /// 读它的 `min_rect.width()`。
+    ///
+    /// **为什么必须 `invisible`**：探测这一遍也会走完整的布局与绘制流程。若让它
+    /// 正常可见，就会**真的往输出里再落一遍**圆点与文字——界面上是重影、测试里
+    /// 则表现为"画出了两个圆点""这组文字位置还在 x=0"，把居中判定彻底带偏
+    /// （实测踩过：圆点数从 1 变 2、中心从 500 偏回 136）。`invisible` 只抑制
+    /// **绘制**，布局照常进行，`min_rect` 因此仍然准确。
+    ///
+    /// 为什么不硬编码一个宽度：内容随语言变（"未连接"↔"Not connected"）、
+    /// 随数值变（9 位字节数 vs 0）、还随全局字体档位变——写死必然在某些组合下偏。
+    fn status_bar_row_width(
+        &self,
+        ui: &mut Ui,
+        indicator: ConnectionIndicator,
+        rx_bytes: usize,
+        tx_bytes: u64,
+    ) -> f32 {
+        // 探测 Ui 要拿到**足够宽**的 max_rect（否则行会换行、量到的宽度偏小），
+        // 且必须用**左到右**布局——否则每个控件各占一行，量出来的是"最宽那个控件"
+        // 而不是整行之和。它 `invisible`，只走布局不落笔，不会在界面上留痕。
+        let mut probe = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(ui.available_width().max(1.0), 0.0),
+                ))
+                .layout(egui::Layout::left_to_right(egui::Align::Center))
+                .invisible(),
+        );
+        self.status_bar_row(&mut probe, indicator, rx_bytes, tx_bytes);
+        probe.min_rect().width()
     }
 }
 
@@ -432,6 +532,108 @@ mod tests {
         assert!(
             (10.0..=40.0).contains(&line_height),
             "由半径 {radius} 反推出的行高 {line_height} 不合理，尺寸计算可能挂了"
+        );
+    }
+
+    /// 取出一次绘制里所有落笔的文字**及其包围盒**：(文本, 左上角, 尺寸)。
+    ///
+    /// 与 [`painted_labels`] 的区别：那个只要文本内容，这个要几何位置，
+    /// 用来断言"居中"这类**版面**性质——文字内容对但整组贴在左边，内容断言照样过。
+    fn painted_label_boxes(
+        app: &mut ComTool,
+        screen: egui::Rect,
+    ) -> Vec<(String, egui::Pos2, egui::Vec2)> {
+        let ctx = egui::Context::default();
+        // 屏幕尺寸要通过 `RawInput.screen_rect` 给——`run_ui` 的第一个参数是输入，
+        // 不是矩形。不给的话容器尺寸是默认值，"居中"就无从判定。
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            app.show_status_bar(ui);
+        });
+
+        let mut boxes = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                boxes.push((t.galley.text().to_owned(), t.pos, t.galley.size()));
+            }
+        }
+        out.textures_delta.clear();
+        boxes
+    }
+
+    /// **状态栏必须比一行文字高**——这是"加高"的判据。
+    ///
+    /// 关键在于：不能断言"面板存在"或"文字画出来了"（那些与高度无关，把留白删掉
+    /// 也照样过）。要断言的是**内容簇的垂直范围之外还有多少空隙**。做法是给一个固定
+    /// 高度的屏幕，把状态栏画在底部，然后看文字簇的**底边**离屏幕底边有多远——
+    /// 这个距离就等于下留白（`BAR_PADDING_Y`），留白删掉它会塌到 0。
+    #[test]
+    fn status_bar_is_taller_than_one_line_of_text() {
+        let mut app = ComTool::default();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 700.0));
+        let boxes = painted_label_boxes(&mut app, screen);
+
+        let bottom_of_text = boxes
+            .iter()
+            .map(|(_, pos, size)| pos.y + size.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(bottom_of_text.is_finite(), "状态栏没画出任何文字");
+
+        // 文字底边到屏幕底边的空隙 = 下留白（面板贴着窗口底边绘制）。
+        let gap_below = screen.max.y - bottom_of_text;
+        assert!(
+            gap_below >= f32::from(BAR_PADDING_Y),
+            "状态栏下留白只有 {gap_below:.1}，应当至少有 BAR_PADDING_Y={BAR_PADDING_Y}。\
+             若把 Frame 的 inner_margin 去掉，这里会塌到 0——本测试就是钉住它别被删。"
+        );
+    }
+
+    /// **整组内容必须水平居中**——这是"居中"的判据。
+    ///
+    /// 判据是**位置**而不是内容：断言"文字里有收/发字节数"在右对齐实现下同样成立
+    /// （旧版就是那样），所以那种断言与该改动无关。这里量的是**整组文字的几何中心**
+    /// 与容器中心之差，只有真的改成居中才会落在这条线附近；右对齐会让它明显偏右。
+    #[test]
+    fn status_bar_content_is_horizontally_centred() {
+        let mut app = ComTool::default();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 700.0));
+        let boxes = painted_label_boxes(&mut app, screen);
+
+        let left = boxes
+            .iter()
+            .map(|(_, pos, _)| pos.x)
+            .fold(f32::INFINITY, f32::min);
+        let right = boxes
+            .iter()
+            .map(|(_, pos, size)| pos.x + size.x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            left.is_finite() && right.is_finite(),
+            "状态栏没画出任何文字"
+        );
+
+        let group_centre = (left + right) / 2.0;
+        let screen_centre = screen.center().x;
+        let offset = (group_centre - screen_centre).abs();
+
+        // 容差给 12 点，理由有两条：
+        //
+        // ① **测的是文字不是整组**。本测试只取 `Shape::Text` 的包围盒，而这一行
+        //    最左边是个**圆点**（几何图形，不是文字）。圆点在自己的矩形里居中，
+        //    其矩形比圆本身宽，于是"文字的几何中心"天然比"含圆点的整组中心"
+        //    偏右几个点——这是测量口径造成的固定偏差，不是居中没做对。
+        // ② `ui.separator()` 在两端占位不完全对称，还有一两点的零头。
+        //
+        // 两者相加实测约 9.4 点。而**错误实现**（贴左 / 贴右 / 右对齐）的偏移
+        // 都是**数百点**（半个容器宽），12 点这条线把它们全部拦下绰绰有余。
+        // 关键：容差必须**远小于**错误实现会产生的偏移——这正是它有效的前提。
+        assert!(
+            offset <= 12.0,
+            "状态栏整组内容中心 x={group_centre:.1}，容器中心 x={screen_centre:.1}，\
+             偏移 {offset:.1} 超过容差 12——看起来没有水平居中（右对齐/左对齐会明显偏离）"
         );
     }
 
