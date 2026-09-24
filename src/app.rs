@@ -17,9 +17,7 @@ use crate::net_impl::{
     DEFAULT_REMOTE_HOST, DEFAULT_REMOTE_PORT, NetConfig, TcpChannel, UdpChannel,
 };
 use crate::panels::{send_format_radios, send_line_ending_radios};
-use crate::receive::{
-    AnsiDecoder, AnsiStyle, ColoredSpan, TextEncoding, TimestampPrefix, show_plain_receive,
-};
+use crate::receive::{AnsiDecoder, AnsiStyle, ColoredSpan, TextEncoding, TimestampPrefix};
 use crate::send::{
     DEFAULT_REPEAT_INTERVAL_MS, HistoryNav, Payload, SendFormat, SendHistory, SendLineEnding,
     SendPresets, build_payload, clamp_repeat_interval, on_first_line, on_last_line,
@@ -453,11 +451,19 @@ pub struct ComTool {
 
     /// HEX 视图：本批字节直接转十六进制文本。它与"文本"是同一个开关的两面
     /// （`hex_view == false` 即文本模式），并与 [`ComTool::ascii_view`] 互斥。
+    ///
+    /// 与 [`ComTool::color_view`] **可以共存**（HEX 文本 + 彩色组件），这一组合是合法的。
     pub hex_view: bool,
     #[serde(skip)]
     pub display_spans: Vec<ColoredSpan>,
     #[serde(skip)]
     pub decoder: AnsiDecoder,
+    /// 彩色文本视图：把接收到的 ANSI 颜色按显式色渲染（没发颜色的部分用主题正文色）。
+    /// 它与普通文本视图吃的是**同一份**解析结果，差别只在渲染方式。
+    ///
+    /// **与 [`ComTool::ascii_view`] 互斥**——字节模式只写 `ascii_spans`，而彩色视图渲染
+    /// `display_spans`，两个同时为真时彩色视图**必然是空的**（2026-09-24 用户目视发现，
+    /// 见 `HANDOVER.md` §3.16）。与 [`ComTool::hex_view`] 可以共存。
     pub color_view: bool,
     pub sidebar_open: bool,
     pub language: Language,
@@ -468,9 +474,10 @@ pub struct ComTool {
     pub show_info: bool,
     /// 字节查看视图：渲染 `ascii_spans`。
     ///
-    /// **与 [`ComTool::hex_view`] 互斥**——HEX 分支只写 `display_spans`，两个同时为真时
-    /// 这个视图必然是空的。互斥由 [`ComTool::resolve_display_mode`] 统一裁决，界面（菜单
-    /// 与接收设置行）与启动修复都走它，不要在别处另写一份判断。
+    /// **与 [`ComTool::hex_view`] 互斥**（HEX 分支只写 `display_spans`），**也与
+    /// [`ComTool::color_view`] 互斥**（彩色视图渲染 `display_spans`）——两个同时为真时
+    /// 这个视图或那个视图必然是空的。互斥由 [`ComTool::resolve_display_mode`] 统一裁决，
+    /// 界面（菜单与接收设置行）与启动修复都走它，不要在别处另写一份判断。
     pub ascii_view: bool,
 
     #[serde(skip)]
@@ -1652,6 +1659,7 @@ impl eframe::App for ComTool {
                 // `if hex { ascii = false; }`——规则两处各写一遍，迟早有一处忘了改。
                 let mut hex_just_enabled = false;
                 let mut ascii_just_enabled = false;
+                let mut color_just_enabled = false;
                 ui.horizontal(|ui| {
                     ui.label(s.receive_settings);
                     if ui.checkbox(&mut show_hex, s.hex).changed() && show_hex {
@@ -1662,7 +1670,14 @@ impl eframe::App for ComTool {
                         show_hex = false; // 勾文本 → 取消 HEX
                     }
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.color_view, s.color);
+                        // 「颜色」同样要交给互斥裁决：它与「字节查看」同时勾上时接收区会
+                        // 一片空白（两者写的不是同一份镜像）。这里只报"刚被勾上"，
+                        // 规则由 `resolve_display_mode` 唯一裁决。
+                        let mut color_view = self.color_view;
+                        if ui.checkbox(&mut color_view, s.color).changed() && color_view {
+                            color_just_enabled = true;
+                        }
+                        self.color_view = color_view;
                         if ui.checkbox(&mut self.ascii_view, s.byte_view).changed()
                             && self.ascii_view
                         {
@@ -1671,18 +1686,12 @@ impl eframe::App for ComTool {
                     });
                 });
                 self.hex_view = show_hex; // 文本 = !hex_view；两个都取消时退回文本
-                self.resolve_display_mode(hex_just_enabled, ascii_just_enabled);
+                self.resolve_display_mode(hex_just_enabled, ascii_just_enabled, color_just_enabled);
 
-                // 接收区
-                if self.color_view {
-                    self.render_color_receive(ui);
-                } else if self.ascii_view {
-                    // ASCII 模式：逐字节解码，控制字符/高位字节转义为可见形式
-                    self.render_ascii_receive(ui);
-                } else {
-                    // 普通文本模式：不折行 + 纵/横双向滚动 + 可选中 + 右键复制全部
-                    show_plain_receive(ui, &self.receive_text, self.auto_scroll, s.copy_all_log);
-                }
+                // 接收区：画哪一份镜像由 [`ComTool::display_mode`] 决定——与上面写镜像的
+                // 判定是同一个，所以不存在"写了一份、画另一份"的空视图。分发本身抽在
+                // `receive::ComTool::render_receive_area` 里，那条路有自动化测试。
+                self.render_receive_area(ui);
             }
 
             // 中央区里这几块是纵向堆叠的，分隔线只在"上面有东西、下面也有东西"

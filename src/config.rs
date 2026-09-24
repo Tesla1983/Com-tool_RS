@@ -81,12 +81,13 @@ pub fn restore_runtime_state(app: &mut ComTool) {
 
     normalize_panel_visibility(app);
 
-    // 「HEX 接收」与「字节查看」**互斥**（见 `ComTool::resolve_display_mode`）。旧存档里
-    // 两个可能都是 `true`——那个组合曾经能从界面上勾出来（接收设置行只互斥了 HEX 与文本，
-    // 漏了字节查看）。两个参数都传 `false` 表示"本轮没有点击"，于是按 `receive_data()`
-    // 的分支优先级让 HEX 胜出：与旧版本实际走的解析分支一致，而且修好之后给用户的是一份
-    // **非空**视图——不然字节视图渲染的 `ascii_spans` 自始至终没人写过，接收区一片空白。
-    app.resolve_display_mode(false, false);
+    // 「HEX 接收」「字节查看」「颜色」三者中不合法的那几对**互斥**（见
+    // `ComTool::resolve_display_mode`）。旧存档里可能存着非法组合——曾经的接收设置行只
+    // 互斥了 HEX 与文本，漏了「字节查看」，而「颜色」两个入口都没参与裁决（2026-09-24
+    // 用户目视发现它导致接收区空白，见 `HANDOVER.md` §3.16）。三个参数都传 `false` 表示
+    // "本轮没有点击"，于是按修复方向把冲突修掉：`hex` 关 `ascii`、`ascii` 关 `color`；
+    // 修好之后给用户的是一份**非空**视图——不然被画的那份镜像自始至终没人写过。
+    app.resolve_display_mode(false, false, false);
 
     // 定时发送的开关是纯运行时状态：**启动时一律关闭**。同一趟把计时基准也清掉，
     // 免得留下一个上次会话的时间戳让第一次发送立刻触发。
@@ -181,9 +182,9 @@ mod tests {
             send_text: "AT+RST\n".to_string(),
             hex_view: true,
             color_view: true,
-            // 与 `hex_view` **互斥**（见 `ComTool::resolve_display_mode`），所以这份"填满
-            // 非默认值"的样本里两者只能有一个为真。`ascii_view` 为真时的往返由
-            // `ascii_view_alone_survives_round_trip` 单独覆盖。
+            // 与 `hex_view`、`color_view` 都**互斥**（见 `ComTool::resolve_display_mode`），
+            // 所以这份"填满非默认值"的样本里，`ascii_view` 只能为 `false`。它为真时的往返
+            // 由 `ascii_view_alone_survives_round_trip` 单独覆盖。
             ascii_view: false,
             sidebar_open: false,
             language: Language::En,
@@ -581,7 +582,9 @@ mod tests {
     /// 旧存档里「HEX 接收」与「字节查看」同时为真时，启动修复只留 HEX。
     ///
     /// 那个组合渲染出来是**空的**接收区：HEX 分支写 `display_spans`，字节视图读的却是
-    /// `ascii_spans`。修复方向与 `receive_data()` 的分支优先级一致。
+    /// `ascii_spans`。修复方向是"更强的视图胜出"（与下一条 `byte_view_wins_over_color_on_load`
+    /// 同一方向），不是为了迎合 `display_mode()` 的多解顺序——那个顺序只在"互斥没兜住"时
+    /// 才有意义，而它保证任何组合都不会空白。
     #[test]
     fn conflicting_display_modes_are_repaired_on_load() {
         let mut saved = customized();
@@ -590,21 +593,40 @@ mod tests {
 
         let restored = round_trip(&saved);
 
-        assert!(
-            restored.hex_view,
-            "HEX 优先，与 receive_data 的分支顺序一致"
-        );
+        assert!(restored.hex_view, "强的视图胜出：HEX 留住");
         assert!(!restored.ascii_view, "字节视图留着必然是空的，必须被关掉");
+    }
+
+    /// 旧存档里「字节查看」与「颜色」同时为真时，启动修复只留字节查看。
+    ///
+    /// 与上一条同源：彩色视图渲染 `display_spans`，字节模式却只写 `ascii_spans`，两个都
+    /// 开着时接收区**一片空白**（2026-09-24 用户目视发现）。留字节查看是因为"只开字节
+    /// 查看"是合法配置，且颜色只是文本模式的修饰。
+    #[test]
+    fn byte_view_wins_over_color_on_load() {
+        let mut saved = customized();
+        saved.hex_view = false;
+        saved.ascii_view = true;
+        saved.color_view = true;
+
+        let restored = round_trip(&saved);
+
+        assert!(restored.ascii_view);
+        assert!(!restored.color_view, "彩色视图留着必然是空的，必须被关掉");
     }
 
     /// 只开「字节查看」是合法配置，不能被上面那条修复顺手关掉；
     /// 顺带覆盖 `ascii_view`（非默认值）的往返——`customized()` 里它必须是 `false`，
     /// 因为与 `hex_view` 互斥。
+    ///
+    /// `color_view` 在这里显式关掉，否则样本就变成"字节查看 + 颜色"——那是**非法**组合，
+    /// 会被启动修复动过，测的就不是"只开字节查看"这件事了。
     #[test]
     fn ascii_view_alone_survives_round_trip() {
         let mut saved = customized();
         saved.hex_view = false;
         saved.ascii_view = true;
+        saved.color_view = false;
 
         let restored = round_trip(&saved);
 

@@ -900,6 +900,30 @@ fn timestamped_spans(
     }
 }
 
+/// 接收区当前该显示哪一种视图 —— **"显示模式"的唯一判定**。
+///
+/// 「本批字节怎么解释成片段」「写进哪一份镜像」「渲染时画哪一份」这三件事必须由同一个
+/// 判定决定。2026-09-24 之前它们各判各的：片段构造与镜像落点只看 `hex_view` /
+/// `ascii_view`，渲染分支却让 `color_view` 排在最前 ⇒ 「颜色」与「字节查看」同时勾上时，
+/// 数据写进了 `ascii_spans`，界面画的却是**没人写过**的 `display_spans`，接收区一片
+/// 空白（用户目视发现；见 `HANDOVER.md` §3.16）。
+///
+/// 判定顺序**只在开关组合非法**（手改存档、或将来有调用方绕过互斥直接置位）时才有多解，
+/// 方向与 [`ComTool::resolve_display_mode`] 的启动修复一致：`hex` 胜 `ascii`、`ascii` 胜
+/// `color`（更强的视图胜出）。注意顺序**不承担正确性**——落点与渲染同源，所以任何组合都
+/// 不会空白；顺序只决定"非法组合该显示成哪一个"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DisplayMode {
+    /// 彩色文本（`color_view`）
+    Color,
+    /// 字节查看（`ascii_view`）
+    Bytes,
+    /// HEX 接收（`hex_view`）
+    Hex,
+    /// 普通文本
+    Text,
+}
+
 impl ComTool {
     /// 上一批接收内容的结尾是否停在行首（`PerLine` 用它决定本批开头要不要补前缀）。
     ///
@@ -911,31 +935,68 @@ impl ComTool {
         self.receive_text.is_empty() || self.receive_text.ends_with('\n')
     }
 
-    /// 让「HEX 接收」与「字节查看」收敛为**互斥**的合法组合。
+    /// 见 [`DisplayMode`]。渲染、片段构造、镜像落点三处都调它，不要各写一份判断。
     ///
-    /// 为什么两者必须互斥：`receive_data()` 的三种显示模式是一条 `if/else` 链，且
-    /// **HEX 优先于字节查看**——两个都开着时片段只写 `display_spans`，而字节视图渲染
-    /// 的是 `ascii_spans`。结果不是"两种格式混排"，而是字节视图**一片空白**。
+    /// 前两个分支处理的是**互斥失败**（手改存档、或将来有调用方绕过 UI 直接置位）时该
+    /// 认哪个视图，方向与 [`ComTool::resolve_display_mode`] 的启动修复**一致**：
+    /// `hex` 胜 `ascii`、`ascii` 胜 `color`（更强的视图胜出）。第三个分支里的
+    /// `hex + color` 不是冲突而是**合法**组合，返回 `Color` 正是为了保住它改动前的外观
+    /// （彩色的 HEX 文本）。
+    pub(crate) fn display_mode(&self) -> DisplayMode {
+        if self.ascii_view && !self.hex_view {
+            DisplayMode::Bytes
+        } else if self.color_view && !self.ascii_view {
+            DisplayMode::Color
+        } else if self.hex_view {
+            DisplayMode::Hex
+        } else {
+            DisplayMode::Text
+        }
+    }
+
+    /// 让三个显示开关收敛为**合法的互斥组合**。
+    ///
+    /// 合法组合有五种：文本 / HEX / 字节查看 / 彩色文本 / **HEX + 彩色**。两条禁令：
+    /// - **HEX 与字节查看不能同时为真**：片段构造是一条 `if/else` 链，HEX 优先 ⇒ 字节
+    ///   镜像 `ascii_spans` 没人写过，字节视图**一片空白**。
+    /// - **字节查看与颜色不能同时为真**：颜色视图渲染的是 `display_spans`，而字节模式
+    ///   只写 `ascii_spans` ⇒ 彩色视图**一片空白**（同一个缺陷，空的换成另一份镜像）。
     ///
     /// 参数是"本轮用户刚把哪一个勾上"（`.changed()` 且新值为 `true`）。本函数是**把点击
-    /// 落实下来的那一处**：置上刚点的那项、关掉另一项，所以调用方不必先自己把值写回字段，
-    /// 漏写也不会丢点击。不要把方向改成"一律让 HEX 胜出"：那样用户在 HEX 模式下点击
+    /// 落实下来的那一处**：置上刚点的那项、关掉与它冲突的项，所以调用方不必先自己把值写回
+    /// 字段，漏写也不会丢点击。不要把方向改成"一律让视图胜出"：那样用户在 HEX 模式下点
     /// 「字节查看」会被当场撤销，表现为"点了没反应"——比原来的空视图更难排查。
     ///
-    /// 两者都为 `false` 时用于**启动修复**（旧存档可能把两个 `true` 都存了进去），此时
-    /// 不改变任何值，只按 `receive_data()` 的分支优先级把冲突修成"HEX 胜出"。
+    /// 三个参数都为 `false` 时用于**启动修复**（旧存档可能把非法组合存了进去），此时只修
+    /// 冲突、不改用户的选择：`hex` 关 `ascii`、`ascii` 关 `color`。后者是**字节视图胜出**
+    /// 而非颜色胜出，因为"只开字节查看"是合法配置（`config.rs::ascii_view_alone_survives_
+    /// round_trip` 钉着），而颜色只是文本模式的修饰、在转义字节上本来就没有意义。
     ///
-    /// 菜单与接收设置行都调这一个函数——互斥规则只有一处定义，就不会出现"菜单里能
-    /// 同时勾上、主界面里不能"这种两边不一致。
-    pub fn resolve_display_mode(&mut self, hex_just_enabled: bool, ascii_just_enabled: bool) {
+    /// 菜单（`panels/menu_bar.rs`）与接收设置行（`app.rs`）都调这一个函数——互斥规则只有
+    /// 一处定义，就不会出现"菜单里能同时勾上、主界面里不能"这种两边不一致。
+    pub fn resolve_display_mode(
+        &mut self,
+        hex_just_enabled: bool,
+        ascii_just_enabled: bool,
+        color_just_enabled: bool,
+    ) {
         if hex_just_enabled {
             self.hex_view = true;
             self.ascii_view = false;
         } else if ascii_just_enabled {
             self.ascii_view = true;
             self.hex_view = false;
-        } else if self.hex_view && self.ascii_view {
+            self.color_view = false;
+        } else if color_just_enabled {
+            self.color_view = true;
             self.ascii_view = false;
+        } else {
+            if self.hex_view && self.ascii_view {
+                self.ascii_view = false;
+            }
+            if self.ascii_view && self.color_view {
+                self.color_view = false;
+            }
         }
     }
 
@@ -1049,38 +1110,44 @@ impl ComTool {
             // 三种模式各自把本批字节解释成片段；"加时间戳 → 写镜像 → 投日志"这三步
             // 是共同的，放在分支外只实现一次：否则以后新增一种显示模式，很容易漏掉
             // 其中某一步，而漏掉的表现是"某个视图里没有时间戳"这种不显眼的缺陷。
-            let mut spans = if self.hex_view {
-                // HEX 模式：直接按字节显示，不做 ANSI/UTF-8 处理
-                let mut line = String::new();
-                for b in &received {
-                    line.push_str(&format!("{:02X} ", b));
+            // 本批字节怎么解释，由**唯一判定**决定（见 [`ComTool::display_mode`]）。
+            // 在取任何 `&mut self.xxx` 之前先算好：`mode` 是 `Copy`，之后不再借用 `self`。
+            let mode = self.display_mode();
+            let mut spans = match mode {
+                DisplayMode::Hex => {
+                    // HEX 模式：直接按字节显示，不做 ANSI/UTF-8 处理
+                    let mut line = String::new();
+                    for b in &received {
+                        line.push_str(&format!("{:02X} ", b));
+                    }
+                    line.push('\n');
+                    vec![ColoredSpan {
+                        text: line,
+                        style: AnsiStyle::default(),
+                    }]
                 }
-                line.push('\n');
-                vec![ColoredSpan {
-                    text: line,
-                    style: AnsiStyle::default(),
-                }]
-            } else if self.ascii_view {
-                // ASCII 模式：逐字节解码，控制字符/高位字节转义为可见形式
-                ascii_spans_from_bytes(&received)
-            } else {
-                // 文本模式：解析 ANSI 颜色并按当前编码跨包拼接。
-                //
-                // 编码必须是 `feed` 的参数：编码解码只在**文本视图**这条路上发生，
-                // 而 HEX / 字节查看两个视图看到的是原始字节，与编码无关。
-                self.decoder.feed(&received, self.text_encoding)
+                DisplayMode::Bytes => {
+                    // 字节查看：逐字节解码，控制字符/高位字节转义为可见形式
+                    ascii_spans_from_bytes(&received)
+                }
+                // 彩色视图与纯文本视图吃的是**同一份**解释结果：颜色只是渲染方式不同，
+                // 数据怎么解析完全一样。编码必须是 `feed` 的参数：编码解码只在这条路上
+                // 发生，而 HEX / 字节查看两个视图看到的是原始字节，与编码无关。
+                DisplayMode::Color | DisplayMode::Text => {
+                    self.decoder.feed(&received, self.text_encoding)
+                }
             };
 
             spans = self.apply_timestamp_prefix(spans);
 
-            // 镜像落点必须与上面那条 if/else 链**逐分支对应**：HEX 优先于字节查看，
-            // 所以字节镜像的条件里也要把 hex_view 排除掉。
+            // 落点与渲染**同源**：只有 `Bytes` 模式写字节镜像，其余都写显示镜像。
             //
-            // 界面层已经让两者互斥（[`ComTool::resolve_display_mode`]，菜单与接收设置行
-            // 都走它），所以正常操作下到不了这里。这个 `!hex_view` 是**纵深防御**：手改
-            // 存档、或将来有别的调用方绕过 UI 直接置位时，落点仍然与分支一致，而不是把
-            // HEX 片段塞进字节镜像、让字节视图显示出一份"看着像数据其实不该在这"的内容。
-            let to_ascii_mirror = !self.hex_view && self.ascii_view;
+            // 这里不再写 `!self.hex_view && self.ascii_view` 那种"手工与分支对齐"的表达式
+            // ——它已经漏改过一次：`color_view` 加进来时没人同步改它，于是「颜色 + 字节查看」
+            // 同时勾上时数据只进 `ascii_spans`，而彩色视图画的是空的 `display_spans`，
+            // 接收区一片空白（用户目视发现，见 `HANDOVER.md` §3.16）。判定收敛到
+            // `display_mode()` 之后，新增视图只可能在**一处**造成遗漏，且那条路径上有测试。
+            let to_ascii_mirror = mode == DisplayMode::Bytes;
             let mut plain = String::new();
             for span in spans {
                 plain.push_str(&span.text);
@@ -1154,6 +1221,30 @@ impl ComTool {
         font_id: egui::FontId,
     ) -> egui::text::LayoutJob {
         layout_job_from(&self.ascii_spans, default_color, font_id)
+    }
+
+    /// 接收区的渲染分发：**画哪一份镜像由 [`ComTool::display_mode`] 决定**。
+    ///
+    /// 抽成一个函数是**为了可测**。写在 `eframe::App::ui()` 里的话，测试得造一个
+    /// `eframe::Frame`（造不出来），于是"画的是哪一份镜像"就只剩人工目视一条路——
+    /// 而这正是 2026-09-24 那个空白缺陷逃过全部自动化测试的原因：镜像写得没错，
+    /// 错的是"写的那份与画的那份不是同一份"。
+    ///
+    /// 现在它与 `receive_data()` 的落点读的是**同一个判定**，改一处不会漏另一处。
+    pub(crate) fn render_receive_area(&mut self, ui: &mut Ui) {
+        // 先取值再 `match`：`Strings` 的字段是 `&'static str`，先拿出来就不会让
+        // `self.language` 的不可变借用横跨后面需要 `&mut self` 的那两个分支。
+        let copy_all_log = self.language.strings().copy_all_log;
+        match self.display_mode() {
+            DisplayMode::Color => self.render_color_receive(ui),
+            // 字节查看：逐字节解码，控制字符/高位字节转义为可见形式
+            DisplayMode::Bytes => self.render_ascii_receive(ui),
+            // HEX 与普通文本共用同一个渲染：差别只在片段本身（HEX 模式下片段已是
+            // 十六进制文本），不需要两套绘制。
+            DisplayMode::Hex | DisplayMode::Text => {
+                show_plain_receive(ui, &self.receive_text, self.auto_scroll, copy_all_log)
+            }
+        }
     }
 
     pub fn render_color_receive(&mut self, ui: &mut Ui) {
@@ -1773,7 +1864,7 @@ mod tests {
             ascii_view: true,
             ..ComTool::default()
         };
-        app.resolve_display_mode(true, false);
+        app.resolve_display_mode(true, false, false);
 
         assert!(app.hex_view);
         assert!(!app.ascii_view, "字节视图留着必然是空的");
@@ -1789,7 +1880,7 @@ mod tests {
             hex_view: true,
             ..ComTool::default()
         };
-        app.resolve_display_mode(false, true);
+        app.resolve_display_mode(false, true, false);
 
         assert!(!app.hex_view);
         assert!(app.ascii_view, "刚点的那一项必须留下来");
@@ -1803,27 +1894,209 @@ mod tests {
             ascii_view: true,
             ..ComTool::default()
         };
-        app.resolve_display_mode(false, false);
+        app.resolve_display_mode(false, false, false);
 
         assert!(app.hex_view, "与 receive_data 的分支顺序一致");
         assert!(!app.ascii_view);
     }
 
-    /// 合法组合、以及"两个都关掉"（纯文本视图）都不该被这个函数改动。
+    /// 勾上「字节查看」时关掉「颜色」——**用户 2026-09-24 目视发现的那个缺陷**。
+    ///
+    /// 彩色视图渲染 `display_spans`，而字节模式只写 `ascii_spans`：两个都开着时彩色视图
+    /// 是**一片空白**，看上去就像"接收的内容丢了"。
+    #[test]
+    fn enabling_the_byte_view_turns_color_off() {
+        let mut app = ComTool {
+            color_view: true,
+            ..ComTool::default()
+        };
+        app.resolve_display_mode(false, true, false);
+
+        assert!(app.ascii_view);
+        assert!(!app.color_view, "彩色视图留着必然是空的");
+    }
+
+    /// 勾上「颜色」时关掉「字节查看」——方向必须对称：**刚点的那一项要留下**。
+    #[test]
+    fn enabling_color_turns_the_byte_view_off() {
+        let mut app = ComTool {
+            ascii_view: true,
+            ..ComTool::default()
+        };
+        app.resolve_display_mode(false, false, true);
+
+        assert!(app.color_view);
+        assert!(!app.ascii_view, "刚点的那一项必须留下来");
+    }
+
+    /// 启动修复：旧存档里「字节查看」与「颜色」同时为真时留下**字节查看**。
+    ///
+    /// 留字节查看而不是颜色，有两个理由：① "只开字节查看"是合法配置（`config.rs` 那边
+    /// 有一条专门的往返测试）；② 颜色只是文本模式的修饰，在转义后的字节文本上本来就没有
+    /// 意义。方向与 `hex` 关 `ascii` 一致——**更强的视图胜出**。
+    #[test]
+    fn stale_color_and_byte_view_are_repaired_in_favour_of_the_byte_view() {
+        let mut app = ComTool {
+            ascii_view: true,
+            color_view: true,
+            ..ComTool::default()
+        };
+        app.resolve_display_mode(false, false, false);
+
+        assert!(app.ascii_view);
+        assert!(!app.color_view);
+    }
+
+    /// 当前模式下**渲染读的那一份镜像**是否为空。
+    ///
+    /// 测试侧的这份映射必须与 `app.rs` 的渲染分支同源，否则测试会自己骗过自己——两边
+    /// 都跟着 [`DisplayMode`] 走，是同一个判定的两次读取，不是两份各自维护的规则。
+    fn rendered_mirror_is_empty(app: &ComTool) -> bool {
+        match app.display_mode() {
+            DisplayMode::Bytes => app.ascii_spans.is_empty(),
+            DisplayMode::Color => app.display_spans.is_empty(),
+            DisplayMode::Hex | DisplayMode::Text => app.receive_text.is_empty(),
+        }
+    }
+
+    /// ⭐ **回归测试：任何开关组合都不能让接收区空白。**
+    ///
+    /// 这就是 2026-09-24 用户目视发现的缺陷（「颜色」+「字节查看」同时勾上 ⇒ 内容"丢了"）。
+    /// 根因不是"少写了一份镜像"，而是**写进去的那份和画出来的那份不是同一份**——所以这里
+    /// 穷举全部 8 种组合、每种都真的喂一批数据，断言"当前模式下渲染的那份镜像非空"。
+    ///
+    /// 刻意**不做** `resolve_display_mode`：要覆盖的正是"互斥没兜住"的那些组合（手改存档、
+    /// 将来有调用方绕过 UI 直接置位）。注入验证：把 `receive_data()` 的落点改回旧表达式
+    /// `!hex_view && ascii_view`，本测试必须变红（`颜色+字节查看` 与 `HEX+字节查看` 会空）。
+    #[test]
+    fn no_display_combination_leaves_the_receive_area_empty() {
+        for hex_view in [false, true] {
+            for ascii_view in [false, true] {
+                for color_view in [false, true] {
+                    let mut app = ComTool {
+                        hex_view,
+                        ascii_view,
+                        color_view,
+                        ..ComTool::default()
+                    };
+                    feed(&mut app, b"AB\n");
+
+                    assert!(
+                        !rendered_mirror_is_empty(&app),
+                        "HEX={hex_view} 字节查看={ascii_view} 颜色={color_view} 这组开关让\
+                         接收区空白了 —— 写镜像与画镜像用的不是同一个判定"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 合法组合不该被修复动到：`ascii` 与 `hex`、`ascii` 与 `color` 各自互斥，
+    /// 但 `hex + color` 是**合法**的（HEX 文本 + 彩色组件），必须原样保留。
     #[test]
     fn legal_display_combinations_are_left_alone() {
-        for (hex_view, ascii_view) in [(true, false), (false, true), (false, false)] {
+        for (hex_view, ascii_view, color_view) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+            (false, false, true),
+            (true, false, true),
+        ] {
             let mut app = ComTool {
                 hex_view,
                 ascii_view,
+                color_view,
                 ..ComTool::default()
             };
-            app.resolve_display_mode(false, false);
+            app.resolve_display_mode(false, false, false);
 
             assert_eq!(
-                (app.hex_view, app.ascii_view),
-                (hex_view, ascii_view),
-                "HEX={hex_view} 字节查看={ascii_view} 是合法组合，不该被改"
+                (app.hex_view, app.ascii_view, app.color_view),
+                (hex_view, ascii_view, color_view),
+                "HEX={hex_view} 字节查看={ascii_view} 颜色={color_view} 是合法组合，不该被改"
+            );
+        }
+    }
+
+    /// 把一次**接收区**绘制里落笔的文字抠出来（拼成一串）。
+    ///
+    /// 走 `Context::run_ui` 而不是 `__run_test_ui`——后者把输出丢掉，什么也观察不到，
+    /// 那正是"空转测试"的来源（见 `panels/mod.rs::painted_texts` 的同款说明）。
+    fn painted_receive_texts(app: &mut ComTool) -> String {
+        let ctx = egui::Context::default();
+        // 屏幕尺寸必须给：`run_ui` 的第一个参数是**输入**而不是矩形。不给的话容器尺寸是
+        // 默认值，滚动区里可能一行都排不下，于是"画出来了没"这件事本身就不可信。
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(1200.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            app.render_receive_area(ui);
+        });
+
+        let mut texts = String::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                texts.push_str(text_shape.galley.text());
+            }
+        }
+
+        // `FullOutput` 带着纹理增量，直接 drop 会 panic（`__run_test_ui` 内部就是靠
+        // `drop_without_applying_deltas()` 绕开的）。不需要纹理，显式丢弃——否则这条
+        // 测试会因为一个与断言无关的清理问题变红，看起来像抓到了缺陷。
+        out.textures_delta.clear();
+        texts
+    }
+
+    /// ⭐ **接收区画的是"当前模式那一份"镜像** —— 三处同源的直接判据。
+    ///
+    /// 上面那条穷举测试只看"镜像非空"，看不到渲染分发；而 2026-09-24 那个缺陷恰恰是
+    /// **写对了、画错了**。这条测试补上这一环：三份镜像内容各不相同，从"画出来的字"
+    /// 反推画的是哪一份。
+    ///
+    /// 注入验证：把 `render_receive_area` 的分发改回 `if self.color_view { … } else if
+    /// self.ascii_view { … }`，`颜色+字节查看` 那一档会画出 `COLOR-MARK`，而这里期望
+    /// `BYTES-MARK` ⇒ 变红。
+    #[test]
+    fn the_receive_area_paints_the_mirror_of_the_current_mode() {
+        for (hex_view, ascii_view, color_view, expected) in [
+            (false, false, false, "PLAIN-MARK"),
+            (true, false, false, "PLAIN-MARK"),
+            (false, false, true, "COLOR-MARK"),
+            (false, true, false, "BYTES-MARK"),
+            (true, false, true, "COLOR-MARK"),
+            (false, true, true, "BYTES-MARK"),
+            (true, true, false, "PLAIN-MARK"),
+            (true, true, true, "PLAIN-MARK"),
+        ] {
+            let mut app = ComTool {
+                hex_view,
+                ascii_view,
+                color_view,
+                ..ComTool::default()
+            };
+            // 三份镜像摆上互不相同的标记。（`render_*` 内部会调一次 `receive_data()`，
+            // 但没有新数据时它不会追加，手工摆好的镜像不会被冲掉。）
+            app.display_spans.push(ColoredSpan {
+                text: "COLOR-MARK\n".into(),
+                style: AnsiStyle::default(),
+            });
+            app.ascii_spans.push(ColoredSpan {
+                text: "BYTES-MARK\n".into(),
+                style: AnsiStyle::default(),
+            });
+            app.receive_text = "PLAIN-MARK\n".into();
+            app.ascii_text = "BYTES-MARK\n".into();
+
+            let painted = painted_receive_texts(&mut app);
+
+            assert!(
+                painted.contains(expected),
+                "HEX={hex_view} 字节查看={ascii_view} 颜色={color_view} 应当画出 \
+                 {expected}，实际画出: {painted:?}"
             );
         }
     }

@@ -67,7 +67,6 @@ impl ComTool {
                     self.show_panel_checkboxes(ui);
                     ui.separator();
                     ui.label(s.display_mode_heading);
-                    ui.checkbox(&mut self.color_view, s.color);
                     self.display_mode_checkboxes(ui);
                     ui.separator();
                     ui.checkbox(&mut self.auto_scroll, s.auto_scroll);
@@ -104,20 +103,28 @@ impl ComTool {
         action
     }
 
-    /// 「HEX 接收」与「字节查看」勾选，并保证两者**互斥**。
+    /// 「颜色」「HEX 接收」「字节查看」三个勾选框，并保证三者的组合**合法**。
     ///
     /// 互斥规则本身只有一处实现（[`ComTool::resolve_display_mode`]），这里只负责把
     /// "本轮哪个刚被勾上"传给它。用局部变量而不是直接绑定字段，是因为本轮改动前后的
-    /// 值都要参与判断，且必须一次性写回——边画边改字段会让两个勾选框在同一帧里互相覆盖。
+    /// 值都要参与判断，且必须一次性写回——边画边改字段会让勾选框在同一帧里互相覆盖。
+    ///
+    /// **三个必须在这里一起收集、只调一次裁决函数**。「颜色」原先是在调用点单独
+    /// `ui.checkbox(&mut self.color_view, …)` 画的，压根没进这个函数 —— 于是菜单这条
+    /// 入口可以把它与「字节查看」同时勾上，接收区一片空白（2026-09-24 用户目视发现，
+    /// 见 `HANDOVER.md` §3.16）。绘制顺序沿用改动前的外观：颜色 → HEX 接收 → 字节查看。
     fn display_mode_checkboxes(&mut self, ui: &mut Ui) {
         let s = self.language.strings();
+        let mut color_view = self.color_view;
         let mut hex_view = self.hex_view;
         let mut ascii_view = self.ascii_view;
+        let color_just_enabled = ui.checkbox(&mut color_view, s.color).changed() && color_view;
         let hex_just_enabled = ui.checkbox(&mut hex_view, s.hex_receive).changed() && hex_view;
         let ascii_just_enabled = ui.checkbox(&mut ascii_view, s.byte_view).changed() && ascii_view;
+        self.color_view = color_view;
         self.hex_view = hex_view;
         self.ascii_view = ascii_view;
-        self.resolve_display_mode(hex_just_enabled, ascii_just_enabled);
+        self.resolve_display_mode(hex_just_enabled, ascii_just_enabled, color_just_enabled);
     }
 
     /// 面板显隐勾选，并保证**至少保留一个可见面板**。
