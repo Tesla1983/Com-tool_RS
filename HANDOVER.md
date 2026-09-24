@@ -1879,7 +1879,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 302 passed / 1 ignored / fmt 干净）
+# 3. 建立门禁基线（应为 0 warning / 308 passed / 1 ignored / fmt 干净）
 cargo fmt && cargo check --all-targets && cargo test
 
 # 4. 看清两个版本的差异
