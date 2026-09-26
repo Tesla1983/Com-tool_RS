@@ -1759,5 +1759,16 @@ so no parent scroll will use it" 原注释仍在原位）、`eframe/src/epi.rs:2
 **验证**：`fmt --check` 干净 · `check --all-targets` 0 warning ·
 `clippy --all-targets` **0 warning** · `test` **351 passed + 1 ignored**（本轮 +11 条：
 `send.rs` 5 条纯函数、`app.rs` 6 条无头 UI、`config.rs` 2 条持久化）。未运行本项目、
-未触碰任何串口。**仍需目视一眼**：把手的观感（三道斜线是否太小、悬停高亮是否够明显）
-只能人眼判。
+未触碰任何串口。
+
+**人工审查（2026-09-26 22:35，用户原话「人工审查本次修改通过，落盘」）：通过，未提改动。**
+观感项（三道斜线是否太小、悬停高亮是否够明显）由人眼确认，自动化测不到。
+
+**★ 落盘的实证（不是测试断言）**：审查时用户把高度拖到 **8 行**并退出程序，随后在真实存档
+`C:\Users\Administrator\AppData\Roaming\ComTool-RS\data\app.ron`（22:36 写入）里读到的就是
+`send_visible_rows: 8`；`send_rows_drag_px` **在文件中不存在**（`#[serde(skip)]`，运行时余量
+不参与序列化）。这条比 `config.rs` 那 2 条往返测试更有说服力——往返测试只证明"序列化再读
+回来不变"，而这里证明的是"**eframe 真的在退出时调用了 `save()`**"，那是唯一一条只能由真实
+运行才能走到的路径（`App::save` 要一个 `eframe::Storage`，无头测不出来）。
+顺带记一个将来查同类问题的落点：eframe 在 Windows 上的存档是
+`%APPDATA%\ComTool-RS\data\app.ron`（目录名由 `NativeOptions` 的 `app_id` 决定）。
