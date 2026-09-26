@@ -50,7 +50,7 @@
 ### 3. 默认允许的操作
 
 `cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` / `cargo build`
-等**不启动 GUI、不触碰串口**的静态检查与测试命令。本项目的 351 条测试全部不需要串口硬件，
+等**不启动 GUI、不触碰串口**的静态检查与测试命令。本项目的 354 条测试全部不需要串口硬件，
 所有验收一律以这些命令为准。
 
 **⚠️ 交付界面前置条件（用户明确要求，2026-09-24）：请用户"目视 / 目测审查"之前，必须先跑
@@ -156,7 +156,7 @@ machine, or the rules stay on paper while the enforcement silently disappears.
 - **主题偏好存自有 `ThemeChoice`**，不存 `egui::ThemePreference`（后者会跟随系统、覆盖用户选择）。
 - **`egui_plot` 版本号与 egui 不同步**（0.37 才配 `egui ^0.36`），升级前先核对。
 - **要请用户目视之前必须先 `cargo build --release`**：`fmt` / `check` / `test` / `clippy` 都不产出可执行文件（见 `DEVELOPMENT_GUIDE.md` §6 约定 49）。
-- **门禁四项**：`fmt --check` 干净 · `check --all-targets` 0 warning · `test` 351 passed + 1 ignored · `clippy --all-targets` **0 warning**。
+- **门禁四项**：`fmt --check` 干净 · `check --all-targets` 0 warning · `test` 354 passed + 1 ignored · `clippy --all-targets` **0 warning**。
 - **测试判据不许引用实现常量**（阈值写字面量），且**必须做空转验证**（故意破坏被测机制，确认测试会红）。
 - **发送框高度由用户拖把手决定**：视口 = `send_visible_rows` 行（落盘，2~40），内容更多时**框内滚动**而不是把下面的按钮撑出屏幕。把手感 `click_and_drag`（双击复位要靠 `Flags::CLICKED`，只感 drag 拿不到双击）。
 

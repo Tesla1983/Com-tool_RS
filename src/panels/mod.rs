@@ -59,6 +59,10 @@ mod tests {
                 &app.receive_text,
                 app.auto_scroll,
                 app.language.strings().copy_all_log,
+                // 这一条只验"参数确实从 `ComTool` 传到了滚动区"，没有裁过内容，
+                // 也就没有可补偿的东西。补偿本身由 `receive::tests` 里那条
+                // 长时间停留的回归测试覆盖。
+                None,
             );
         });
         egui::__run_test_ui(|ui| {
@@ -76,6 +80,7 @@ mod tests {
                 &app.receive_text,
                 app.auto_scroll,
                 app.language.strings().copy_all_log,
+                None,
             );
         });
     }

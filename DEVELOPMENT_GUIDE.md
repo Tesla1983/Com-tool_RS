@@ -23,10 +23,10 @@ COM3 受「长测门闩」保护，COM4 是 AI 功能测试放行端口（但必
   或 `DtrEnable = true`。**没置 DTR 收不到日志不是程序的问题**，先查这一项。
   一条命令同时点名 COM3 与 COM4 时 COM3 优先。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。**351** 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。**354** 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **门禁口径（四项全绿才算过）**：`cargo fmt --check` 干净 · `cargo check --all-targets`
-  **0 warning** · `cargo test` **351 passed + 1 ignored** · `cargo clippy --all-targets`
+  **0 warning** · `cargo test` **354 passed + 1 ignored** · `cargo clippy --all-targets`
   **0 warning**。最后一项 2026-09-26 起从"0 新增"收紧为 **0 warning**——原先的口径等于
   默许 8 条历史欠账永久存在（逐条见 `HISTORY_2026.md` §3.24）。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
@@ -838,9 +838,17 @@ impl eframe::App for ComTool {
       `t.pos.y + row.rect().max.y > clipped.clip_rect.top()` 找出**压在视口顶部的行**，`clip_rect` 必须
       是接收区可视区（实测 400 高，不是整窗 600）。认出"日志那一份"**不能**要求文本以 `line ` 开头：
       分帧追平期间截口会落在行中间（顶行是半行）。
-    - **留档取舍**：读历史时放宽会让内存临时超过 `max_log_chars`（默认 30 000 → 至多 60 000 字符/镜像）；
-      长时间停在历史里且设备一直喷数据，到额度后恢复淘汰，**那一刻阅读位置会跳一次**——这是"内存上限
-      优先于阅读位置"的明确选择（`HISTORY_2026.md` §3.23）。
+    - **留档取舍（2026-09-27 已改，见 §3.28）**：原先写的是"到额度后恢复淘汰，阅读位置跳一次，
+      内存上限优先"。用户第二轮报告（"停留超过一定的时间，日志又自动滚动，再往上滚也停不住"）
+      证明这个取舍**用户不接受** ⇒ 现在改成：额度用尽后**照旧淘汰，但滚动位置同步往回退**
+      （`take_front_trim_compensation`），并且**最多裁到视口顶行为止**（`cut.min(headroom)`），
+      于是阅读位置一直不动，代价是内存一路涨到 `max_log_chars + RECEIVE_PARKED_EXTRA_CAP`
+      （默认合计 90 000 字符）。**越过那个硬上限才会重新让位给内存**，这是唯一的例外。
+    - ⭐ **从前端删内容的两条硬规则**（都是量出来的，§3.28）：① **截口必须落在行首**——
+      `floor_cut_to_line_boundary()` 方向是"宁可少裁"，**不足一行就这一帧不裁**；实测"差一个字符
+      就照原样裁"会让每帧切掉 29 字符、把最前面一行连同其换行一起吃掉 ⇒ 视口顶行逐帧被换成下一行
+      （增量 `+1, 0, +1, 0 …`）。② **补偿基准取上一帧 `out.state.offset.y`**，不能用
+      `State::load`（绘制前的上下文里它恒为 `None` ⇒ 基准变 0 ⇒ 视口被钉死在顶部）。
     - **同族提醒**：任何"从容器**前端**删内容"的操作都会造成同样的位移（不仅是日志：列表、表格虚拟滚动
       同理）。判据一律用"用户正在读的那一项是否还停在原地"，不要用滚动条数值。
 
@@ -865,7 +873,7 @@ impl eframe::App for ComTool {
 - This is a single Rust 2024 binary crate (`comtool-rs`); the executable entrypoint is `src/main.rs`.
 - Module map:
   - `src/app.rs` — `ComTool` state, `Default`, connection lifecycle (`open_connection` / `close_connection` / `teardown_channel`, branching on `ConnectionKind`), the `ThemeChoice` / `Language` / `ConnectionKind` preference enums, view-level helpers (`visible_panel_count`, `apply_theme`), the `eframe::App` top-level orchestration, and (F5) the control-line entry point (`apply_line_state`), the send-byte counter allocation in `transmit`, port hot-plug (`rescan_ports` / `note_focus`), and the preset row renderer (`render_send_presets`). `Language` carries 12 variants (`Zh, En, ZhHant, Ja, Es, It, Pt, Id, Fr, De, Ko, Vi`), a `const ALL` in the *same order* as the string-table columns, and `endonym()` (each locale's own name, used by the settings dropdown so a user can always recognise their own language) — variants are `Serialize`/`Deserialize` by name, so only ever append.
-  - `src/receive.rs` — the receive pipeline: mirrored state, `AnsiDecoder`, byte-level ASCII visualization, the optional timestamp prefix (`TimestampPrefix` / `format_timestamp` / `timestamped_spans`), display-mode exclusivity (`resolve_display_mode`), layout building, the three view renderers, and the `max_log_chars` FIFO trimming (`trim_text_front` / `trim_spans_front`). **The trim limit is not the constant `max_log_chars`**: each render reports where the viewport sits (`ReceiveScrollOutcome` → `ComTool::receive_at_bottom` / `receive_trim_budget`), and while the user has scrolled back to read history the oldest content is **kept** (`RECEIVE_TRIM_DEFER_ALLOWANCE`) — dropping it would shift the text under their eyes, which looks exactly like "auto-scroll never stopped". Returning to the bottom catches up in per-frame instalments (`trim_budget_per_frame`) because shortening the content by more than one viewport height in a single frame blanks the log for that frame (egui lays out with the previous frame's offset and only clamps it afterwards). See `DEVELOPMENT_GUIDE.md` §6 no. 58. `ChannelEvent::Notice` is handled here too: it writes a note **without** touching `connected` or stopping repeat-send.
+  - `src/receive.rs` — the receive pipeline: mirrored state, `AnsiDecoder`, byte-level ASCII visualization, the optional timestamp prefix (`TimestampPrefix` / `format_timestamp` / `timestamped_spans`), display-mode exclusivity (`resolve_display_mode`), layout building, the three view renderers, and the `max_log_chars` FIFO trimming (`trim_text_front` / `trim_spans_front`). **The trim limit is not the constant `max_log_chars`**: each render reports where the viewport sits (`ReceiveScrollOutcome` → `ComTool::receive_at_bottom` / `receive_trim_budget`), and while the user has scrolled back to read history the oldest content is **kept** (`RECEIVE_TRIM_DEFER_ALLOWANCE`) — dropping it would shift the text under their eyes, which looks exactly like "auto-scroll never stopped". Returning to the bottom catches up in per-frame instalments (`trim_budget_per_frame`) because shortening the content by more than one viewport height in a single frame blanks the log for that frame (egui lays out with the previous frame's offset and only clamps it afterwards). ⭐ Once the allowance is exhausted, trimming **resumes** but must not steal the reading position: `RECEIVE_PARKED_EXTRA_CAP` bounds how far the buffer may grow while parked, `floor_cut_to_line_boundary` keeps every cut on a line start (a half-line cut eats the line the user is reading), and `take_front_trim_compensation` rewinds the scroll offset by the re-laid-out height of the trimmed head so the viewport keeps pointing at the same line. See `DEVELOPMENT_GUIDE.md` §6 no. 58 and `HISTORY_2026.md` §3.28. `ChannelEvent::Notice` is handled here too: it writes a note **without** touching `connected` or stopping repeat-send.
   - `src/send.rs` — send-side pure logic: `parse_hex` / `parse_escapes` (returning `EscItem::{Literal, Bytes}`), `build_payload`, `SendFormat` (text / HEX / escape), `SendHistory` / `HistoryNav`, and (F5) `SendPresets` + `preset_label`. No `egui` and no serial dependency, so it is unit-testable as-is.
   - `src/log_file.rs` — real-time file logging: the `LogSink` writer thread, file-name template rendering, same-name collision handling, the bounded write queue, and the `impl ComTool` entry points (`start_logging` / `stop_logging` / `log_append` / `poll_log_events`).
   - `src/chart.rs` — the real-time chart's data layer: parsing the raw byte stream into multi-channel numeric series (`ChartData`), plus `impl ComTool { clear_chart }`. Deliberately free of any `egui` dependency so it is testable on its own.

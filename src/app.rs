@@ -571,6 +571,42 @@ pub struct ComTool {
     /// `usize::MAX` = 不限制（还没有实测数据时的兜底：没数据就说明还没画过，那时也不可能
     /// 有欠账；真有异常值也不该因此把内存上限放开）。
     pub receive_trim_budget: usize,
+    /// 本帧从接收日志**最旧端**裁掉的那一段原文，等下一次绘制接收区时用来补偿滚动位置。
+    ///
+    /// 为什么必须留着它：淘汰发生在内容最旧的一端，而它同时改变"滚动位置指向的是哪一行"
+    /// ——内容整体上移、像素位置不变，视口里那一行就被换成了更晚的一行（观感＝"日志还在
+    /// 自动滚"）。把裁掉的那段**按同样的折行宽度排版一遍**就能量出它占了多少像素，于是
+    /// 让滚动位置同步减去这个高度，视口指着的还是原来那一行。
+    ///
+    /// 只有"有人正在看"才需要补偿 ⇒ 接收区没画时 `trim_receive_logs` 不往这里累积
+    /// （见 [`crate::receive::ComTool::trim_receive_logs`]），否则它会一路涨成第二份日志。
+    #[serde(skip)]
+    pub receive_trimmed_head: String,
+    /// 上一次绘制接收区**结束时**的纵向滚动位置（像素）。
+    ///
+    /// 补偿的基准必须是"用户实际看到的位置"。⚠️ **不能改用
+    /// `egui::scroll_area::State::load` 去读**：实测在绘制前的上下文里它恒返回 `None`
+    /// （基准取成 0 ⇒ 视口被钉死在最顶部）。而这个值取自 `ScrollArea::show` 的返回值，
+    /// 是 egui 自己算完贴底判定之后的最终结果——用户正在跟随最新数据时它等于最大值，
+    /// 那种情况下贴底逻辑本来就会覆盖补偿，用哪个值都不影响结果。
+    ///
+    /// `None` = 还没画过，无从换算 ⇒ 那一帧不补偿。
+    #[serde(skip)]
+    pub receive_last_offset_y: Option<f32>,
+    /// 上一次绘制接收区时的可视区**宽度**（像素）。
+    ///
+    /// 补偿要按"与当时相同的折行宽度"排版被裁文本，折行宽度不同 ⇒ 量出来的高度不同
+    /// （同一段文字窄窗口里会折成两倍的行数）。第一帧还没有这个数（0），此时不补偿。
+    #[serde(skip)]
+    pub receive_viewport_w: f32,
+    /// 上一次绘制接收区实测的"每字符多少像素高"（`内容高 / 字符数`）。
+    ///
+    /// 把"视口顶行之上有多少像素"（`receive_last_offset_y`）换算成"还能安全裁多少
+    /// 字符"要用它——保住阅读位置那条规则的输入就是这两个数（见
+    /// [`crate::receive::ComTool::reading_headroom_chars`]）。0.0 = 还没量出来，
+    /// 此时不做那条收紧。
+    #[serde(skip)]
+    pub receive_px_per_char: f32,
     /// 正在运行的实时文件日志。`Some` 即表示「记录中」——不另设 bool 标志位，
     /// 两个字段表达同一件事迟早会不一致。
     #[serde(skip)]
@@ -1449,6 +1485,10 @@ impl Default for ComTool {
             auto_scroll: true,
             receive_at_bottom: true,
             receive_trim_budget: usize::MAX,
+            receive_trimmed_head: String::new(),
+            receive_last_offset_y: None,
+            receive_viewport_w: 0.0,
+            receive_px_per_char: 0.0,
             max_log_chars: DEFAULT_MAX_LOG_CHARS,
             timestamp_prefix: TimestampPrefix::default(),
             repaint_interval_ms: DEFAULT_REPAINT_INTERVAL_MS,
