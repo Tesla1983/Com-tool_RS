@@ -1761,6 +1761,32 @@ UI 文案**（15 种语言表不用动），也没有新增设置项。
 ——"内存上限优先于阅读位置"的明确选择。另一条已确认的现状：**「自动滚动」勾选框不会因手动上滚而
 自动取消**（它表达的是"回到最新就继续跟随"的意图）；用户尚未要求改，先记为现状。
 
+### 3.24 增量（2026-09-26：技术债清理第 2 项 —— clippy 8 条既有警告清零）
+
+用户按技术债报告的顺序（2 → 4 → 3 → 1）要求实施，第 2 项即"8 条既有 clippy 警告一次性清零"。
+**逐条手改，没有用 `cargo clippy --fix` 一键套用**——其中一条需要改公开方法名（见下），
+一键修会在不知情的情况下改语义。
+
+| # | lint | 位置 | 修法 |
+|---|---|---|---|
+| 1 | `needless_option_as_deref` | `app.rs:597` | `cc.storage.as_deref()` → `cc.storage`。`eframe` 的 `CreationContext::storage` 本身已是 `Option<&dyn Storage>`，`as_deref()` 解出来是同一个类型 |
+| 2 | `unnecessary_map_or` | `app.rs:678` | `.map_or(true, …)` → `.is_none_or(…)`。语义不变："没有上次尝试 → 立刻试" |
+| 3 | `needless_borrow` | `app.rs:715` | `&self.receive_text.as_bytes()` → 去掉 `&`，`as_bytes()` 已是 `&[u8]` |
+| 4~6 | `manual_range_contains` ×3 | `receive.rs:141/143/145` | UTF-8 lead 字节的三档判断改成 `(0xC0..=0xDF).contains(&lead)` 等，顺带让"四段连续区间"这件事在代码里看得出来 |
+| 7 | `derivable_impls` | `receive.rs:165` | `AnsiStyle` 的手写 `Default` → `#[derive(Default)]`（两字段都是零值） |
+| 8 | `wrong_self_convention` | `send.rs:366` | **唯一一条不能一键修的**：`SendHistory::from_back(&self, …)`。clippy 规定 `from_*` 不接受 `self`（那是"从别物构造新值"的命名），而这是"从已有集合取一条"。重命名为 **`nth_newest`**，与同文件 `HistoryNav` 的 `older` / `newer` 同族 |
+
+`nth_newest` 的重命名是**纯内部 API**（单 binary crate，无下游），7 处调用点（3 处生产 +
+4 处测试）全部同步改完，338 条测试一次通过。
+
+**门禁口径收紧**：此前是"0 新增"（等于默许 8 条欠账永久存在），现改为 **`cargo clippy
+--all-targets` 必须 0 warning**。落点：`AGENTS.md` §7（英文摘要段）、`DEVELOPMENT_GUIDE.md`
+§0 门禁行、`HANDOVER.md` §9 快速上手。
+
+**验证**：`cargo clippy --all-targets` **0 warning**（此前 bin + test 各 8 条）；
+`fmt --check` 干净；`check --all-targets` 0 warning；`test` **338 passed + 1 ignored**。
+未运行本项目、未触碰任何串口。
+
 ## 4. 未决事项
 
 ### ① GPLv3 合规（**已降为最低优先级**）
@@ -2346,7 +2372,7 @@ UI 文案**（15 种语言表不用动），也没有新增设置项。
 | 低 | UDP 的 `send` 仍可能被本机网卡出口堵住 | `net_impl/udp.rs::write`（刻意保持阻塞） | 与 TCP 那条**不是同一个问题**：本机到对端的**网卡出口**被打满时（例如 100 Mbps 网卡上持续满速发大包），`send` 仍会阻塞。实测在回环上向从不 `recv` 的对端发 4000 × 60 KB 是 **0 次失败 / 最坏 0.1 ms**，所以没有"对端停读 ⇒ worker 卡住"这条常被踩到的路径，这是 UDP 不改非阻塞的依据。但要构造出出口饱和需要真实网卡与真实流量，**未实测**，因此保留为已知残余风险；真出现时应按 TCP 同样的方式改非阻塞（`WouldBlock` 对 UDP 是"本机队列满、报文未发出"，语义清晰、无重发歧义） |
 | ~~低~~ **已清理** | ~~2 个未使用依赖~~ | `Cargo.toml` | 已于 P6 第 1 批移除：`tokio`（features = `["full"]`，零调用，明显拖慢编译）与 `egui-chinese-font`（零调用，中文字体已由 `main.rs::setup_fonts` 读系统字体实现）。`chrono` / `egui_plot` / `rfd` / `serde` / `serialport` 仍是活跃依赖 |
 | ~~低~~ **已修** | ~~侧边栏连接按钮的**文案与动作是反的**~~ | `sidebar.rs` | **已于 2026-09-21（F4）修复**：原来「已连接」时按钮显示「打开串口」、点下去却执行关闭，从上游继承而来（`e2039ff:src/sidebar.rs:157` 即在）。F4 重写这段时一并改成同向，并按传输类型分叉文案。见 §3.8 |
-| 低 | 8 条 clippy 风格警告 | `app.rs` / `receive.rs` | 2026-09-24 按 `cargo clippy --all-targets` **逐类现场重数**（此前这一行写的是 `derivable_impls`×2，与实测不符，已订正）：`manual_range_contains`×3（`manual RangeInclusive::contains implementation`）、`derivable_impls`、`unnecessary_map_or`、`redundant_borrow`、`wrong_self_convention`（`methods called from_* usually take no self`）、deref 冗余（`derefed type is same as origin`）各 1 条，共 **8 条**。全部位于**本任务未触及**的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写）。`cargo clippy --fix` 可一键清掉，但那会改动范围之外的代码，因此留作一次专门的"清警告"提交（P6 收尾不再处理） |
+| ~~低~~ **已清零** | ~~8 条 clippy 风格警告~~ | `app.rs` / `receive.rs` | ✅ **已于 2026-09-26 清零**（8 → 0，见 §3.24）。逐条手改而非 `cargo clippy --fix` 一键套用（其中 `wrong_self_convention` 一条需把 `SendHistory::from_back` 重命名为 `nth_newest`，一键修会在不知情的情况下改公开 API）。门禁同步从"0 新增"收紧为 **0 warning**。以下为清零前的现场记录（2026-09-24 按 `cargo clippy --all-targets` **逐类现场重数**，此前这一行写的是 `derivable_impls`×2，与实测不符，已订正）：`manual_range_contains`×3（`manual RangeInclusive::contains implementation`）、`derivable_impls`、`unnecessary_map_or`、`redundant_borrow`、`wrong_self_convention`（`methods called from_* usually take no self`）、deref 冗余（`derefed type is same as origin`）各 1 条，共 **8 条**。全部位于**本任务未触及**的既有代码（P4 顺带修掉了 `send_data` 里那条 `collapsible_if`，因为该函数被重写）。`cargo clippy --fix` 可一键清掉，但那会改动范围之外的代码，因此留作一次专门的"清警告"提交（P6 收尾不再处理） |
 | 低 | 记录中途改配置不切换文件 | `log_file.rs` | 记录过程中改「文件名模板」或「输出目录」不会切到新文件，下次开始记录才生效；界面上没有特别提示 |
 | 低 | **图表不支持无换行的连续逗号流** | `chart.rs::push_bytes` | 通道语义（第 k 个字段 = 第 k 条曲线）要求「一行一组」；无换行时通道数只能靠猜，猜错就画错位。因此这类数据在超过 4096 字节后被**整行丢弃**并在界面计数。属于明确的设计取舍，不是待修 bug |
 | 低 | 绘制抽样（4000 点/曲线）未在界面暴露 | `panels/chart.rs` | 样本上限（可配）与绘制抽样（固定 4000）是两层不同的限制，界面只显示了前者。用户设到 10 万时会看到"曲线比样本数少"，目前只能靠文档解释 |
@@ -2582,8 +2608,9 @@ cd E:/Downloads/Zed/AI_comtool-rs
 # 2. 确认分支与状态（应为 ai-refactor，工作区干净）
 git branch --show-current && git status --short
 
-# 3. 建立门禁基线（应为 0 warning / 338 passed / 1 ignored / fmt 干净）
-cargo fmt && cargo check --all-targets && cargo test
+# 3. 建立门禁基线（应为 0 warning / 338 passed / 1 ignored / fmt 干净 /
+#    clippy --all-targets **0 warning**）
+cargo fmt && cargo check --all-targets && cargo test && cargo clippy --all-targets
 
 # 4. 看清两个版本的差异
 git diff master ai-refactor --stat
@@ -2598,7 +2625,8 @@ git diff master ai-refactor --stat
 #    确认通过"）、第 76 项（2026-09-24）与第 77 项（2026-09-26 用户人工审查通过）。第 72/73/74
 #    项属"用户目视**发现**问题 → 已修"，**修复后没有再次目视确认的记录**。第 44~47 / 56 / 58 项
 #    依赖硬件，第 1~5 项（磁盘持久化）从未做过一次。
-#    之后是 §5 里那 8 条既有 clippy 警告的清理；GPLv3 合规已降为最低优先级（§4①）。
+#    ✅ **clippy 已于 2026-09-26 清零**（8 → 0），门禁口径同步从"0 新增"提到"0 warning"，
+#    见 §3.24；GPLv3 合规已降为最低优先级（§4①）。
 ```
 
 如果你要对照原版行为：`git -C E:\Downloads\Zed\comtool-rs log -1`（原版停在 `04dc007`），

@@ -594,7 +594,9 @@ impl ComTool {
     /// 存档只提供用户偏好；串口句柄、事件通道、端口列表等运行时状态由
     /// [`crate::config::load`] 统一重建。
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        crate::config::load(cc.storage.as_deref())
+        // `cc.storage` 已经是 `Option<&dyn Storage>`，`as_deref()` 解出来的还是同一个类型
+        // （clippy::needless_option_as_deref）。
+        crate::config::load(cc.storage)
     }
 }
 
@@ -675,9 +677,10 @@ impl ComTool {
 
         let now = Instant::now();
         let wait = reconnect_backoff(self.reconnect_failures);
+        // `is_none_or` = "没有上次尝试（第一次）→ 立刻试；有 → 等到退避期满"。
         let need_retry = self
             .last_reconnect_attempt
-            .map_or(true, |t| now.duration_since(t) >= wait);
+            .is_none_or(|t| now.duration_since(t) >= wait);
         if !need_retry {
             return;
         }
@@ -712,7 +715,8 @@ impl ComTool {
         else {
             return;
         };
-        match std::fs::write(&path, &self.receive_text.as_bytes()) {
+        // `as_bytes()` 已经是 `&[u8]`，再取一次引用只是多一层（clippy::needless_borrow）。
+        match std::fs::write(&path, self.receive_text.as_bytes()) {
             Ok(_) => {
                 self.push_receive_note(format!("已导出到: {}\n", path.display()));
             }

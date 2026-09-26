@@ -363,7 +363,11 @@ impl SendHistory {
     }
 
     /// 从最新往旧数第 `back` 条（`0` = 最近一条）。越界返回 `None`。
-    pub fn from_back(&self, back: usize) -> Option<&str> {
+    ///
+    /// 名字不叫 `from_back`：clippy 的 `wrong_self_convention` 规定 `from_*` 一律不
+    /// 接受 `self`（那是"从别的东西构造出一个新值"的命名），而这个是"从已有集合里取
+    /// 一条"。`nth_newest` 与 `HistoryNav` 的 `older` / `newer` 同族，方向一眼可见。
+    pub fn nth_newest(&self, back: usize) -> Option<&str> {
         let index = self.entries.len().checked_sub(back + 1)?;
         self.entries.get(index).map(String::as_str)
     }
@@ -490,7 +494,7 @@ impl HistoryNav {
             None => 0,
             Some(i) => i + 1,
         };
-        let text = history.from_back(next)?.to_string();
+        let text = history.nth_newest(next)?.to_string();
         if self.cursor.is_none() {
             // 只在"从编辑态第一次进入历史"时记草稿，之后连续按 ↑ 不该覆盖它。
             self.draft = Some(current.to_string());
@@ -510,7 +514,7 @@ impl HistoryNav {
             return self.draft.take();
         }
         let next = cursor - 1;
-        let text = history.from_back(next)?.to_string();
+        let text = history.nth_newest(next)?.to_string();
         self.cursor = Some(next);
         Some(text)
     }
@@ -749,9 +753,9 @@ mod tests {
         h.record("a");
         h.record("b");
         assert_eq!(h.entries(), ["a", "b"]);
-        assert_eq!(h.from_back(0), Some("b"));
-        assert_eq!(h.from_back(1), Some("a"));
-        assert_eq!(h.from_back(2), None);
+        assert_eq!(h.nth_newest(0), Some("b"));
+        assert_eq!(h.nth_newest(1), Some("a"));
+        assert_eq!(h.nth_newest(2), None);
     }
 
     #[test]
@@ -774,7 +778,7 @@ mod tests {
             h.record(&format!("m{i}"));
         }
         assert_eq!(h.len(), MAX_SEND_HISTORY);
-        assert_eq!(h.from_back(0), Some("m59"));
+        assert_eq!(h.nth_newest(0), Some("m59"));
         assert_eq!(h.entries().first().map(String::as_str), Some("m10"));
     }
 
@@ -784,7 +788,7 @@ mod tests {
         h.record("a");
         h.clear();
         assert!(h.is_empty());
-        assert_eq!(h.from_back(0), None);
+        assert_eq!(h.nth_newest(0), None);
     }
 
     // 历史的落盘往返不在这里测：真实路径是 `eframe::set_value` → RON → `get_value`

@@ -136,13 +136,15 @@ fn utf8_complete_prefix_len(bytes: &[u8]) -> usize {
         return len;
     }
     let lead = bytes[start - 1];
+    // 四档是 UTF-8 lead 字节的取值范围，写成区间才看得出"它们是连续的四段"；
+    // 手写的 `>= && <=` 会被 clippy 判成 manual RangeInclusive::contains。
     let width = if lead < 0x80 {
         1
-    } else if lead >= 0xC0 && lead <= 0xDF {
+    } else if (0xC0..=0xDF).contains(&lead) {
         2
-    } else if lead >= 0xE0 && lead <= 0xEF {
+    } else if (0xE0..=0xEF).contains(&lead) {
         3
-    } else if lead >= 0xF0 && lead <= 0xF7 {
+    } else if (0xF0..=0xF7).contains(&lead) {
         4
     } else {
         1 // 非法起始字节，当作单字节处理（会被标记为 [XX]）
@@ -156,19 +158,13 @@ fn utf8_complete_prefix_len(bytes: &[u8]) -> usize {
 }
 
 /// 一段文本的显示样式。
-#[derive(Clone, Copy, PartialEq, Debug)]
+///
+/// `Default` 由 derive 生成：两个字段都是各自的零值（`None` / `false`），手写 impl
+/// 只是把同一件事再说一遍（clippy::derivable_impls）。
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct AnsiStyle {
     pub fg: Option<egui::Color32>,
     pub bold: bool,
-}
-
-impl Default for AnsiStyle {
-    fn default() -> Self {
-        Self {
-            fg: None,
-            bold: false,
-        }
-    }
 }
 
 /// 带样式的文本片段。接收区的最小渲染单元。
