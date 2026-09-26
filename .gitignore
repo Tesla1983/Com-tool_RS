@@ -2,6 +2,10 @@ SerialGUI-rs/
 opencode.json
 target/
 echo_raw.txt
+# `test_out.txt` 是某次手工 `cargo test` 的 PowerShell 输出重定向，2026-09-26 从仓库
+# 删除（技术债报告第 4 项）。加这一行是为了防止同类捕获产物下次被 `git add -A` 顺手
+# 带进来；文件本身可随时 `git show HEAD:test_out.txt` 取回。
+test_out.txt
 # .workbuddy/ 整体忽略（里面是项目记忆，不进仓库），只放行守卫的行为自测。
 #
 # 注意这里为什么写成四行而不是一句 `!.workbuddy/hooks/test_guard.py`：

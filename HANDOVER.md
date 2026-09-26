@@ -2564,6 +2564,8 @@ F1 的「发送文件」仍未做，其前置条件**待发队列上限（背压
   `opencode.json` 配了三套角色：`executor`（改代码，默认）/ `planner`（只规划）/
   `expert`（攻难题），默认走 DeepSeek-V4-Flash。
 - **`.gitignore` 忽略**：`SerialGUI-rs/`、`opencode.json`、`target/`、`echo_raw.txt`、
+  `test_out.txt`（**2026-09-26 起**：该文件此前被误跟踪，是某次手工 `cargo test` 的
+  输出重定向，已删除并加进忽略名单防复发）、
   `.workbuddy/`（**唯一例外：`hooks/test_guard.py`**）、`.opencode/agents/*.md`、`.opencode/prompts/*.md`。
   - `AGENTS.md` **原先也在此列，现已被移出**（2026-09-21）：它随仓库传播，不再只是本机文档。
     取消排除的原因很简单——它记的是"怎么改这个项目"的硬约定，而不是本机环境，放在仓库外
@@ -2579,7 +2581,8 @@ F1 的「发送文件」仍未做，其前置条件**待发队列上限（背压
     `~/.workbuddy/hooks/`（用户级，不在本仓库内）。所以新克隆的仓库能读到规则、也能读到
     自测脚本，却**没有可测的对象**——要复现拦截必须另行取得这两个脚本。
     **文档与自测随仓库走，并不等于保护随仓库走。**
-- **`echo_raw.txt` / `test_out.txt`**：根目录下的零散调试文件，已随搬迁复制，内容无关紧要。
+- **`echo_raw.txt`**：根目录下的串口捕获文件（**未被跟踪**，`.gitignore` 已排除），内容无关紧要。
+  `test_out.txt` 同类，但**此前被误跟踪**，2026-09-26 删除并加进忽略名单（技术债报告第 4 项）。
 - **持久化存档位置**：`%APPDATA%\ComTool-RS\data\`（eframe 按 `run_native` 的标题自动创建，
   由 `persistence` feature 启用）。
 - **`core.autocrlf = true`**：仓库开启了 CRLF 自动转换。跨平台协作时注意行尾。
