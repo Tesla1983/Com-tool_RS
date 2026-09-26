@@ -50,6 +50,21 @@ pub(crate) const SCROLL_AREA_ID: &str = "receive_scroll";
 /// 同一列里的其它区块。
 pub(crate) const RECEIVE_SCROLL_MAX_HEIGHT: f32 = 400.0;
 
+/// 用户翻到历史里阅读时，在 [`crate::app::ComTool::max_log_chars`] 之上**额外**允许
+/// 保留的字符数。
+///
+/// 为什么需要这个"放宽"：淘汰是从最旧端做的，而它同时改变视口里内容的身份——滚动
+/// 位置（像素）不变，内容却整体上移了一截。贴底时用户看不见（贴着的是最新内容），
+/// 但用户往上翻着读的时候，就等于阅读位置每帧被抽走一行，观感与"自动滚动没停"完全
+/// 一样（2026-09-26 用户报告："用滚轮往上应该自动停止日志滚动，好像没有实现"）。
+///
+/// 放宽是**有额度**的，不是"不裁"：上限首先是内存约束，长时间停在历史里而设备一直
+/// 在喷数据，不设额度就是无界增长。额度给一个**固定字符数**而不是按倍数放大，这样
+/// 用户把 `max_log_chars` 调到很大时内存不会跟着再翻几倍。30 000 字符 ≈ 1 000 行
+/// 30 字符的日志，按 1 KB/s 的常见速率够读半分钟；额度用满后恢复淘汰（那时阅读位置
+/// 会跳一次——这是"上限优先于阅读位置"的取舍，已在 `HANDOVER.md` 记录）。
+pub(crate) const RECEIVE_TRIM_DEFER_ALLOWANCE: usize = 30_000;
+
 /// 滚动块的滚动方向。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ScrollAxis {
@@ -745,10 +760,66 @@ fn trim_spans_front(spans: &mut Vec<ColoredSpan>, max: usize) {
     }
 }
 
-/// 绘制接收区滚动视图（可选中、右键复制全部日志），返回是否点击了「复制全部日志」。
+/// 一次接收区绘制的结果。
+///
+/// 除了"右键菜单有没有点「复制全部日志」"，还要把**这一帧结束时视口的位置**带出去：
+/// [`crate::app::ComTool::receive_at_bottom`] 靠它更新，而它又决定下一帧能不能淘汰旧
+/// 日志。把两件事放在一个结构里，是为了让"绘制"与"消费绘制结果"之间没有隐式的顺序
+/// 依赖——调用方拿到什么就得处理什么。
+pub(crate) struct ReceiveScrollOutcome {
+    /// 右键菜单里点了「复制全部日志」。
+    pub copy_all: bool,
+    /// 绘制结束时视口是否贴着底部（见 [`is_at_bottom`]）。
+    pub at_bottom: bool,
+    /// 下一帧最多淘汰多少字符（见 [`trim_budget_per_frame`]）。
+    pub trim_budget: usize,
+}
+
+/// 视口是否贴着底部（或内容根本装得下，没有可翻的历史）。
+///
+/// `max_offset` 是 egui 允许的最大滚动位置（`content_size - inner_rect`）；内容比可视
+/// 区矮时它是负数，此时一律算贴底——用户眼前就是全部内容，没有"上面的历史"这回事。
+///
+/// 容差 1 点：egui 在贴底时把 `offset` 直接写成 `content_size - inner_rect.size()`
+/// （`containers/scroll_area.rs` 里 `stick_to_end` 分支），但内容高度每帧都在变，
+/// 浮点比较不适合要求严格相等。
+fn is_at_bottom(offset_y: f32, content_h: f32, viewport_h: f32) -> bool {
+    let max_offset = (content_h - viewport_h).max(0.0);
+    offset_y >= max_offset - 1.0
+}
+
+/// 下一帧最多淘汰多少字符，由上一帧实测的三个数推出。
+///
+/// 约束只有一个：**一帧内的"缩短量"必须明显小于可视区高度**。因为 egui 用上一帧的滚动
+/// 位置给内容布局，把 offset 夹回合法范围发生在内容画完之后——一帧里缩短超过一个可视区
+/// 高度，这一帧的内容就整个落到视口上方，用户看到接收区空一帧。
+///
+/// 取**半个可视区**做安全边界：按每字符高换算成字符数，于是被裁掉的旧内容至多占半屏，
+/// 内容绝不会被推出视口。字符高度由"上一帧内容高 / 上一帧字符数"实测，因此字体档位
+/// （`ui_font_scale`）与窄窗口都自动跟上——写死"12 行"这类行数在窄窗口下会失效。
+///
+/// 数据不可用时（还没画过、可视区高为 0、内容为空）返回 `usize::MAX` = 不限制：宁可
+/// 空一帧也不能让"读历史不淘汰"把内存上限放开。
+fn trim_budget_per_frame(content_h: f32, chars: usize, viewport_h: f32) -> usize {
+    if chars == 0 || content_h <= 0.0 || viewport_h <= 0.0 {
+        return usize::MAX;
+    }
+    let px_per_char = content_h / chars as f32;
+    let half_viewport = viewport_h * 0.5;
+    if px_per_char <= 0.0 {
+        return usize::MAX;
+    }
+    (half_viewport / px_per_char) as usize
+}
+
+/// 绘制接收区滚动视图（可选中、右键复制全部日志）。
 ///
 /// `stick_to_bottom` 由 [`crate::app::ComTool::auto_scroll`] 决定：关掉自动滚动后，
-/// 用户向上翻阅历史时不会被强行拉回底部。
+/// 用户向上翻阅历史时不会被强行拉回底部。**注意"滚轮往上会解粘"是 egui 自己做的**
+/// （`stick_to_bottom` 的文档原文：*"The scroll handle remains stuck until user manually
+/// changes position"*，实现见 `containers/scroll_area.rs` 里把
+/// `state.scroll_stuck_to_end` 置 false 的那几处），本项目不需要额外实现——需要的是
+/// **别在用户读历史时把内容从他眼皮底下裁掉**，那件事在 [`ComTool::trim_receive_logs`]。
 ///
 /// `copy_all_label` 是右键菜单那一项的文案。这两个接收视图函数是**自由函数**（不持有
 /// `ComTool`），所以文案只能由调用方传进来——`Language::strings()` 是 `&'static`，
@@ -758,9 +829,11 @@ fn show_receive_scroll(
     job: egui::text::LayoutJob,
     stick_to_bottom: bool,
     copy_all_label: &str,
-) -> bool {
+) -> ReceiveScrollOutcome {
     let mut copy_all = false;
-    capped_scroll_area(
+    // 字符数要和 `content_size` 对上：两者一个来自这份 job、一个来自它排版的结果。
+    let job_chars = job.text.chars().count();
+    let out = capped_scroll_area(
         ScrollAxis::Vertical,
         SCROLL_AREA_ID,
         RECEIVE_SCROLL_MAX_HEIGHT,
@@ -775,11 +848,22 @@ fn show_receive_scroll(
             }
         });
     });
-    copy_all
+    ReceiveScrollOutcome {
+        copy_all,
+        at_bottom: is_at_bottom(
+            out.state.offset.y,
+            out.content_size.y,
+            out.inner_rect.height(),
+        ),
+        trim_budget: trim_budget_per_frame(out.content_size.y, job_chars, out.inner_rect.height()),
+    }
 }
 
 /// 普通文本模式接收区：不折行（Extend）+ 纵/横双向滚动，
 /// 等宽 galley 绘制保证盲文 ASCII 图案整行对齐；可选中、右键复制全部日志。
+///
+/// 返回值见 [`ReceiveScrollOutcome`]：调用方拿它更新
+/// [`crate::app::ComTool::receive_at_bottom`] 与 `receive_trim_budget`。
 ///
 /// **默认文字色必须取自主题**（`ui.visuals().text_color()`），不能写死黑色：
 /// 深色主题下接收区背景也是深的，黑字会直接看不见。
@@ -788,14 +872,15 @@ pub(crate) fn show_plain_receive(
     text: &str,
     stick_to_bottom: bool,
     copy_all_label: &str,
-) {
+) -> ReceiveScrollOutcome {
+    let text_chars = text.chars().count();
     let job = egui::text::LayoutJob::simple(
         text.to_owned(),
         monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE),
         ui.visuals().text_color(),
         f32::INFINITY,
     );
-    capped_scroll_area(ScrollAxis::Both, SCROLL_AREA_ID, RECEIVE_SCROLL_MAX_HEIGHT)
+    let out = capped_scroll_area(ScrollAxis::Both, SCROLL_AREA_ID, RECEIVE_SCROLL_MAX_HEIGHT)
         .stick_to_bottom(stick_to_bottom)
         .show(ui, |ui| {
             let response = ui.add(
@@ -810,6 +895,15 @@ pub(crate) fn show_plain_receive(
                 }
             });
         });
+    ReceiveScrollOutcome {
+        copy_all: false, // 文本模式自己复制，不经右键菜单的返回值
+        at_bottom: is_at_bottom(
+            out.state.offset.y,
+            out.content_size.y,
+            out.inner_rect.height(),
+        ),
+        trim_budget: trim_budget_per_frame(out.content_size.y, text_chars, out.inner_rect.height()),
+    }
 }
 
 // —— 时间戳前缀 ——
@@ -1212,21 +1306,54 @@ impl ComTool {
         self.trim_receive_logs();
     }
 
+    /// 收下上一帧的绘制结果（见 [`ReceiveScrollOutcome`]）。三个接收视图共用这一处，
+    /// "画完要记什么"就不会有一路漏记。
+    fn note_receive_scroll(&mut self, out: &ReceiveScrollOutcome) {
+        self.receive_at_bottom = out.at_bottom;
+        self.receive_trim_budget = out.trim_budget;
+    }
+
     /// 把四份接收镜像各自裁剪到 [`crate::app::ComTool::max_log_chars`] 以内（0 = 不限）。
     ///
     /// 为什么是"各自裁剪"而不是"按 `receive_text` 裁好再同步"：三种模式写入的镜像
     /// 并不相同（HEX/文本模式写 `display_spans`，字节查看模式写 `ascii_spans`，而
     /// `receive_text` 三种模式都写），三者之间没有一一对应的下标关系。各自裁到同一
     /// 上限后，任何视图渲染时看到的长度都不会超过上限，这就够了。
+    ///
+    /// **上限不是常数，取决于视口在哪**（见下面的 `limit`）：用户翻到历史里读的时候
+    /// 放宽，贴底时按"每帧一小步"追平欠账。这条规则的存在理由就是本次修复的缺陷
+    /// （阅读位置被前沿淘汰一行行抽走，见 [`RECEIVE_TRIM_DEFER_ALLOWANCE`]）。
     pub fn trim_receive_logs(&mut self) {
         let max = self.max_log_chars;
         if max == 0 {
             return;
         }
-        trim_text_front(&mut self.receive_text, max);
-        trim_spans_front(&mut self.display_spans, max);
-        trim_text_front(&mut self.ascii_text, max);
-        trim_spans_front(&mut self.ascii_spans, max);
+        let len = self.receive_text.chars().count();
+
+        // 淘汰发生在**最旧**的一端，而它同时改变视口里内容的身份：滚动位置（像素）
+        // 不变、内容却整体上移。用户贴着底部看最新数据时这无所谓；可他一旦往上翻着
+        // 读历史，阅读位置就每帧被抽走一行——观感就是"自动滚动根本没停"。所以只在
+        // **贴底**（或接收区根本没画：没人看，也就没人会被抽走）时才裁到上限。
+        //
+        // 不贴底时放宽到 `max + RECEIVE_TRIM_DEFER_ALLOWANCE`：那不是"不裁"，内存
+        // 上限依然有界（长时间停在历史里 + 设备一直在喷数据 ⇒ 到额度后恢复淘汰）。
+        let limit = if !self.show_receive_panel {
+            // 接收区没画：没人看，也就没人会被"抽走"；而且这时量不到可视区大小，
+            // 额度是无效的（默认值 = 不限制）⇒ 直接裁到上限，内存优先。
+            max
+        } else if self.receive_at_bottom {
+            // 贴底：欠账要追平，但**每帧只追一部分**（`receive_trim_budget` = 上一帧
+            // 实测的半个可视区能装多少字符）。一次裁完会让这一帧的内容整个跑到视口
+            // 上方——用户看到接收区空一帧（见 [`trim_budget_per_frame`]）。
+            max.max(len.saturating_sub(self.receive_trim_budget))
+        } else {
+            max.saturating_add(RECEIVE_TRIM_DEFER_ALLOWANCE)
+        };
+
+        trim_text_front(&mut self.receive_text, limit);
+        trim_spans_front(&mut self.display_spans, limit);
+        trim_text_front(&mut self.ascii_text, limit);
+        trim_spans_front(&mut self.ascii_spans, limit);
     }
 
     /// 清空三份接收镜像、复位解码器残留，并把滚动位置一并归零。
@@ -1241,6 +1368,9 @@ impl ComTool {
         self.decoder.reset();
         let id = ui.make_persistent_id(SCROLL_AREA_ID);
         egui::scroll_area::State::default().store(ui.ctx(), id);
+        // 内容清了 ⇒ 没有可翻的历史，必然贴底。不清这一位的话，用户"停在历史里 →
+        // 清空日志"之后仍处于放宽状态，上限要等到下一次绘制才恢复。
+        self.receive_at_bottom = true;
     }
 
     /// 彩色视图的 `LayoutJob`。
@@ -1284,7 +1414,9 @@ impl ComTool {
             // HEX 与普通文本共用同一个渲染：差别只在片段本身（HEX 模式下片段已是
             // 十六进制文本），不需要两套绘制。
             DisplayMode::Hex | DisplayMode::Text => {
-                show_plain_receive(ui, &self.receive_text, self.auto_scroll, copy_all_log)
+                let out =
+                    show_plain_receive(ui, &self.receive_text, self.auto_scroll, copy_all_log);
+                self.note_receive_scroll(&out);
             }
         }
     }
@@ -1304,12 +1436,14 @@ impl ComTool {
         );
 
         // ③ 在函数内部绘制滚动区，替换掉主界面里默认的滚动区
-        if show_receive_scroll(
+        let out = show_receive_scroll(
             ui,
             job,
             self.auto_scroll,
             self.language.strings().copy_all_log,
-        ) {
+        );
+        self.note_receive_scroll(&out);
+        if out.copy_all {
             ui.ctx().copy_text(self.receive_text.clone());
         }
     }
@@ -1330,12 +1464,14 @@ impl ComTool {
         );
 
         // ③ 绘制滚动区（样式与彩色模式一致）
-        if show_receive_scroll(
+        let out = show_receive_scroll(
             ui,
             job,
             self.auto_scroll,
             self.language.strings().copy_all_log,
-        ) {
+        );
+        self.note_receive_scroll(&out);
+        if out.copy_all {
             ui.ctx().copy_text(self.receive_text.clone());
         }
     }
@@ -1408,6 +1544,307 @@ mod tests {
         assert!(
             content > inner,
             "content_size({content:.1}) 未超过 inner_rect({inner:.1})，egui 认为不需要滚动"
+        );
+    }
+
+    /// 测试用日志行：**定长**（含换行共 30 字符）。
+    ///
+    /// 定长是这批测试的算术前提：`trim_text_front` 按字符裁，只有"每行一样长"才能把
+    /// "裁掉多少字符"整除成"裁掉多少行"，视口顶行的绝对行号才有唯一答案。
+    const LOG_LINE_CHARS: usize = 30;
+
+    fn log_line(n: usize) -> String {
+        format!("line {n:06} {}\n", "x".repeat(LOG_LINE_CHARS - 13))
+    }
+
+    /// 一帧接收区绘制里，**用户真正看得见的东西**。
+    struct PaintedLog {
+        /// 视口顶部压着的那一行在**当前 galley 里**的行号。
+        top_row: usize,
+        /// 接收区可视区高度。
+        viewport_h: f32,
+        /// 内容底部 − 可视区底部。≈ 0 表示已经贴到最新内容；越大说明下面的内容越多。
+        bottom_gap: f32,
+    }
+
+    /// 从**真实绘制出来的文字 shape** 里读出视口状态。
+    ///
+    /// 为什么不读 `ScrollArea` 的 `offset`：`offset` 不变**不等于**阅读位置不动——这正是
+    /// 本次缺陷的形态（淘汰发生在最旧端 ⇒ 内容上移、像素位置不变），拿 offset 做判据
+    /// 会一路绿到底。`t.pos` 是含滚动位移后的落笔位置，行矩形由 galley 给出，两者相减
+    /// 得到的就是屏幕坐标，再用该 shape 的 `clip_rect`（= 接收区可视区）去截。
+    fn painted_log(out: &egui::FullOutput) -> PaintedLog {
+        let mut drawn: Vec<String> = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                drawn.push(t.galley.text().chars().take(20).collect());
+                // 认出日志那一份：行数远多于这一帧里任何其它文字，且正文里必然出现整行
+                // 标记。**不能**要求文本以 "line " 开头——分帧追平欠账时截口落在行中间，
+                // 第一行是半行。
+                if t.galley.rows.len() < 10 || !t.galley.text().contains("line ") {
+                    continue;
+                }
+                let viewport_top = clipped.clip_rect.top();
+                let top_row = t
+                    .galley
+                    .rows
+                    .iter()
+                    .position(|r| t.pos.y + r.rect().max.y > viewport_top + 1.0)
+                    .expect("日志 galley 里应当至少有一行落在可视区内");
+                return PaintedLog {
+                    top_row,
+                    viewport_h: clipped.clip_rect.height(),
+                    bottom_gap: t.pos.y + t.galley.rect.height() - clipped.clip_rect.bottom(),
+                };
+            }
+        }
+        panic!("这一帧没有画出接收区日志文本；实际画出的文字 shape 有 {drawn:?}");
+    }
+
+    /// [`is_at_bottom`] 的三态：内容装得下 / 贴在底部 / 翻到了历史里。
+    #[test]
+    fn is_at_bottom_covers_the_three_interesting_positions() {
+        // 内容比可视区矮：没有可翻的历史，一律算贴底（max_offset 被夹到 0）。
+        assert!(is_at_bottom(0.0, 100.0, 400.0));
+        // 内容超出：贴底 = offset 用满。
+        assert!(is_at_bottom(600.0, 1000.0, 400.0));
+        // 往上翻了一点就不算贴底——差 1 点以内仍算（egui 的浮点比较容差）。
+        assert!(!is_at_bottom(500.0, 1000.0, 400.0));
+        assert!(is_at_bottom(599.5, 1000.0, 400.0));
+    }
+
+    /// [`trim_budget_per_frame`]：一帧的淘汰额度必须**明显小于一个可视区**能装的字符数。
+    ///
+    /// 这是"不许出现空一帧"的量化形式：egui 用上一帧的 offset 布局，一帧里缩短超过一个
+    /// 可视区高度，内容就整个跑到视口上方。
+    #[test]
+    fn trim_budget_stays_well_under_one_viewport() {
+        // 实测口径（见 `wheel_up_freezes_the_reading_position` 里的真实数字）：
+        // 5850 字符 ≈ 3151 点高，可视区 400 点 ⇒ 每字符约 0.54 点。
+        let budget = trim_budget_per_frame(3_151.0, 5_850, 400.0);
+        assert!(
+            budget < 400,
+            "额度 {budget} 字符 ≈ 215 点高，已经接近可视区高度 400 点，不够安全"
+        );
+        assert!(budget > 100, "额度 {budget} 太小，追平欠账会慢到跟不上数据");
+
+        // 字体放大 / 窗口变矮都通过实测值自动跟上：视口矮一半 ⇒ 额度也减半。
+        let half = trim_budget_per_frame(3_151.0, 5_850, 200.0);
+        assert!(
+            half < budget && half > 50,
+            "视口减半后额度应同步变小：{half}"
+        );
+
+        // 窄到量不出东西时不能返回 0（那会让上限失效、内存无界增长）。
+        assert_eq!(trim_budget_per_frame(0.0, 0, 400.0), usize::MAX);
+        assert_eq!(trim_budget_per_frame(3_151.0, 5_850, 0.0), usize::MAX);
+    }
+
+    /// 用户翻到历史里阅读时，旧内容**先不淘汰**；贴底后立刻恢复原上限。
+    ///
+    /// 这里钉的是**结构性规则**（放宽的额度有多大、什么时候恢复），"阅读位置是否真的
+    /// 停住"由 [`wheel_up_freezes_the_reading_position`] 从绘制结果上钉——两条缺一不可：
+    /// 只有这一条时，把"读历史"的判定接到别的东西上照样绿。
+    #[test]
+    fn front_trim_is_deferred_while_the_user_reads_history() {
+        const MAX: usize = 1_000;
+        let mut app = ComTool {
+            max_log_chars: MAX,
+            ..ComTool::default()
+        };
+
+        // 贴底（默认）：裁到上限。这是原有契约，不能被"放宽"顺手改掉。
+        assert!(app.receive_at_bottom, "默认应当贴底");
+        app.receive_text = "x".repeat(MAX + 5_000);
+        app.trim_receive_logs();
+        assert_eq!(app.receive_text.chars().count(), MAX);
+
+        // 翻到历史里：一个字符都不裁。
+        app.receive_at_bottom = false;
+        app.receive_text = "x".repeat(MAX + 5_000);
+        app.trim_receive_logs();
+        assert_eq!(
+            app.receive_text.chars().count(),
+            MAX + 5_000,
+            "用户正在读历史，却把旧内容裁掉了——阅读位置会被一行行抽走"
+        );
+
+        // 放宽有额度：到顶后照旧淘汰，内存不能无界增长。
+        app.receive_text = "x".repeat(MAX * 100);
+        app.trim_receive_logs();
+        assert_eq!(
+            app.receive_text.chars().count(),
+            MAX + RECEIVE_TRIM_DEFER_ALLOWANCE,
+            "额度用满后应当停在「上限 + 额度」，而不是继续不裁"
+        );
+
+        // 回到贴底 → 恢复原有上限……
+        app.receive_at_bottom = true;
+        app.trim_receive_logs();
+        assert_eq!(app.receive_text.chars().count(), MAX);
+
+        // ……但追平欠账要分帧：一帧最多淘汰 `receive_trim_budget` 个字符，否则一帧里
+        // 缩短超过一个可视区高度，内容会被画到视口上方（用户看到空一帧）。
+        app.receive_at_bottom = true;
+        app.receive_trim_budget = 100;
+        app.receive_text = "x".repeat(MAX + 5_000);
+        app.trim_receive_logs();
+        assert_eq!(
+            app.receive_text.chars().count(),
+            MAX + 4_900,
+            "一帧应只淘汰 100 个字符，欠账留给后面几帧"
+        );
+
+        // 接收区被藏起来时同样裁到上限：没人看，也就没人会被"抽走"，不能让上限失效。
+        app.receive_at_bottom = false;
+        app.show_receive_panel = false;
+        app.receive_text = "x".repeat(MAX * 100);
+        app.trim_receive_logs();
+        assert_eq!(app.receive_text.chars().count(), MAX);
+    }
+
+    /// **本次缺陷的回归测试**：日志到上限、设备还在持续喷数据时，用户用滚轮往上翻，
+    /// 屏幕上的内容必须**停住**——不是"滚动条不再回到底部"就算完。
+    ///
+    /// 走真实路径与真实时序：`ComTool::render_receive_area` → `show_plain_receive` →
+    /// `capped_scroll_area`；每帧先"追加 + 裁剪"（对应 `ComTool::ui` 里 `receive_data()`
+    /// 的位置）再绘制。唯一被替代的是数据来源：真实数据要经事件通道，那条路另有测试。
+    ///
+    /// 空转验证：把 `trim_receive_logs` 里"读历史时放宽"那一支删掉（改回一律裁到
+    /// `max`），下面的断言 ① 会每帧前进 5 行而变红。
+    #[test]
+    fn wheel_up_freezes_the_reading_position() {
+        const MAX: usize = 3_000; // 100 行 × 30 字符
+        const LINES_PER_FRAME: usize = 5;
+        const WHEEL_UP_FRAME: usize = 6;
+        const WHEEL_DOWN_FIRST: usize = 20;
+        const WHEEL_DOWN_LAST: usize = 25;
+        // 滚回底部之后还要留够帧数让"分帧追平欠账"跑完（额度约 371 字符/帧、欠账
+        // 约 2 850 字符 ⇒ 十几帧），最后一帧才谈得上"内容重新贴住底边"。
+        const LAST_FRAME: usize = 44;
+
+        let mut app = ComTool {
+            max_log_chars: MAX,
+            ..ComTool::default()
+        };
+
+        // 先装满：观察场景是"已经跑了一阵子的日志"，不是刚开始收。
+        let mut next_line = 0usize;
+        let mut appended_chars = 0usize;
+        while appended_chars < MAX {
+            app.receive_text.push_str(&log_line(next_line));
+            next_line += 1;
+            appended_chars += LOG_LINE_CHARS;
+        }
+
+        let ctx = egui::Context::default();
+        let mut reading = Vec::new();
+        let mut following = Vec::new();
+        let mut reading_flags = Vec::new();
+        let mut following_flags = Vec::new();
+        let mut viewport_h = 0.0_f32;
+        let mut last_gap = 0.0_f32;
+
+        for frame in 0..=LAST_FRAME {
+            // —— 真实时序的第一步：追加 + 裁剪（`receive_data` 里做的那两件事）——
+            for _ in 0..LINES_PER_FRAME {
+                app.receive_text.push_str(&log_line(next_line));
+                next_line += 1;
+                appended_chars += LOG_LINE_CHARS;
+            }
+            app.trim_receive_logs();
+
+            // —— 真实时序的第二步：绘制（滚轮事件只在这一步进来）——
+            let mut events = vec![egui::Event::PointerMoved(egui::pos2(200.0, 100.0))];
+            let delta = if frame == WHEEL_UP_FRAME {
+                50.0
+            } else if (WHEEL_DOWN_FIRST..=WHEEL_DOWN_LAST).contains(&frame) {
+                -400.0
+            } else {
+                0.0
+            };
+            if delta != 0.0 {
+                events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, delta),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| app.render_receive_area(ui));
+            let painted = painted_log(&out);
+            // 清纹理：不清理会在 drop 时 panic（与断言无关的清理问题，不是缺陷）。
+            out.textures_delta.clear();
+
+            // 视口顶行的**绝对**行号 = 已经被裁掉的行数 + 落在可视区顶部的行号。
+            //
+            // 整除在"分帧追平"期间不精确（按额度裁剩的截口可能落在行中间，顶行是半行），
+            // 但下面的断言只看**逐帧的前进/后退方向**，系统性偏差不影响结论；而"往上翻
+            // 之后必须停住"那一段（读历史，完全不裁）恰好是整除精确的。
+            let trimmed_lines =
+                (appended_chars - app.receive_text.chars().count()) / LOG_LINE_CHARS;
+            let top_line = trimmed_lines + painted.top_row;
+            viewport_h = painted.viewport_h;
+            last_gap = painted.bottom_gap;
+
+            if (WHEEL_UP_FRAME..WHEEL_DOWN_FIRST).contains(&frame) {
+                reading.push(top_line);
+                reading_flags.push(app.receive_at_bottom);
+            }
+            if frame > WHEEL_DOWN_LAST {
+                following.push(top_line);
+                following_flags.push(app.receive_at_bottom);
+            }
+        }
+
+        // 前提检查：可视区确实被夹住了、而且确实装不下全部内容——否则"视口顶行"根本
+        // 不会动，下面两条断言都会变成空转。
+        assert!(
+            viewport_h > 50.0 && viewport_h < 450.0,
+            "接收区可视区高 {viewport_h:.1} 点，与预期不符（高度上限 400）"
+        );
+        assert!(
+            following.len() >= 5 && reading.len() >= 8,
+            "样本不足，测不出什么：reading={reading:?} following={following:?}"
+        );
+
+        // ⓪ 先钉住"绘制结果 → 状态"这一步确实接上了：滚轮往上那一段必须被记成"没贴底"，
+        //    滚回底部那一段必须被记成"贴底"。它单独成立的意义是——上面两条断言都依赖
+        //    `receive_at_bottom` 被真实更新，如果哪天忘了把绘制结果写回字段（而恰好
+        //    默认值是 `true`），表现会是"读历史时又在裁"，而这条会第一时间指认原因。
+        assert!(
+            !reading_flags.iter().any(|at_bottom| *at_bottom),
+            "滚轮往上之后 receive_at_bottom 仍然是 true：绘制结果没有写回字段？{reading_flags:?}"
+        );
+        assert!(
+            following_flags.iter().all(|at_bottom| *at_bottom),
+            "滚回底部之后 receive_at_bottom 没恢复成 true：{following_flags:?}"
+        );
+
+        // ① 往上翻之后这几帧，视口顶行只许往回走（看到更早的内容），**不许往前走**。
+        //    缺陷复活时这里每帧 +5 行：`trim_receive_logs` 从最旧端淘汰，滚动位置不变
+        //    而内容整体上移，用户读到的那一行就会不断被换成更晚的行。
+        assert!(
+            reading.windows(2).all(|w| w[1] <= w[0]),
+            "滚轮往上之后阅读位置还在被往前推（视口顶行逐帧）：{reading:?}"
+        );
+
+        // ② 滚回底部 → 恢复跟随：视口顶行重新往前走，且底部内容重新贴住可视区底边。
+        assert!(
+            *following.last().unwrap() > following.first().unwrap() + 3,
+            "滚回底部后没有恢复跟随（视口顶行不再前进）：{following:?}"
+        );
+        assert!(
+            last_gap.abs() < 1.0,
+            "滚回底部后内容底部与可视区底边差 {last_gap:.1} 点，说明没真的贴底"
         );
     }
 

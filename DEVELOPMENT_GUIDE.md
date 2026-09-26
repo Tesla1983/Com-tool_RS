@@ -348,8 +348,8 @@ impl eframe::App for ComTool {
 | 顶部菜单栏 | — | `show_menu_bar()`（`panels/menu_bar.rs`） | 窗口顶部：文件 / 设置 / 视图 |
 | 主题切换 | `theme` | `apply_theme()`（`app.rs`） | 设置菜单与设置窗口里的「主题」单选 |
 | 设置窗口 | `show_settings` 与各偏好字段 | `show_settings_window()`（`panels/settings.rs`） | 设置菜单 / 「⚙ 设置」按钮 |
-| 日志长度上限（FIFO 淘汰） | `max_log_chars` | `trim_receive_logs()`（`receive.rs`） | 设置窗口「日志长度上限」 |
-| 自动滚动 | `auto_scroll` | 三个接收视图的 `stick_to_bottom` 参数 | 设置窗口 / 视图菜单 |
+| 日志长度上限（FIFO 淘汰） | `max_log_chars`；`receive_at_bottom` / `receive_trim_budget`（运行时，决定这一帧能裁多少，见 §6 第 58 条） | `trim_receive_logs()` / `is_at_bottom()` / `trim_budget_per_frame()`（`receive.rs`） | 设置窗口「日志长度上限」 |
+| 自动滚动（含"滚轮往上就停住"） | `auto_scroll`；`receive_at_bottom`（运行时） | 三个接收视图的 `stick_to_bottom` 参数；**解粘是 egui 自己做的**，本项目负责"读历史时不裁旧内容"（见 §6 第 58 条） | 设置窗口 / 视图菜单 |
 | 时间戳前缀 | `timestamp_prefix` | `apply_timestamp_prefix()` / `timestamped_spans()` / `format_timestamp()`（`receive.rs`） | 设置窗口「接收」区 / 视图菜单；侧边栏「接收统计」显示当前档位 |
 | 重绘间隔 | `repaint_interval_ms` | `ui()` 里的 `request_repaint_after` | 设置窗口「重绘间隔」 |
 | 发送后清空 | `clear_send_after_send` | `send_data()`（`app.rs`） | 设置窗口 |
@@ -786,4 +786,45 @@ impl eframe::App for ComTool {
       改 60 → 绘图区断言红（"被压到只剩 46.0 点高"）。
     - **同族提醒**：凡是"写死尺寸 + 参加 `CentralPanel` 纵向堆叠"的控件都要自己夹在可用空间内——**中央区
       没有滚动条**，越界就等于用户够不着（接收区那处 `max_height(400)` 仍在，见约定 56 的同族提醒）。
+
+58. **"往上翻就该停住"= 别在用户读历史时淘汰旧内容；而追平欠账必须分帧**（2026-09-26 用户报告：
+    「串口日志在向上滚动的时候，用滚轮往上应该自动停止日志滚动，好像没有实现这个功能？」）：
+    - **先分清"谁负责解粘"**：滚轮往上让视口不再粘底**是 egui 自己做的**——`stick_to_bottom` 的文档
+      原文是 *"The scroll handle remains stuck until user manually changes position"*，实现是
+      `containers/scroll_area.rs` 里滚轮分支把 `state.scroll_stuck_to_end` 置 `false`（还有拖内容、拖
+      滚动条两处）。**本项目一行都不用写**；写测试量它也不该拿 `offset` 当判据（见下条）。
+    - ⭐ **真正缺的那一环是淘汰**：`trim_text_front` 从**最旧**一端裁，滚动位置（像素）不变、内容却
+      整体上移 ⇒ 用户读到的那一行被换成更晚的行，观感与"自动滚动根本没停"一模一样。贴底时看不出来
+      （贴着的是最新内容），**只有往上翻着读时才暴露**。判据是**视口顶部那一行的绝对行号**，不是
+      `offset`：`offset` 在缺陷下**每帧都不变**（实测 1316.0 恒定），而行号每帧 +5 往前跑。
+    - **修法（两半，缺一不可）**：① 用户不在底部（`ComTool::receive_at_bottom == false`）时把上限放宽
+      `RECEIVE_TRIM_DEFER_ALLOWANCE`（30 000 字符 ≈ 1 000 行），仍在读就不裁；② 回到贴底后要追平
+      这笔欠账，但**每帧最多裁 `receive_trim_budget` 个字符**（上一帧实测的"半个可视区能装多少字符"，
+      `trim_budget_per_frame()`）。
+    - ⭐ **为什么必须分帧**（这一条是量出来的，不是想出来的）：egui 用**上一帧**的滚动位置给内容布局，
+      把 `offset` 夹回合法范围发生在**内容画完之后**（`containers/scroll_area.rs` 里
+      `state.offset[d].min(max_offset[d])` 在滚动条绘制段）。一帧里把内容缩短超过一个可视区高度，
+      这一帧的内容就整个落在视口上方、被 `is_rect_visible` 判掉 ⇒ 用户看到**接收区空一帧**。实测：
+      欠账 2 850 字符一次裁完时，那一帧画出的文字 shape 里只剩半行残句；改成 371 字符/帧后逐帧都
+      有完整内容。**"半个可视区"是按高度换算的**，所以字体档位（`ui_font_scale`）与窄窗口自动跟上
+      ——写死"12 行"在窄窗口（可视区 120）下就失效了。
+    - **判据与空转验证**（`receive.rs` 四条新测试）：`is_at_bottom_covers_the_three_interesting_positions`
+      （三态真值表：装得下 / 贴底 / 翻上去差 1 点以外）、`trim_budget_stays_well_under_one_viewport`
+      （额度 < 可视区字符数的一半，且视口减半时额度同步减半）、
+      `front_trim_is_deferred_while_the_user_reads_history`（读历史一个字符都不裁 / 额度用满后照旧裁 /
+      贴底恢复原上限 / 接收区隐藏时照旧裁到上限）、`wheel_up_freezes_the_reading_position`（无头驱动
+      **真实** `render_receive_area`，喂 `Event::MouseWheel`，从**画出来的文字 shape** 反推视口顶行行号）。
+      **三处注入全红**：把"读历史放宽"改回一律裁到 `max` → 单元测试报"用户正在读历史，却把旧内容裁掉了"
+      **且**真实路径那条报出行号逐帧前进 `[109, 113, 117, 122, …]`；把额度改成 `chars`（=一次裁完）→
+      单元测试报"额度 5850 字符已经接近可视区高度"，真实路径那条报"这一帧没有画出接收区日志文本"
+      （即空一帧）；把 `is_at_bottom` 改成恒 `true` → 真值表与真实路径两条同时红。
+    - ⚠️ **量"用户看见什么"要素材化**：这一批断言读的是 `FullOutput.shapes` 里的 `Shape::Text`——
+      `t.pos.y + row.rect().max.y > clipped.clip_rect.top()` 找出**压在视口顶部的行**，`clip_rect` 必须
+      是接收区可视区（实测 400 高，不是整窗 600）。认出"日志那一份"**不能**要求文本以 `line ` 开头：
+      分帧追平期间截口会落在行中间（顶行是半行）。
+    - **留档取舍**：读历史时放宽会让内存临时超过 `max_log_chars`（默认 30 000 → 至多 60 000 字符/镜像）；
+      长时间停在历史里且设备一直喷数据，到额度后恢复淘汰，**那一刻阅读位置会跳一次**——这是"内存上限
+      优先于阅读位置"的明确选择（`HANDOVER.md` §3.23）。
+    - **同族提醒**：任何"从容器**前端**删内容"的操作都会造成同样的位移（不仅是日志：列表、表格虚拟滚动
+      同理）。判据一律用"用户正在读的那一项是否还停在原地"，不要用滚动条数值。
 

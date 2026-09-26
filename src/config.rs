@@ -72,6 +72,13 @@ pub fn restore_runtime_state(app: &mut ComTool) {
     // 而且它只受 `chart_max_samples` 约束，落盘只会平白撑大存档。
     app.chart.clear();
 
+    // 「接收区视口是否贴底」是一次绘制过程的观察结果，跨进程没有意义；而且它决定
+    // 这一帧要不要淘汰旧日志（见 `ComTool::receive_at_bottom`）。上一次会话若正好停在
+    // 历史里，带回来的 `false` 会让启动后一直不敢裁剪 ⇒ 日志上限形同失效。一律置 true；
+    // 配套的"每帧淘汰额度"同样来自绘制实测，一起复位成"不限制"。
+    app.receive_at_bottom = true;
+    app.receive_trim_budget = usize::MAX;
+
     // 端口列表必须反映当前系统：插拔设备后重启，看到的不该是旧快照。
     app.ports = scan_ports();
     if app.ports.is_empty() {

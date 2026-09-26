@@ -516,6 +516,27 @@ pub struct ComTool {
     pub chart_auto_bounds: bool,
 
     // —— 运行时状态（不落盘，见 crate::config）——
+    /// 上一次绘制接收区时，视口是否贴着底部。
+    ///
+    /// 贴底 = 正在跟随最新内容，此时淘汰最旧的内容用户看不见；不贴底 = 用户翻到历史
+    /// 里在阅读，此时**不能再淘汰**——被淘汰的内容会同时从他视口上方消失，而滚动位置
+    /// 不变，等于阅读位置被一行行抽走，看起来就是"自动滚动根本没停"（2026-09-26 用户
+    /// 报告）。判定在 [`crate::receive::is_at_bottom`]，消费在
+    /// [`crate::receive::ComTool::trim_receive_logs`]。
+    ///
+    /// 与 `connected` / `show_settings` 同款：字段会被序列化，但 [`crate::config::restore_runtime_state`]
+    /// 启动时一律重置回 `true`（"上一次会话恰好停在历史里"不该让新会话一直不敢裁剪）。
+    pub receive_at_bottom: bool,
+    /// 贴底追平历史欠账时，**这一帧最多淘汰多少字符**（由上一帧实测的
+    /// "可视区高 / 每字符高"推出，见 [`crate::receive::trim_budget_per_frame`]）。
+    ///
+    /// 为什么不能一次裁完：egui 用**上一帧**的滚动位置给内容布局，把 offset 夹回合法
+    /// 范围发生在内容画完之后。一帧里把内容缩短超过一个可视区高度，这一帧的内容就整个
+    /// 落在视口上方——用户看到接收区**空一帧**（2026-09-26 实测复现）。分帧追平即可。
+    ///
+    /// `usize::MAX` = 不限制（还没有实测数据时的兜底：没数据就说明还没画过，那时也不可能
+    /// 有欠账；真有异常值也不该因此把内存上限放开）。
+    pub receive_trim_budget: usize,
     /// 正在运行的实时文件日志。`Some` 即表示「记录中」——不另设 bool 标志位，
     /// 两个字段表达同一件事迟早会不一致。
     #[serde(skip)]
@@ -1386,6 +1407,8 @@ impl Default for ComTool {
             theme: ThemeChoice::default(),
             ui_font_scale: UiFontScale::default(),
             auto_scroll: true,
+            receive_at_bottom: true,
+            receive_trim_budget: usize::MAX,
             max_log_chars: DEFAULT_MAX_LOG_CHARS,
             timestamp_prefix: TimestampPrefix::default(),
             repaint_interval_ms: DEFAULT_REPAINT_INTERVAL_MS,
