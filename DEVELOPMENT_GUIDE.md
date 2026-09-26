@@ -23,10 +23,10 @@ COM3 受「长测门闩」保护，COM4 是 AI 功能测试放行端口（但必
   或 `DtrEnable = true`。**没置 DTR 收不到日志不是程序的问题**，先查这一项。
   一条命令同时点名 COM3 与 COM4 时 COM3 优先。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。338 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。**351** 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **门禁口径（四项全绿才算过）**：`cargo fmt --check` 干净 · `cargo check --all-targets`
-  **0 warning** · `cargo test` **338 passed + 1 ignored** · `cargo clippy --all-targets`
+  **0 warning** · `cargo test` **351 passed + 1 ignored** · `cargo clippy --all-targets`
   **0 warning**。最后一项 2026-09-26 起从"0 新增"收紧为 **0 warning**——原先的口径等于
   默许 8 条历史欠账永久存在（逐条见 `HISTORY_2026.md` §3.24）。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。

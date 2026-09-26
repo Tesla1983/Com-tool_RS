@@ -262,6 +262,26 @@ pub const DEFAULT_SHOW_CHART_PANEL: bool = false;
 /// 2000 点足以看清一段趋势，单帧转换成本也在毫秒级；上限可在设置里调。
 pub const DEFAULT_CHART_MAX_SAMPLES: usize = 2_000;
 
+/// 发送框右下角那个"拖动改高度"把手的 id。
+///
+/// 显式命名而不用自动 id：自动 id 由"这一帧前面已经画了多少个控件"决定，前面
+/// 加一个控件它就跟着变，测试也就无法稳定地把把手读出来。测试走
+/// `egui::Context::read_response(egui::Id::new(SEND_RESIZE_GRIP_ID))` 拿它这一帧的
+/// 矩形——"把手在框的右下角、拖完以后框变高了"是唯一能在无头环境里量到的判据。
+pub(crate) const SEND_RESIZE_GRIP_ID: &str = "send_resize_grip";
+
+/// 发送输入框的 id。
+///
+/// 显式常量而不是就地写字符串：界面与测试都要用它（测试靠
+/// [`egui::Context::read_response`] 读回输入框这一帧的矩形，量"框自己有多高"）。
+pub(crate) const SEND_INPUT_ID: &str = "send_input";
+
+/// 把手的高度（像素）。
+///
+/// 10 px 是"看得见、点得中"与"不占版面"之间的折中：再窄一点鼠标很难压上去，
+/// 再高就变成一条突兀的空条。
+const SEND_RESIZE_GRIP_HEIGHT: f32 = 10.0;
+
 /// 应用状态。
 ///
 /// 序列化策略见 [`crate::config`]：带 `#[serde(skip)]` 的字段是运行时状态，
@@ -352,6 +372,20 @@ pub struct ComTool {
     ///
     /// 只存间隔不存"是否开启"：开关是 [`ComTool::repeat_send`]，它是运行时状态。
     pub repeat_interval_ms: u64,
+    /// 发送框一次能预览多少行（用户拖右下角把手调整）。
+    ///
+    /// 存**行数**而不是像素高度：像素值换一台机器（不同 DPI）或改一次字体档位就
+    /// 对不上，而用户在意的是"我能一次看见几行"。像素换算发生在
+    /// [`ComTool::render_send_editor`]，用的是当前字号下的实际行高。
+    ///
+    /// 落盘：这是用户亲手调过的界面尺寸，下次启动该保持原样。
+    pub send_visible_rows: u32,
+    /// 拖把手时"不足一行"的像素余量（纯运行时状态，不落盘）。
+    ///
+    /// 见 [`crate::send::apply_send_rows_drag`]：拖动是连续的、行数是整数，不攒着
+    /// 慢慢拖就永远跨不过一行。松手即清零。
+    #[serde(skip)]
+    pub send_rows_drag_px: f32,
 
     // 通信通道（F4 起可能是串口 / TCP / UDP；基于 ByteChannel trait，句柄不可序列化）
     //
@@ -1383,6 +1417,8 @@ impl Default for ComTool {
             send_history: SendHistory::default(),
             send_presets: SendPresets::default(),
             repeat_interval_ms: DEFAULT_REPEAT_INTERVAL_MS,
+            send_visible_rows: crate::send::DEFAULT_SEND_VISIBLE_ROWS,
+            send_rows_drag_px: 0.0,
             channel: None,
             channel_kind: None,
             event_rx: None,
@@ -1568,6 +1604,191 @@ impl ComTool {
             ui.separator();
             self.send_history_menu(ui);
         });
+    }
+
+    /// 发送框本体：定高视口（多行预览）+ 右下角可拖高的把手 + ↑ / ↓ 翻历史。
+    ///
+    /// 抽出来的理由与 [`ComTool::render_send_presets`] 相同：`ui()` 收一个无头测试
+    /// 造不出的 `eframe::Frame`，写死在里面等于一次也不会被 `cargo test` 画到；而
+    /// "把手在这里、拖完变高"恰恰是必须被真实画一遍才测得出来的事。
+    ///
+    /// **返回**：输入框这一帧是否持有键盘焦点。调用方据此判断 Enter 算不算"发送"
+    /// ——判定留在调用方，是因为"Enter 发送"只在有焦点时成立，而焦点是这里的
+    /// 局部信息。
+    ///
+    /// # 视口为什么是定高而不是"跟着内容长"
+    ///
+    /// 之前 `TextEdit::multiline` 用的是 `desired_rows(4)`：那只是**最小**高度，内容
+    /// 一多它就把自己撑高，直到把下面的「发送 / 清空」按钮和常用数据挤出可视区
+    /// （中央区没有整体滚动，挤出去就点不着）。改成"视口高度 = 用户选的行数、内容
+    /// 更多时框内滚动"之后：把手永远停在原地（拖第二下才找得到），界面也不会被一
+    /// 段粘贴进来的长文本撑变形。
+    pub(crate) fn render_send_editor(&mut self, ui: &mut egui::Ui) -> bool {
+        let s = self.language.strings();
+        let send_edit_id = egui::Id::new(SEND_INPUT_ID);
+
+        // 行高取自输入框真正用的那套等宽字体（**含**全局字体档位）：把字体调大
+        // 之后"拖 100 px 能加几行"本来就该变少，写死 14.0 会让换算与实际对不上。
+        let font_id =
+            crate::receive::monospace_font_id(ui, crate::receive::RECEIVE_MONOSPACE_BASE_SIZE);
+        // 用 `fonts_mut`：`row_height` 要按需加载字形度量，需要可变访问
+        // （`TextEdit` 内部也是这么取的，见 egui 的 `text_edit/builder.rs`）。
+        let line_height =
+            ui.fonts_mut(|f| f.row_height(&font_id)) + ui.spacing().extra_text_line_spacing;
+        let visible_rows = self.send_visible_rows;
+
+        // 4.0 = 输入框上下内边距之和（`TextEdit` 的 margin 是 `symmetric(4, 2)`）。
+        // 少了它，视口会比"N 行"矮一截——最后一行永远差一点点露不出来。
+        let viewport_height = line_height * visible_rows as f32 + 4.0;
+
+        // 焦点与箭头键都必须在绘制 `TextEdit` **之前**读：TextEdit 会消费导航键
+        // 事件，等它画完再读 `key_pressed` 有可能已经拿不到了。
+        let had_focus = ui.ctx().memory(|m| m.has_focus(send_edit_id));
+        let (up_pressed, down_pressed) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp) && !i.modifiers.shift,
+                i.key_pressed(egui::Key::ArrowDown) && !i.modifiers.shift,
+            )
+        });
+
+        let mut out = None;
+        egui::ScrollArea::vertical()
+            .id_salt("send_input_scroll")
+            // 两个方向都不自动收缩：视口高度由用户决定，不该被一行内容"缩回去"。
+            .auto_shrink([false, false])
+            .min_scrolled_height(viewport_height)
+            .max_height(viewport_height)
+            .show(ui, |ui| {
+                out = Some(
+                    egui::TextEdit::multiline(&mut self.send_text)
+                        .id(send_edit_id)
+                        .desired_width(f32::INFINITY)
+                        // 最小高度也是用户选的行数：内容不满时框照样占满，
+                        // 于是"拖到 10 行"在空输入框上也看得出来。
+                        .desired_rows(visible_rows as usize)
+                        // 字号跟随全局字体档位：写死的话，用户把字体调大后发送框
+                        // 仍是小字，与接收区不一致（两者都是等宽内容，本该同号）。
+                        .font(font_id.clone())
+                        .return_key(egui::KeyboardShortcut::new(
+                            egui::Modifiers::SHIFT,
+                            egui::Key::Enter,
+                        ))
+                        .show(ui),
+                );
+            });
+        // 闭包一定被 `show` 调用一次；为 `None` 只能说明 egui 的行为变了。
+        let out = out.expect("ScrollArea 必须绘制它的内容一次");
+        let send_has_focus = out.response.response.has_focus();
+
+        // 用**上一帧**的光标位置判断首行 / 末行：本帧的位置可能已经被 ↑ 自己
+        // 挪走，用它判断会让"在第二行按 ↑"当场变成"取历史"。
+        let cursor = self.send_cursor_index.unwrap_or(0);
+        let mut recalled = false;
+        if had_focus {
+            let next = if up_pressed && on_first_line(&self.send_text, cursor) {
+                // 注意 `send_history_nav` 与 `send_history` / `send_text` 是三个
+                // 互不重叠的字段，借用检查器允许这样同时借。
+                self.send_history_nav
+                    .older(&self.send_history, &self.send_text)
+            } else if down_pressed && on_last_line(&self.send_text, cursor) {
+                self.send_history_nav.newer(&self.send_history)
+            } else {
+                None
+            };
+
+            if let Some(text) = next {
+                self.send_text = text;
+                recalled = true;
+                // 光标移到末尾：否则下一次 ↑ 会因为光标还停在旧位置而重复命中
+                // 同一条历史（shell 里的 ↑ 也是这个行为）。
+                let mut state = out.state.clone();
+                let end = egui::text::CCursor::new(self.send_text.chars().count());
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                state.store(ui.ctx(), send_edit_id);
+            }
+        }
+
+        // 用户自己改了内容 → 退出浏览态，否则下一次 ↑ 会接着半截历史往下走。
+        // `recalled` 那一帧例外：本次改动是我们自己写进去的。
+        if out.response.response.changed() && !recalled {
+            self.send_history_nav.reset();
+        }
+
+        // 记录本帧光标位置供下一帧使用；刚取过历史就按"光标已到末尾"记，
+        // 免得下一帧拿一个越界下标去判断。
+        // `CCursor::index` 是 `CharIndex` 这个 newtype（不是裸 usize），
+        // 取 `.0` 拿字符下标；`send.rs` 里的首行/末行判定也是按字符算的。
+        self.send_cursor_index = if recalled {
+            Some(self.send_text.chars().count())
+        } else {
+            out.cursor_range.map(|r| r.primary.index.0)
+        };
+
+        // —— 把手：在框的右下角，上下拖动改可见行数 ——
+        //
+        // 用 `allocate_exact_size` 占位 + 显式 id 的 `interact`，而不是让 egui 派一个
+        // 自动 id：自动 id 依赖"这一帧前面画了多少个控件"，换个顺序就跟着变，
+        // 测试也就没法稳定地把它读出来。
+        let (grip_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), SEND_RESIZE_GRIP_HEIGHT),
+            egui::Sense::empty(),
+        );
+        // 感 click + drag 而不是只感 drag：`double_clicked` 的前提是这一帧有
+        // `Flags::CLICKED`，而只有感 click 的控件才会被置上（双击复位要靠它）。
+        // 代价是"按下"这一帧还分不清是单击还是拖动，要等指针移动开才判成拖动——
+        // 对一条 10 px 高的把手来说这不是问题，拖的人都得先挪一段。
+        let grip = ui.interact(
+            grip_rect,
+            egui::Id::new(SEND_RESIZE_GRIP_ID),
+            egui::Sense::click_and_drag(),
+        );
+
+        if grip.dragged() {
+            let (rows, carried) = crate::send::apply_send_rows_drag(
+                visible_rows,
+                self.send_rows_drag_px,
+                grip.drag_delta().y,
+                line_height,
+            );
+            self.send_visible_rows = rows;
+            self.send_rows_drag_px = carried;
+        } else {
+            // 松手就丢掉余量：下一次拖动从零开始，否则上一次差的那半行会让这一
+            // 次的头几像素没反应。
+            self.send_rows_drag_px = 0.0;
+        }
+        if grip.double_clicked() {
+            // 双击复位：拖到某个奇怪的高度之后总要有个"回到默认"的口子。
+            self.send_visible_rows = crate::send::DEFAULT_SEND_VISIBLE_ROWS;
+            self.send_rows_drag_px = 0.0;
+        }
+
+        // 静止时只在右下角留三道斜线（低调），鼠标一靠近就把整条点亮——
+        // "这里能拖"要能被看见，但不该在平时抢走注意力。
+        let grip_visuals = ui.style().interact(&grip);
+        if grip.hovered() || grip.dragged() {
+            ui.painter()
+                .rect_filled(grip_rect, 2.0, grip_visuals.bg_fill);
+        }
+        let corner = grip_rect.right_bottom() - egui::vec2(2.0, 2.0);
+        for step in 0..3 {
+            let reach = 3.0 + step as f32 * 4.0;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(corner.x - reach, corner.y),
+                    egui::pos2(corner.x, corner.y - reach),
+                ],
+                egui::Stroke::new(1.0, grip_visuals.fg_stroke.color),
+            );
+        }
+        if grip.hovered() || grip.dragged() {
+            ui.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        grip.on_hover_text(s.send_resize_hint);
+
+        send_has_focus
     }
 
     /// 中央区最上面那一行：侧边栏显隐开关（左）+ 「⚙ 设置」按钮（右）。
@@ -1779,80 +2000,9 @@ impl ComTool {
             // 发送区
             self.render_send_settings_row(ui);
 
-            let send_edit_id = egui::Id::new("send_input");
-
-            // 焦点与箭头键都必须在绘制 `TextEdit` **之前**读：TextEdit 会消费
-            // 导航键事件，等它画完再读 `key_pressed` 有可能已经拿不到了。
-            let had_focus = ui.ctx().memory(|m| m.has_focus(send_edit_id));
-            let (up_pressed, down_pressed) = ui.input(|i| {
-                (
-                    i.key_pressed(egui::Key::ArrowUp) && !i.modifiers.shift,
-                    i.key_pressed(egui::Key::ArrowDown) && !i.modifiers.shift,
-                )
-            });
-
-            let out = egui::TextEdit::multiline(&mut self.send_text)
-                .id(send_edit_id)
-                .desired_width(f32::INFINITY)
-                .desired_rows(4)
-                // 字号跟随全局字体档位：写死 14.0 的话，用户把字体调大后
-                // 发送框仍是小字，与接收区不一致（两者都是等宽内容，本该同号）。
-                .font(crate::receive::monospace_font_id(
-                    ui,
-                    crate::receive::RECEIVE_MONOSPACE_BASE_SIZE,
-                ))
-                .return_key(egui::KeyboardShortcut::new(
-                    egui::Modifiers::SHIFT,
-                    egui::Key::Enter,
-                ))
-                .show(ui);
-            let send_has_focus = out.response.response.has_focus();
-
-            // 用**上一帧**的光标位置判断首行 / 末行：本帧的位置可能已经被 ↑ 自己
-            // 挪走，用它判断会让"在第二行按 ↑"当场变成"取历史"。
-            let cursor = self.send_cursor_index.unwrap_or(0);
-            let mut recalled = false;
-            if had_focus {
-                let next = if up_pressed && on_first_line(&self.send_text, cursor) {
-                    // 注意 `send_history_nav` 与 `send_history` / `send_text` 是三个
-                    // 互不重叠的字段，借用检查器允许这样同时借。
-                    self.send_history_nav
-                        .older(&self.send_history, &self.send_text)
-                } else if down_pressed && on_last_line(&self.send_text, cursor) {
-                    self.send_history_nav.newer(&self.send_history)
-                } else {
-                    None
-                };
-
-                if let Some(text) = next {
-                    self.send_text = text;
-                    recalled = true;
-                    // 光标移到末尾：否则下一次 ↑ 会因为光标还停在旧位置而重复命中
-                    // 同一条历史（shell 里的 ↑ 也是这个行为）。
-                    let mut state = out.state.clone();
-                    let end = egui::text::CCursor::new(self.send_text.chars().count());
-                    state
-                        .cursor
-                        .set_char_range(Some(egui::text::CCursorRange::one(end)));
-                    state.store(ui.ctx(), send_edit_id);
-                }
-            }
-
-            // 用户自己改了内容 → 退出浏览态，否则下一次 ↑ 会接着半截历史往下走。
-            // `recalled` 那一帧例外：本次改动是我们自己写进去的。
-            if out.response.response.changed() && !recalled {
-                self.send_history_nav.reset();
-            }
-
-            // 记录本帧光标位置供下一帧使用；刚取过历史就按"光标已到末尾"记，
-            // 免得下一帧拿一个越界下标去判断。
-            // `CCursor::index` 是 `CharIndex` 这个 newtype（不是裸 usize），
-            // 取 `.0` 拿字符下标；`send.rs` 里的首行/末行判定也是按字符算的。
-            self.send_cursor_index = if recalled {
-                Some(self.send_text.chars().count())
-            } else {
-                out.cursor_range.map(|r| r.primary.index.0)
-            };
+            // 输入框本体（含右下角那个可拖高的把手）；返回值是"这一帧是否有焦点"，
+            // 下面的 Enter 发送要用。
+            let send_has_focus = self.render_send_editor(ui);
 
             // 实时校验：HEX 写错了要当场看见，而不是点了发送才发现。
             // 超长输入跳过——发送框里正常不会有这么大的文本，而每帧解析一遍
@@ -1992,6 +2142,323 @@ mod tests {
             header_y < marker_y,
             "图表页眉落在 y={header_y:.1}，接收区内容落在 y={marker_y:.1}——\
              图表不在接收区之上，它被挪回下面了？"
+        );
+    }
+
+    /// 画一帧中央区（900×900 视口）。
+    ///
+    /// 事件由调用方给：要测拖动就得在某一帧放 `PointerButton` 按下、下一帧放
+    /// `PointerMoved`——egui 的"拖动"是跨帧状态，一帧里按下再移动不算。
+    fn draw_central_frame(ctx: &egui::Context, app: &mut ComTool, events: Vec<egui::Event>) {
+        draw_central_frame_at(ctx, app, 0.0, events);
+    }
+
+    /// 同上，但能指定这一帧的时间戳（模拟双击需要让两帧挨得够近）。
+    fn draw_central_frame_at(
+        ctx: &egui::Context,
+        app: &mut ComTool,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 900.0),
+            )),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                app.render_central_column(ui);
+            });
+        });
+        // 不清理纹理会在 drop 时 panic（与断言无关的清理问题，不是缺陷）。
+        out.textures_delta.clear();
+    }
+
+    /// 这一帧发送框把手落在哪。
+    ///
+    /// 用显式 id 从 `Context` 读，而不是从 `shapes` 里猜那三道斜线：`TextEdit` 画出
+    /// 来的实际高度无头环境拿不到（没有真的窗口），"框变高了没有"只能靠把手的
+    /// 位置来量——而把手恰恰是用户眼睛盯着的那个东西。
+    fn grip_rect(ctx: &egui::Context) -> egui::Rect {
+        match ctx.read_response(egui::Id::new(SEND_RESIZE_GRIP_ID)) {
+            Some(response) => response.rect,
+            None => panic!("这一帧没有画出发送框把手——把手被删掉了或被挪出了中央区"),
+        }
+    }
+
+    /// 这一帧**输入框自己**画了多大。
+    ///
+    /// 与 [`grip_rect`] 是两个不同的东西：把手的位置只反映滚动视口的高度，输入框
+    /// 自己可以比视口矮（内容为空、又没把最小高度设成视口高度时就是这样）。用户
+    /// 拖到 20 行却只看见 4 行高的白框，正是这条要挡住的缺陷。
+    fn send_input_rect(ctx: &egui::Context) -> egui::Rect {
+        match ctx.read_response(egui::Id::new(SEND_INPUT_ID)) {
+            Some(response) => response.rect,
+            None => panic!("这一帧没有画出发送输入框"),
+        }
+    }
+
+    /// 可见行数调大 ⇒ 发送框真的变高（把手被推下去）。
+    ///
+    /// ⚠️ 判据是**把手的位移**，不是"界面里有没有这么个控件"：后者把把手画出来却
+    /// 不接高度照样通过（那正是"能拖、拖了没反应"的缺陷形态）。
+    ///
+    /// 阈值 150 px 是字面量：20 行与 4 行差 16 行，标准字号下一行 13 px，差 208 px；
+    /// 写 150 是"用户一眼能看出变高了"的量级，不引用 `MAX_SEND_VISIBLE_ROWS`。
+    #[test]
+    fn send_box_grows_when_the_visible_row_setting_grows() {
+        // 两个独立的 `Context`：一次 `run_ui` 之后控件矩形会留在 `Context` 里，
+        // 换一帧继续用同一个 `Context` 读到的是更早那次的值。"4 行 vs 20 行"是
+        // 两个互不相干的画面，就该各画各的（需要跨帧状态的拖动测试才复用同一个）。
+        let ctx = egui::Context::default();
+        let mut app = ComTool::default();
+        draw_central_frame(&ctx, &mut app, vec![]);
+        let short_box_grip = grip_rect(&ctx);
+        let short_box = send_input_rect(&ctx);
+
+        let ctx = egui::Context::default();
+        app.send_visible_rows = 20;
+        draw_central_frame(&ctx, &mut app, vec![]);
+        let tall_box_grip = grip_rect(&ctx);
+        let tall_box = send_input_rect(&ctx);
+
+        // ① 把手被推下去 = 滚动视口确实变高了
+        let grew = tall_box_grip.min.y - short_box_grip.min.y;
+        assert!(
+            grew > 150.0,
+            "可见行数从 4 调到 20，把手只下移了 {grew:.1} px——\
+             发送框没有跟着变高，把手是画上去的摆设"
+        );
+
+        // ② 输入框**自己**也要长到 20 行（内容为空时同样如此）。
+        //    少了这一条，"视口变高、白框仍是 4 行"能悄悄溜过去——用户拖完看到的
+        //    就是一个矮框加一大片空白。
+        assert!(
+            tall_box.height() > 200.0,
+            "调到 20 行，输入框自身只有 {:.1} px 高——它没跟着长，\
+             用户拖完看到的是矮框配一块空白",
+            tall_box.height()
+        );
+        assert!(
+            short_box.height() < 100.0,
+            "默认 4 行的输入框不该有 {:.1} px 高——'多行预览'若对默认值也生效，\
+             老用户一升级界面就变了样",
+            short_box.height()
+        );
+    }
+
+    /// 草稿再长也不把发送框撑大：多出来的部分在框内滚动。
+    ///
+    /// 这条守的是"视口高度由用户说了算"——没有它，粘一段 30 行的文本进来就会把
+    /// 「发送 / 清空」按钮和常用数据挤出可视区（中央区没有整体滚动，挤出去就点
+    /// 不着）。把手的 y 不变，正是"视口没被内容撑开"的可量形式。
+    #[test]
+    fn a_long_draft_scrolls_instead_of_pushing_the_send_box_down() {
+        let draft: String = (1..=30).map(|line| format!("line {line}\n")).collect();
+
+        let ctx = egui::Context::default();
+        let mut app = ComTool::default();
+        draw_central_frame(&ctx, &mut app, vec![]);
+        let empty_draft_grip_y = grip_rect(&ctx).min.y;
+
+        let ctx = egui::Context::default();
+        let mut app = ComTool {
+            send_text: draft,
+            ..ComTool::default()
+        };
+        draw_central_frame(&ctx, &mut app, vec![]);
+        let long_draft_grip_y = grip_rect(&ctx).min.y;
+
+        assert!(
+            (long_draft_grip_y - empty_draft_grip_y).abs() < 4.0,
+            "30 行草稿把把手从 y={empty_draft_grip_y:.1} 推到了 y={long_draft_grip_y:.1}——\
+             视口被内容撑开了，长文本会把下面的按钮挤出屏幕"
+        );
+    }
+
+    /// 真的按住把手往下拖 ⇒ 可见行数变多。
+    ///
+    /// 判据是**状态被拖动改了**，不是"拖动的事件送进去了"：egui 那边的拖动态由
+    /// 上一帧的控件矩形决定，这里走的是与真实鼠标完全相同的输入路径。
+    #[test]
+    fn dragging_the_grip_down_raises_the_visible_rows() {
+        let ctx = egui::Context::default();
+        let mut app = ComTool::default();
+        assert_eq!(app.send_visible_rows, 4, "默认 4 行，与加把手之前一致");
+
+        draw_central_frame(&ctx, &mut app, vec![]);
+        let start = grip_rect(&ctx).center();
+
+        // 第一帧：把指针移到把手上并按下（按下发生在**上一帧**的矩形上，
+        // 所以这一帧之前必须先画过一帧）。
+        draw_central_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        // 第二帧：往下拖 150 px。
+        draw_central_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(egui::pos2(
+                start.x,
+                start.y + 150.0,
+            ))],
+        );
+
+        assert!(
+            app.send_visible_rows >= 10,
+            "往下拖了 150 px，可见行数只到 {} —— 拖动没有换算成高度",
+            app.send_visible_rows
+        );
+    }
+
+    /// 往上拖 ⇒ 变矮，且不会拖成 0（下限 2 行）。
+    #[test]
+    fn dragging_the_grip_up_shrinks_the_visible_rows() {
+        let ctx = egui::Context::default();
+        let mut app = ComTool {
+            send_visible_rows: 12,
+            ..ComTool::default()
+        };
+
+        draw_central_frame(&ctx, &mut app, vec![]);
+        let start = grip_rect(&ctx).center();
+        draw_central_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        // 往上拖 500 px：远超 12 行，应当一路撞到下限
+        draw_central_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(egui::pos2(
+                start.x,
+                start.y - 500.0,
+            ))],
+        );
+
+        assert_eq!(
+            app.send_visible_rows, 2,
+            "拖过头也必须停在下限 2 行，不能把输入框压成一条缝"
+        );
+
+        // 中途量一次：小幅上拖要按行递减，而不是一步到底
+        let mut app = ComTool {
+            send_visible_rows: 12,
+            ..ComTool::default()
+        };
+        let ctx = egui::Context::default();
+        draw_central_frame(&ctx, &mut app, vec![]);
+        let start = grip_rect(&ctx).center();
+        draw_central_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        draw_central_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(egui::pos2(
+                start.x,
+                start.y - 39.0,
+            ))],
+        );
+        // 判据写**区间**而不是精确值：一行的高度是字体的实际度量（Monospace
+        // 基准 13 px 上下，随字体档位变），39 px 折算 2~3 行。精确到某一行会把
+        // "字号改了"误判成缺陷。
+        let shrunk = 12 - app.send_visible_rows;
+        assert!(
+            (2..=4).contains(&shrunk),
+            "往上拖 39 px 应当缩掉 2~3 行，实际缩了 {shrunk} 行（剩 {} 行）",
+            app.send_visible_rows
+        );
+    }
+
+    /// 把手横跨发送框、贴在右侧——用户会在右下角找它。
+    ///
+    /// 判据是**几何位置**而不是"画出来了"：把手画在左边缘的话，这条会红。
+    #[test]
+    fn resize_grip_sits_at_the_bottom_right_of_the_send_box() {
+        let ctx = egui::Context::default();
+        let mut app = ComTool::default();
+        draw_central_frame(&ctx, &mut app, vec![]);
+        let grip = grip_rect(&ctx);
+
+        assert!(
+            grip.width() > 700.0,
+            "把手只有 {:.1} px 宽——它该横跨整个发送框，不然右下角根本压不中",
+            grip.width()
+        );
+        assert!(
+            grip.right() > 700.0,
+            "把手的右边缘在 x={:.1}（视口宽 900）——它该贴着右边，而不是缩在左侧",
+            grip.right()
+        );
+        assert!(
+            grip.height() <= 12.0,
+            "把手高 {:.1} px，太占版面了——它是一条细把手，不是一块面板",
+            grip.height()
+        );
+    }
+
+    /// 双击把手 ⇒ 回到默认高度（拖到某个奇怪的高度之后总要有条退路）。
+    #[test]
+    fn double_clicking_the_grip_restores_the_default_height() {
+        let ctx = egui::Context::default();
+        let mut app = ComTool {
+            send_visible_rows: 20,
+            ..ComTool::default()
+        };
+        draw_central_frame(&ctx, &mut app, vec![]);
+        let p = grip_rect(&ctx).center();
+
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        // 两轮"按下→松开"，间隔远小于 egui 的双击判定窗口
+        draw_central_frame_at(&ctx, &mut app, 1.00, vec![press(true)]);
+        draw_central_frame_at(&ctx, &mut app, 1.05, vec![press(false)]);
+        draw_central_frame_at(&ctx, &mut app, 1.10, vec![press(true)]);
+        draw_central_frame_at(&ctx, &mut app, 1.15, vec![press(false)]);
+
+        assert_eq!(
+            app.send_visible_rows, 4,
+            "双击把手应当回到默认 4 行，实际是 {} 行",
+            app.send_visible_rows
         );
     }
 

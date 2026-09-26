@@ -112,6 +112,12 @@ pub fn restore_runtime_state(app: &mut ComTool) {
     // 越界值在这里夹回合法区间；`clamp_repeat_interval` 在使用处还会再夹一次。
     app.repeat_interval_ms = crate::send::clamp_repeat_interval(app.repeat_interval_ms);
 
+    // 发送框的可见行数（拖把手调出来的界面尺寸）是用户偏好，但要夹回 2~40：
+    // 手改成 0 会让输入框退化成一条缝，手改成 u32::MAX 则会把下方按钮挤出可视区。
+    app.send_visible_rows = crate::send::clamp_send_visible_rows(app.send_visible_rows);
+    // 拖动的"不足一行余量"是纯运行时状态：一次拖动跨不过进程边界。
+    app.send_rows_drag_px = 0.0;
+
     // 图表样本上限同时决定内存与每帧绘制成本，越界值（手改存档）同样夹回去；
     // 解析入口 `ChartData::push_bytes` 还会再夹一次，双保险。
     app.chart_max_samples = app
@@ -217,6 +223,9 @@ mod tests {
                 h
             },
             repeat_interval_ms: 250,
+            // 发送框拉到 8 行（默认 4 行）：这是用户拖把手调出来的界面尺寸，
+            // 属于用户偏好，也必须能往返。
+            send_visible_rows: 8,
             send_presets: {
                 let mut p = SendPresets::default();
                 p.add("AT");
@@ -298,6 +307,10 @@ mod tests {
         assert_eq!(restored.send_presets, original.send_presets);
         assert_eq!(restored.send_presets.entries(), ["AT", "AT+GMR"]);
         assert_eq!(restored.repeat_interval_ms, original.repeat_interval_ms);
+        assert_eq!(
+            restored.send_visible_rows, original.send_visible_rows,
+            "发送框的可见行数是用户拖出来的，必须跟着存档走"
+        );
         assert_eq!(restored.show_receive_panel, original.show_receive_panel);
         assert_eq!(restored.show_send_panel, original.show_send_panel);
         // P5 新增的图表偏好同样要能往返
@@ -651,6 +664,34 @@ mod tests {
         let mut too_slow = customized();
         too_slow.repaint_interval_ms = 100_000;
         assert_eq!(round_trip(&too_slow).repaint_interval_ms, 1_000);
+    }
+
+    /// 发送框的可见行数是用户偏好，必须跟着存档走；越界值（手改存档）在启动时夹回
+    /// 2~40——判据写字面量，不引用 `MIN/MAX_SEND_VISIBLE_ROWS`（引用实现常量等于
+    /// 让被测代码自己判卷）。
+    #[test]
+    fn send_visible_rows_survive_round_trip_and_are_clamped() {
+        let mut taller = customized();
+        taller.send_visible_rows = 12;
+        assert_eq!(round_trip(&taller).send_visible_rows, 12);
+
+        // 0 会让输入框退化成一条缝，1 也一样（下限是 2）
+        let mut too_small = customized();
+        too_small.send_visible_rows = 0;
+        assert_eq!(round_trip(&too_small).send_visible_rows, 2);
+
+        let mut too_tall = customized();
+        too_tall.send_visible_rows = u32::MAX;
+        assert_eq!(round_trip(&too_tall).send_visible_rows, 40);
+    }
+
+    /// 拖动余量是运行时状态，不落盘（把上一次拖动差的那几个像素带回来只会让
+    /// 下一次拖动的头几像素没反应）。
+    #[test]
+    fn send_rows_drag_carry_is_not_restored() {
+        let mut saved = customized();
+        saved.send_rows_drag_px = 9.5;
+        assert_eq!(round_trip(&saved).send_rows_drag_px, 0.0);
     }
 
     /// 图表样本上限越界（手改存档）时同样夹回合法区间。

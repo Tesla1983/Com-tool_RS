@@ -1713,3 +1713,51 @@ so no parent scroll will use it" 原注释仍在原位）、`eframe/src/epi.rs:2
 **验证**：`fmt --check` 干净 · `check --all-targets` 0 warning · `clippy` 0 warning ·
 `test` **338 passed + 1 ignored**（本轮只动 md，未动 `src/`）。全文 grep 确认无残留的
 `` `HANDOVER.md` §3.x `` 错指引用。未运行本项目、未触碰任何串口。
+
+
+### 3.27 增量（2026-09-26：发送区输入框右下角拖拽把手 —— 多行预览）
+
+用户原话：「给发送区的框体右下角加一个可以拖动拉往下拉高的功能，实现待发送内容的多行预览。」
+
+**为什么不是"让 TextEdit 自己长高"**：发送区下方还挂着「发送 / 清空」按钮和常用数据一行，
+中央区整列**不滚动**。输入框一旦随内容自由长高，写几行就把按钮顶出屏幕——那正是
+"多行预览"要解决的问题的反面。所以取的是**固定视口 + 框内滚动**：视口高度 =
+`send_visible_rows` 行，内容更多时在框里滚。这一点单独有一条测试钉住
+（`a_long_draft_scrolls_instead_of_pushing_the_send_box_down`：30 行草稿不得把把手
+挪动超过 4 px）。
+
+**四条自定的取舍**：
+
+1. **落盘的是"行数"不是"像素"**。像素高度换台机器、换个 DPI / 字体档位就对不上，
+   而"我要看 10 行"在任何缩放下都是同一个意思。像素↔行数的换算放在绘制时做，
+   用输入框真正用的那套**等宽字体的实时行高**（`ui.fonts_mut(|f| f.row_height(...))`
+   + `extra_text_line_spacing`）——把字体调大之后"拖 100 px 加几行"本来就该变少。
+   范围 2~40 行，默认 4 行；越界的存档值在 `config::restore_runtime_state` 里夹回来。
+2. **不足一行的余量要跨帧携带**（`send_rows_drag_px`，`#[serde(skip)]`）。
+   行高约 15 px，一帧的 `drag_delta` 常常只有 1~3 px，直接取整就是"慢慢拖没反应"。
+   余量在**松手时清零**、撞到上下界时清零（否则从界外往回拖会先空走一段）。
+   换算本身是 `send.rs` 里的纯函数 `apply_send_rows_drag`，5 条单测不需要窗口。
+3. **把手感 `click_and_drag` 而不是 `Sense::drag()`**。双击复位要求这一帧有
+   `Flags::CLICKED`，而只有感 click 的控件才会被置上——只感 drag 的话双击永远不成立。
+   代价是"按下"那一帧还分不清单击还是拖动，对一条 10 px 高的把手无所谓。
+   把手平时只在右下角留三道斜线，悬停 / 拖动时整条点亮并换成 `ResizeVertical` 光标，
+   带 15 语种悬停提示；**没有画边框**——加边框会让发送区底部多一条视觉横线。
+4. **`render_send_editor` 是从 `render_central_column` 里整段抽出来的**，不是重写
+   （约定 2：写进 `eframe::App::ui` 就等于一次也不会被 `cargo test` 画到）。
+   抽出时原样保住了 ↑/↓ 取历史、`send_cursor_index` 记账、Enter 发送的判定，
+   返回值 `send_has_focus` 供调用方继续决定"回车是否发送"。
+
+**⭐ 一次空转验证救回了一条假绿**：`send_box_grows_when_the_visible_row_setting_grows`
+最初只断言"把手往下移了 >150 px"。故意把 `.desired_rows(visible_rows)` 改成写死的
+`desired_rows(4)` 打断行数→高度的接线后，**它照样是绿的**——因为把手位置由
+`min_scrolled_height` 决定，与输入框自身高度无关。补了第二条断言（读输入框自己的
+`Id` 得到矩形，20 行时高度必须 > 200 px、4 行时 < 100 px）之后，同一个打断才正确变红。
+另三次空转验证（去掉 `max_height` / 屏蔽 `dragged` / 屏蔽 `double_clicked`）都按预期变红。
+**另一次踩坑**：同一 `Context` 上连跑两帧取到的控件矩形是上一帧的，两个独立场景必须各建一个
+`Context`；而拖动类测试**必须共用**同一个 `Context`（拖动是跨帧状态）。
+
+**验证**：`fmt --check` 干净 · `check --all-targets` 0 warning ·
+`clippy --all-targets` **0 warning** · `test` **351 passed + 1 ignored**（本轮 +11 条：
+`send.rs` 5 条纯函数、`app.rs` 6 条无头 UI、`config.rs` 2 条持久化）。未运行本项目、
+未触碰任何串口。**仍需目视一眼**：把手的观感（三道斜线是否太小、悬停高亮是否够明显）
+只能人眼判。

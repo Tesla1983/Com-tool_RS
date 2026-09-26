@@ -334,6 +334,22 @@ strings! {
         "Geçmişe göz atılıyor: ↑ daha eski / ↓ daha yeni",
         "Просмотр истории: ↑ старее / ↓ новее",
         "Przeglądanie historii: ↑ starsze / ↓ nowsze";
+    // 发送框右下角把手的悬停提示（2026-09-26 新增的可拖高把手）
+    send_resize_hint: "上下拖动可调整输入框高度（双击恢复默认）",
+        "Drag up/down to resize the input box (double-click to reset)",
+        "上下拖曳可調整輸入框高度（雙擊恢復預設）",
+        "上下にドラッグで入力欄の高さを変更（ダブルクリックで既定値に戻す）",
+        "Arrastra arriba/abajo para cambiar la altura (doble clic para restablecer)",
+        "Trascina su/giù per ridimensionare la casella (doppio clic per ripristinare)",
+        "Arraste para cima/baixo para redimensionar a caixa (duplo clique para restaurar)",
+        "Geser atas/bawah untuk mengubah tinggi kotak (klik dua kali untuk mengatur ulang)",
+        "Glissez vers le haut/bas pour redimensionner la zone (double-clic pour réinitialiser)",
+        "Zum Ändern der Höhe nach oben/unten ziehen (Doppelklick zum Zurücksetzen)",
+        "위/아래로 드래그하여 입력창 높이 조절 (두 번 클릭하면 기본값으로 복원)",
+        "Kéo lên/xuống để thay đổi chiều cao ô nhập (nhấp đúp để khôi phục mặc định)",
+        "Yüksekliği değiştirmek için yukarı/aşağı sürükleyin (sıfırlamak için çift tıklayın)",
+        "Перетащите вверх/вниз, чтобы изменить высоту поля (двойной клик — сброс)",
+        "Przeciągnij w górę/w dół, aby zmienić wysokość pola (podwójne kliknięcie przywraca domyślną)";
     clear_send_button: "清空发送", "Clear input",
         "清空傳送",
         "入力を消去",

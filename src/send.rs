@@ -308,6 +308,65 @@ pub fn clamp_repeat_interval(ms: u64) -> u64 {
     ms.clamp(MIN_REPEAT_INTERVAL_MS, MAX_REPEAT_INTERVAL_MS)
 }
 
+/// 发送框一次能预览多少行——下限。
+///
+/// 2 行而不是 1 行：一行高的输入框连"这段内容到底是一行还是两行"都看不出来，
+/// 按住把手往下拖到最小时应该是"还要能用"，不是"退化成一个单行框"。
+pub const MIN_SEND_VISIBLE_ROWS: u32 = 2;
+
+/// 发送框一次能预览多少行——上限。
+///
+/// 40 行（标准字号下约 560 px）已经比大多数窗口的可用高度还高；再往上拖只会把
+/// 「发送 / 清空」按钮和常用数据那一行挤出可视区，而中央区**没有**整体滚动，
+/// 挤出去就点不着了。
+pub const MAX_SEND_VISIBLE_ROWS: u32 = 40;
+
+/// 发送框一次能预览多少行——默认值。
+///
+/// 与加这个功能之前 `TextEdit::desired_rows(4)` 保持一致：不动把手时界面与旧版
+/// 逐像素相同。
+pub const DEFAULT_SEND_VISIBLE_ROWS: u32 = 4;
+
+/// 把发送框的可见行数夹回 [`MIN_SEND_VISIBLE_ROWS`] ~ [`MAX_SEND_VISIBLE_ROWS`]。
+///
+/// 存档可以被手改，拖动换算也会撞到边界，两处都走这一个函数——"上限是多少"只写一遍。
+pub fn clamp_send_visible_rows(rows: u32) -> u32 {
+    rows.clamp(MIN_SEND_VISIBLE_ROWS, MAX_SEND_VISIBLE_ROWS)
+}
+
+/// 把"拖把手"的一段像素位移折算成行数变化。
+///
+/// 拖动是连续的、行数是整数，所以**不足一行的部分要攒着**（`carried_px`）：
+/// 用户慢慢往下拖时每帧只动几个像素，不攒的话永远跨不过一整行，观感就是
+/// "拖了没反应"。
+///
+/// 返回 `(新的行数, 攒下的像素)`。撞到上下限时余量**清零**——否则用户先拖到底、
+/// 再往回拖，头几像素要先把手上那点余量走完才有反应。
+///
+/// `row_height` 由界面给出（当前字号下的实际行高）：换字体档位后"拖 100 px
+/// 能加几行"本来就该跟着变，写死在这里反而会在大字号下拖不动。
+pub fn apply_send_rows_drag(
+    rows: u32,
+    carried_px: f32,
+    delta_px: f32,
+    row_height: f32,
+) -> (u32, f32) {
+    if row_height <= 0.0 {
+        // 字库还没量出行高（首帧）时不猜：原样返回并丢掉余量，下一帧再算。
+        return (clamp_send_visible_rows(rows), 0.0);
+    }
+
+    let total = carried_px + delta_px;
+    let steps = (total / row_height).trunc();
+    let remainder = total - steps * row_height;
+
+    let target = rows as i64 + steps as i64;
+    let clamped = target.clamp(MIN_SEND_VISIBLE_ROWS as i64, MAX_SEND_VISIBLE_ROWS as i64);
+    let rows = clamped as u32;
+    let carried = if target == clamped { remainder } else { 0.0 };
+    (rows, carried)
+}
+
 /// 光标是否在首行——决定 ↑ 能不能用来取历史。
 ///
 /// `cursor` 是**字符**下标（与 egui 的 `CCursor::index` 一致，不是字节下标）。
@@ -711,6 +770,63 @@ mod tests {
         assert_eq!(clamp_repeat_interval(1), MIN_REPEAT_INTERVAL_MS);
         assert_eq!(clamp_repeat_interval(500), 500);
         assert_eq!(clamp_repeat_interval(u64::MAX), MAX_REPEAT_INTERVAL_MS);
+    }
+
+    // ---------- 发送框的可见行数（拖把手） ----------
+
+    /// 手改存档或拖动越界时夹回 2~40。
+    ///
+    /// 阈值写**字面量**而不是引用 `MIN_SEND_VISIBLE_ROWS`：引用实现常量等于让被测
+    /// 代码自己给自己判卷（常量改小了照样绿）。
+    #[test]
+    fn visible_rows_are_clamped_between_two_and_forty() {
+        assert_eq!(clamp_send_visible_rows(0), 2);
+        assert_eq!(clamp_send_visible_rows(1), 2);
+        assert_eq!(clamp_send_visible_rows(4), 4, "区间内原样返回");
+        assert_eq!(clamp_send_visible_rows(40), 40);
+        assert_eq!(clamp_send_visible_rows(41), 40);
+        assert_eq!(clamp_send_visible_rows(u32::MAX), 40);
+    }
+
+    /// 往下拖：每满一行高度加一行。
+    #[test]
+    fn dragging_down_adds_one_row_per_line_height() {
+        let (rows, carried) = apply_send_rows_drag(4, 0.0, 140.0, 14.0);
+        assert_eq!(rows, 14, "140px / 14px = 10 行");
+        assert_eq!(carried, 0.0, "整行整除，没有余量");
+    }
+
+    /// 不足一行的位移**攒着**，攒够一行才生效——慢慢拖也要能拖得动。
+    #[test]
+    fn sub_row_drag_is_carried_over_until_it_adds_up() {
+        let (rows, carried) = apply_send_rows_drag(4, 0.0, 7.0, 14.0);
+        assert_eq!(rows, 4, "半行不算一行");
+        assert!((carried - 7.0).abs() < 0.001);
+
+        // 再拖半行：合起来正好一行
+        let (rows, carried) = apply_send_rows_drag(rows, carried, 7.0, 14.0);
+        assert_eq!(rows, 5);
+        assert!(carried.abs() < 0.001);
+    }
+
+    /// 往上拖：减少行数，撞到下限就停住，且**余量清零**——否则往回拖的头几像素
+    /// 会先去消化上次留下的余量，看起来像"反方向也拖不动"。
+    #[test]
+    fn dragging_up_shrinks_and_stops_at_the_minimum() {
+        let (rows, _) = apply_send_rows_drag(6, 0.0, -56.0, 14.0);
+        assert_eq!(rows, 2, "6 - 4 行 = 2，正好到下限");
+
+        let (rows, carried) = apply_send_rows_drag(6, 0.0, -500.0, 14.0);
+        assert_eq!(rows, 2, "拖过头也停在下限");
+        assert_eq!(carried, 0.0, "撞到边界时余量必须清零");
+    }
+
+    /// 行高还没量出来（0）时不猜：原样返回，别用 0 去除。
+    #[test]
+    fn drag_is_ignored_before_the_line_height_is_known() {
+        let (rows, carried) = apply_send_rows_drag(4, 9.0, 100.0, 0.0);
+        assert_eq!(rows, 4);
+        assert_eq!(carried, 0.0);
     }
 
     // ---------- 首行 / 末行判定 ----------
