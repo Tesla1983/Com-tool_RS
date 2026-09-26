@@ -207,6 +207,9 @@ mod tests {
             // 会被默认值掩盖成"往返成功"。
             ui_font_scale: UiFontScale::ExtraLarge,
             auto_scroll: false,
+            // 置顶也是用户偏好，且默认就是 `false`——样本里必须取 `true`（非默认），
+            // 否则"字段根本没写进存档"会被默认值掩盖成"往返成功"。
+            always_on_top: true,
             max_log_chars: 4_096,
             repaint_interval_ms: 40,
             clear_send_after_send: false,
@@ -285,6 +288,10 @@ mod tests {
             "字体档位是用户偏好，必须跟着存档走——否则每次重启字体都会跳回标准档"
         );
         assert_eq!(restored.auto_scroll, original.auto_scroll);
+        assert_eq!(
+            restored.always_on_top, original.always_on_top,
+            "「总在最前端」是用户偏好，必须跟着存档走——否则勾了置顶、重启就没了"
+        );
         assert_eq!(restored.max_log_chars, original.max_log_chars);
         assert_eq!(restored.repaint_interval_ms, original.repaint_interval_ms);
         assert_eq!(

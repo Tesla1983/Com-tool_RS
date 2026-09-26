@@ -526,6 +526,12 @@ pub struct ComTool {
     pub ui_font_scale: UiFontScale,
     /// 接收区是否自动滚动到最新
     pub auto_scroll: bool,
+    /// 窗口是否总在最前端（「视图」菜单里的开关，落盘）
+    ///
+    /// **真正的生效在 [`ComTool::apply_always_on_top`]**：这一项只是偏好值，改它不会
+    /// 自己碰到窗口——给窗口下命令需要一个 `egui::Context`，那是绘制期才有的东西。
+    /// 判据也就落在那条命令上：无头测试读 `FullOutput::viewport_output`。
+    pub always_on_top: bool,
     /// 日志长度上限（字符数，0 = 不限）；超出后从最旧的内容开始淘汰
     pub max_log_chars: usize,
     /// 收到数据时是否加时间戳前缀，以及按行还是按批（见 [`crate::receive::TimestampPrefix`]）
@@ -607,6 +613,18 @@ pub struct ComTool {
     /// 此时不做那条收紧。
     #[serde(skip)]
     pub receive_px_per_char: f32,
+    /// 上一次**已经下发给窗口**的置顶值（`true` = 已置顶）。
+    ///
+    /// ⚠️ **为什么不能像 `apply_theme` 那样问 egui 当前是什么层级**：窗口层级是
+    /// 一条**只写的命令**（`ViewportCommand::WindowLevel`），egui 侧不保存、也读不回来
+    /// 当前层级——它只是被转发给宿主窗口（winit 的 `set_window_level`）。所以"已生效
+    /// 值"只能自己记。
+    ///
+    /// 记它的用处是**去重**：没有它就会每帧下一次命令，Windows 上等于每帧一次
+    /// `SetWindowPos`。`None` = 还没下发过（启动时必然是这个值 ⇒ 第一帧一定下发，
+    /// 这才让"上次勾选过置顶"能在启动时恢复）。
+    #[serde(skip)]
+    pub applied_always_on_top: Option<bool>,
     /// 正在运行的实时文件日志。`Some` 即表示「记录中」——不另设 bool 标志位，
     /// 两个字段表达同一件事迟早会不一致。
     #[serde(skip)]
@@ -1379,6 +1397,34 @@ impl ComTool {
         }
     }
 
+    /// 把「总在最前端」的偏好同步给真正的窗口。
+    ///
+    /// **只在"偏好值"与"已下发值"不同时发一次命令**（去重靠
+    /// [`ComTool::applied_always_on_top`]）。关掉时下发的是 `Normal` 而不是"什么都不发"
+    /// ——窗口层级是三态（Normal / AlwaysOnBottom / AlwaysOnTop），不显式回到 Normal
+    /// 窗口就停在置顶上不动了。
+    ///
+    /// **为什么挂在菜单栏 [`ComTool::show_menu_bar`] 而不是 `ui()`**：`ui()` 要收一个
+    /// `eframe::Frame`，无头测试构造不出来，写在里面的代码一次也不会被 `cargo test`
+    /// 走到。而"勾选 → 真的给窗口下命令"这条链路必须有接入测试（本项目的规矩：纯函数
+    /// 全绿 ≠ 界面真的调了它）。菜单栏**每帧必画**、又只收 `&mut Ui`，是同时满足
+    /// "每帧同步"与"可测"的那个点——这也正是启动时能恢复上次置顶的原因。
+    ///
+    /// 判据是 `FullOutput::viewport_output` 里的命令：egui 把视口命令公开在每帧输出里，
+    /// 所以"发没发、发的是哪一档"在无头测试里可以直接断言。
+    pub fn apply_always_on_top(&mut self, ctx: &egui::Context) {
+        if self.applied_always_on_top == Some(self.always_on_top) {
+            return;
+        }
+        let level = if self.always_on_top {
+            egui::viewport::WindowLevel::AlwaysOnTop
+        } else {
+            egui::viewport::WindowLevel::Normal
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+        self.applied_always_on_top = Some(self.always_on_top);
+    }
+
     /// 把全局字体档位下发到 egui。
     ///
     /// **为什么每帧都算一遍基准值、而不是"上一帧的 13.0 乘 1.15"**：后者会逐帧连乘，
@@ -1483,12 +1529,16 @@ impl Default for ComTool {
             theme: ThemeChoice::default(),
             ui_font_scale: UiFontScale::default(),
             auto_scroll: true,
+            // 默认**不置顶**：置顶会盖住别的窗口，是用户主动要才该有的行为，
+            // 不能默认替所有人决定。
+            always_on_top: false,
             receive_at_bottom: true,
             receive_trim_budget: usize::MAX,
             receive_trimmed_head: String::new(),
             receive_last_offset_y: None,
             receive_viewport_w: 0.0,
             receive_px_per_char: 0.0,
+            applied_always_on_top: None,
             max_log_chars: DEFAULT_MAX_LOG_CHARS,
             timestamp_prefix: TimestampPrefix::default(),
             repaint_interval_ms: DEFAULT_REPAINT_INTERVAL_MS,

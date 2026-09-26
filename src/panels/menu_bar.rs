@@ -38,6 +38,12 @@ impl ComTool {
         let mut action = MenuAction::default();
         let s = self.language.strings();
 
+        // 「总在最前端」在这里同步给窗口，而不是在 `ui()` 里：`ui()` 要收
+        // `eframe::Frame`，无头测试构造不出来 ⇒ 写在里面等于一次也不会被 `cargo test`
+        // 走到。菜单栏每帧必画，挂在它上面与每帧同步等价，同时让"勾选 → 下发命令"
+        // 整条链路有接入测试。完整理由见 [`ComTool::apply_always_on_top`]。
+        self.apply_always_on_top(ui.ctx());
+
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button(s.menu_file, |ui| {
@@ -63,16 +69,7 @@ impl ComTool {
                 });
 
                 ui.menu_button(s.menu_view, |ui| {
-                    ui.label(s.panel_label);
-                    self.show_panel_checkboxes(ui);
-                    ui.separator();
-                    ui.label(s.display_mode_heading);
-                    self.display_mode_checkboxes(ui);
-                    ui.separator();
-                    ui.checkbox(&mut self.auto_scroll, s.auto_scroll);
-                    ui.separator();
-                    ui.label(s.timestamp_prefix_field);
-                    timestamp_radios(ui, &mut self.timestamp_prefix, s);
+                    self.view_menu_body(ui);
                 });
 
                 ui.menu_button(s.text, |ui| {
@@ -101,6 +98,32 @@ impl ComTool {
         });
 
         action
+    }
+
+    /// 「视图」菜单的主体：面板显隐 / 显示模式 / 自动滚动 / 总在最前端 / 时间戳前缀。
+    ///
+    /// 从 `show_menu_bar` 的闭包里抽出来是为了**可测**：菜单主体只在菜单被点开时才画，
+    /// 无头测试要模拟"点开菜单"就得先算出菜单按钮的位置、再伪造一串指针事件——
+    /// 与其让判据依赖那堆坐标，不如让主体自己可被直接驱动（与
+    /// [`ComTool::render_send_presets`] 同一条约定：绘制逻辑要能脱离 `eframe::Frame`
+    /// 单独跑一遍）。
+    ///
+    /// 「总在最前端」放在「自动滚动」之后、单独一行：它管的不是接收区的行为，是
+    /// **窗口本身**——和其它接收设置挤在一起会让人以为只影响接收区。
+    pub(crate) fn view_menu_body(&mut self, ui: &mut Ui) {
+        let s = self.language.strings();
+        ui.label(s.panel_label);
+        self.show_panel_checkboxes(ui);
+        ui.separator();
+        ui.label(s.display_mode_heading);
+        self.display_mode_checkboxes(ui);
+        ui.separator();
+        ui.checkbox(&mut self.auto_scroll, s.auto_scroll);
+        ui.separator();
+        ui.checkbox(&mut self.always_on_top, s.always_on_top);
+        ui.separator();
+        ui.label(s.timestamp_prefix_field);
+        timestamp_radios(ui, &mut self.timestamp_prefix, s);
     }
 
     /// 「颜色」「HEX 接收」「字节查看」三个勾选框，并保证三者的组合**合法**。

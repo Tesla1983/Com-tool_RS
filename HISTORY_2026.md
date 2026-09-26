@@ -1831,3 +1831,63 @@ so no parent scroll will use it" 原注释仍在原位）、`eframe/src/epi.rs:2
 **验证**：`fmt --check` 干净 · `check --all-targets` 0 warning · `clippy --all-targets` **0 warning**
 · `test` **354 passed + 1 ignored**（本轮 +3 条）。`cargo build --release` 产物时间戳
 2026-09-27 01:47:48 > 最后一次 `src/` 改动 01:46:37 ⇒ 约定 49 满足。未运行本项目、未触碰串口。
+
+## 3.29 视图菜单新增「总在最前端」（2026-09-27，用户要求）
+
+用户原话：**「在顶部的视图展开按钮下新增一个总在最前端的勾选功能，并实现该功能」**。
+两个动词都要落地：**有勾选框**（视图菜单里）**且窗口真的置顶**（不是只加个字段）。
+
+### 做的四件事
+
+1. **文案**：`strings.rs` 新增 `always_on_top`，15 列一次补齐（ZH / EN / ZH_HANT / JA / ES /
+   IT / PT / ID / FR / DE / KO / VI / TR / RU / PL）。
+2. **字段**：`ComTool::always_on_top: bool`（**落盘**，默认 `false`）。默认不置顶——置顶会盖住
+   别人的窗口，只能由用户主动打开，不能替所有人决定。
+3. **下发**：`ComTool::apply_always_on_top()` 给窗口发
+   `ViewportCommand::WindowLevel(AlwaysOnTop | Normal)`；egui-winit 在
+   `egui-winit-0.36.2/src/lib.rs:1875` 把它落成 `window.set_window_level(...)`。
+4. **去重**：新增 `applied_always_on_top: Option<bool>`（`#[serde(skip)]`）记录"上一次已下发的
+   值"。⚠️ **不能像 `apply_theme` 那样回头问 ctx 当前是什么层级**——窗口层级是一条**只写的
+   命令**，egui 侧不保存、也读不回来。没有这个字段就会每帧下一次命令，Windows 上等于每帧
+   一次 `SetWindowPos`。初值 `None` ⇒ 第一帧必发，这正让"上次勾了置顶"能在启动时恢复。
+
+### 两个设计取舍（都不是随手写的）
+
+- **下发点挂在 `show_menu_bar` 而不是 `ui()`**。语义上它该在 `ui()` 里（与 `apply_theme` 同层），
+  但 `ui()` 要收 `eframe::Frame`，无头测试构造不出来 ⇒ 写在里面一次也不会被 `cargo test` 走到，
+  "勾选 → 真的下命令"这条链路就没有接入测试。菜单栏**每帧必画**、又只收 `&mut Ui`，是同时满足
+  "每帧同步"与"可测"的那个点。
+- **「视图」菜单主体抽成 `view_menu_body(&mut self, ui)`**。菜单主体只在菜单被**点开**时才画，
+  无头测试要模拟点开就得先算出菜单按钮坐标、再伪造一串指针事件——判据会依赖那堆坐标。抽出来
+  之后测试可以直接驱动它（与 `render_send_presets` 同一条约定）。
+
+### 判据与空转验证
+
+判据读的是 `FullOutput::viewport_output[&ViewportId::ROOT].commands`——egui 把视口命令公开在每帧
+输出里，所以"发没发、发的是哪一档"在无头测试里可以直接断言，**不必真的开一个窗口**。
+
+新增 2 条测试（354 → 356 passed）：`view_menu_offers_always_on_top`（中英各一遍，文字判据）、
+`always_on_top_sends_the_window_level_command`（勾上发 AlwaysOnTop / 状态不变不再发 / 取消显式
+回到 Normal）。持久化那半条加在 `config::tests::preferences_survive_round_trip` 的 `customized()`
+里（`always_on_top: true`，非默认值，否则"字段没写进存档"会被默认值掩盖）。
+
+**五处注入全部确认会红**：① 注释掉 `show_menu_bar` 里的下发调用；② 勾上也发 `Normal`；
+③ 去掉去重判断（第二帧重复下发）；④ 菜单主体里不画这一项；⑤ 给字段加 `#[serde(skip)]`
+（往返测试红）。全部还原后复跑门禁。
+
+⚠️ 写的过程中删掉了一条**自己造出来的空转断言**：原本还有一条"没勾选时启动第一帧也要下发
+`Normal`"——实测把它改成 `applied_always_on_top` 初值 `Some(false)` 会红，但它红不红对用户没有任何
+差别（窗口创建时本来就是 Normal）。**判据不对着"用户会不会不满意"的就是空转**，删掉，改成
+在 `config` 侧测"真值能从存档回来"——那条才对应"勾了置顶、重启后还在"。
+
+### 已知边界（不是缺陷）
+
+- 置顶是**窗口级**行为，由操作系统执行。以管理员权限运行的其它窗口在 Windows 上仍可能压在本
+  窗口之上（`HWND_TOPMOST` 不跨完整性级别保证），这是 OS 规则，不是本项目的缺陷。
+- 只做「置顶」两态，**没有**做 `AlwaysOnBottom`（"永远在底部"对串口助手没有用途）。回退一律
+  显式回到 `Normal` 而不是"什么都不发"——层级是三态，不发就一直停在置顶上。
+- 启动时没有改 `ViewportBuilder`（没加 `with_always_on_top()`）：存档在 `run_native` 之后才读得到，
+  而第一帧就会下发命令，观感上没有差别（窗口创建与第一帧之间不足一帧）。
+
+**验证**：`fmt --check` 干净 · `check --all-targets` 0 warning · `clippy --all-targets` 0 warning
+· `test` **356 passed + 1 ignored**（本轮 +2 条）。未运行本项目、未触碰串口。

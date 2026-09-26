@@ -593,6 +593,142 @@ mod tests {
         }
     }
 
+    /// 「视图」菜单主体里**画得出**「总在最前端」这一项。
+    ///
+    /// 判据是**文字**（文案表里的 `always_on_top`），中英各测一遍——这样"菜单里根本
+    /// 没有这一项"和"这一项只有中文"两种情况都会红。
+    ///
+    /// ⚠️ 驱动的是**菜单主体**而不是整个菜单栏：菜单主体只在菜单被点开时才画，
+    /// 直接驱动 `show_menu_bar` 取到的文字只有那四个顶层菜单名，断言会**恒假**
+    /// （写死什么都红，等于没测）。这也是主体被抽成 `view_menu_body` 的理由。
+    #[test]
+    fn view_menu_offers_always_on_top() {
+        for language in [Language::Zh, Language::En] {
+            let mut app = ComTool {
+                language,
+                ..ComTool::default()
+            };
+            let s = app.language.strings();
+
+            let texts = view_menu_texts(&mut app);
+
+            assert!(
+                texts.iter().any(|t| t == s.always_on_top),
+                "「视图」菜单里少了「总在最前端」——用户没有地方打开它。实际：{texts:?}"
+            );
+            // 顺带钉住同一组里原有的「自动滚动」没被新增的这一项挤掉。
+            assert!(
+                texts.iter().any(|t| t == s.auto_scroll),
+                "加「总在最前端」把「自动滚动」挤没了。实际：{texts:?}"
+            );
+        }
+    }
+
+    /// 「总在最前端」勾上后**真的给窗口下发命令**，取消后**真的退出置顶**。
+    ///
+    /// 这是本功能的判据本体：字段只是偏好值，用户要的是"窗口真的压在别人上面"。
+    /// 读的是 egui 每帧输出里的视口命令（`FullOutput::viewport_output`）——它是公开的，
+    /// 所以"发没发、发的是哪一档"在无头测试里可以直接断言，不必真的开一个窗口。
+    ///
+    /// 三条断言各自挡一类回归：
+    /// ① 只加字段不下发（界面上能勾，窗口不动）；
+    /// ② 每帧重复下发（Windows 上等于每帧一次 `SetWindowPos`）；
+    /// ③ 取消勾选时不回到 `Normal`（窗口从此一直置顶，且没有任何入口能取消）。
+    ///
+    /// 缺的一半在 `config::tests::preferences_survive_round_trip`：字段要跟着存档走。
+    /// 只有这条的话，把 `always_on_top` 标成 `#[serde(skip)]` 也照样全绿——那就是
+    /// "勾了置顶，重启就没了"。
+    #[test]
+    fn always_on_top_sends_the_window_level_command() {
+        use egui::ViewportCommand;
+        use egui::viewport::WindowLevel;
+
+        /// 这一帧下发的**窗口层级**命令（其它命令不参与判定）。
+        fn window_levels(cmds: &[ViewportCommand]) -> Vec<WindowLevel> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    ViewportCommand::WindowLevel(level) => Some(*level),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        // ① 勾上 ⇒ 下发 AlwaysOnTop
+        let mut app = ComTool {
+            always_on_top: true,
+            ..ComTool::default()
+        };
+        let first = menu_bar_viewport_commands(&mut app);
+        assert_eq!(
+            window_levels(&first),
+            vec![WindowLevel::AlwaysOnTop],
+            "勾上「总在最前端」却没给窗口下发置顶命令——窗口不会有任何变化。实际：{first:?}"
+        );
+
+        // ② 状态没变 ⇒ 不再下发（去重）
+        let second = menu_bar_viewport_commands(&mut app);
+        assert!(
+            window_levels(&second).is_empty(),
+            "同一个状态被重复下发窗口层级命令——每帧一次 SetWindowPos。实际：{second:?}"
+        );
+
+        // ③ 取消勾选 ⇒ 必须显式回到 Normal
+        app.always_on_top = false;
+        let third = menu_bar_viewport_commands(&mut app);
+        assert_eq!(
+            window_levels(&third),
+            vec![WindowLevel::Normal],
+            "取消「总在最前端」后没把窗口放回 Normal——它从此一直压在别人上面。实际：{third:?}"
+        );
+
+        // 默认必须是"不置顶"：置顶会盖住别人的窗口，只能由用户主动打开。
+        assert!(
+            !ComTool::default().always_on_top,
+            "默认不该是置顶——那等于替所有用户决定盖住别的窗口"
+        );
+    }
+
+    /// 驱动**「视图」菜单主体**并取出其中落笔的所有文字。
+    ///
+    /// 与 [`menu_bar_texts`] 的区别：那个只画得到顶层菜单名，这个画的是菜单展开后
+    /// 的内容（面板显隐 / 显示模式 / 自动滚动 / 总在最前端 / 时间戳前缀）。
+    fn view_menu_texts(app: &mut ComTool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.view_menu_body(ui);
+        });
+
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                texts.push(text_shape.galley.text().to_owned());
+            }
+        }
+
+        out.textures_delta.clear();
+        texts
+    }
+
+    /// 驱动**菜单栏**并取出本帧下发给窗口的视口命令。
+    ///
+    /// 菜单栏每帧必画，且 `apply_always_on_top` 就挂在它上面，所以这是"界面真的把
+    /// 偏好下发了"的接入点——纯函数测试全绿 ≠ 界面调了它。
+    fn menu_bar_viewport_commands(app: &mut ComTool) -> Vec<egui::ViewportCommand> {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.show_menu_bar(ui);
+        });
+
+        let commands = out
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|output| output.commands.clone())
+            .unwrap_or_default();
+
+        out.textures_delta.clear();
+        commands
+    }
+
     /// 驱动**中央区顶部那一行**并取出其中落笔的所有文字。
     fn top_toolbar_texts(app: &mut ComTool) -> Vec<String> {
         let ctx = egui::Context::default();
