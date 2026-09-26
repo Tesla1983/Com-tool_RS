@@ -5,7 +5,7 @@
 | 分析日期 | 2026-09-24 |
 | 对照基线 | `Neutree/COMTool`（Python 3 + PyQt5，跨平台串口/网络/终端一体工具，支持插件） |
 | 本项目 | `comtool-rs` 0.1.0，edition 2024，egui/eframe 0.36.1，单 binary crate，约 17,000 行 |
-| 当前提交 | `a8db41c`（分支 `ai-refactor`），工作区 clean |
+| 当前提交 | `cce3a62`（分支 `ai-refactor`），工作区 clean |
 | 门禁 | fmt 干净 / check 0 warning / test **338 passed + 1 ignored** / clippy 8 条既有 |
 | 已有基线文档 | `FUTURE_ROADMAP.md`（本文件是它的**再清点 + 量化补全**，口径一致） |
 | 分析方式 | 逐项核对 COMTool README 能力清单 × 本项目源码实际状态（不是只读旧文档） |
