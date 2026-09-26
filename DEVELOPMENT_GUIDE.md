@@ -6,17 +6,24 @@
 
 ## 0. ⛔ 运行禁令（最高优先级，动手前先读）
 
-**未经项目所有者在本轮对话中逐次、明确批准，禁止以任何形式运行本项目，禁止以任何方式占用或打断 COM3 串口。**
+**未经项目所有者在本轮对话中逐次、明确批准，禁止以任何形式运行本项目。串口按端口分两类：
+COM3 受「长测门闩」保护，COM4 是 AI 功能测试放行端口（但必须置 DTR 才有日志）。**
 
 - **禁止运行**：`cargo run`（含 `--release`）、直接执行 `target/**/comtool-rs.exe`、
   `cargo install` 后运行、`start`/`Start-Process`/后台任务/计划任务等一切拉起本程序的方式；
   也包括任何会间接启动本程序本体的脚本、测试或工具调用。
-- **禁止触碰 COM3**：不得打开、连接、读写、配置、探测 COM3（`mode COM3`、`echo > COM3`、
-  `pyserial`、`[System.IO.Ports.SerialPort]`、第三方串口助手等一律禁止）；不得把 COM3 写进
-  默认值、配置、测试或脚本；不得停止/杀掉/禁用任何可能占用 COM3 的进程、服务或驱动。
-  对 COM3 只能"看"（不打开端口的只读枚举，且需先说明理由），不能"碰"。
+- **COM3 —— 看长测门闩**（用户 2026-09-24 修订）：门闩存在（有长测在抓日志）⇒ 一律不碰，
+  不得打开、连接、读写、配置、探测（`mode COM3`、`echo > COM3`、`pyserial`、
+  `[System.IO.Ports.SerialPort]`、第三方串口助手等），不得停止/杀掉/禁用任何可能占用它的
+  进程、服务或驱动；门闩不存在 ⇒ COM3 可用（可烧录、测试、复位单片机）。
+  无论门闩在不在，都不得把 COM3 写进默认值、配置、测试或脚本。对 COM3 只能"看"
+  （不打开端口的只读枚举，且需先说明理由），不能"碰"。
+- **COM4 —— AI 功能测试放行端口**（用户 2026-09-26 修订）：AI 要验证生成软件的功能时可以用，
+  **不受长测门闩影响**；**前提是必须置 DTR**——GUI 里勾 DTR 控制线，脚本里 `ser.dtr = True`
+  或 `DtrEnable = true`。**没置 DTR 收不到日志不是程序的问题**，先查这一项。
+  一条命令同时点名 COM3 与 COM4 时 COM3 优先。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。230 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。338 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
 - 一次批准只对当次生效，不构成对后续轮次的授权。
@@ -38,11 +45,14 @@
 |---|---|
 | 拦截逻辑 | `~/.workbuddy/hooks/comtool-run-guard.sh` |
 | 注册位置 | `~/.workbuddy/settings.json`、`~/.codebuddy/settings.json` → `hooks.PreToolUse`，`matcher = Bash/PowerShell/Write/Edit` |
-| 自测 | `python3 .workbuddy/hooks/test_guard.py`（39 条断言；不启动程序、不碰串口）。**已在版本控制中** |
+| 自测 | `python3 .workbuddy/hooks/test_guard.py`（**52 条**断言；门闩开/关两档分别断言，门闩那档用临时配置目录造门闩、**不碰用户真实门闩**；不启动程序、不碰串口）。**已在版本控制中** |
 | 批准 | `bash ~/.workbuddy/hooks/comtool-approve.sh 30`（**用户本人在 agent 之外执行**；`0` 撤销） |
 
 - 批准文件 `<配置目录>/combot-run-approval` 第一行是过期 Unix 秒，不存在/过期/损坏 → 全部拒绝；
-  **批准只放行"运行本项目"，COM3 操作永远拒绝**。
+  **批准只放行"运行本项目"，与串口判定互不影响**（COM3 看门闩，COM4 是放行端口）。
+- **COM4 的放行只跳过串口拦截，不下 `allow` 决策**：守卫对该情形输出一条带 DTR 提醒的
+  `systemMessage` 后放行到正常权限流程，用户自己的确认提示照旧——否则任何"顺带提到 COM4
+  的命令"都会被自动批准，那是过头了。
 - 批准文件与批准脚本 AI 无权触碰（会被守卫自己拦掉）。
 - 守卫 fail-closed：payload 解析失败或 stdin 为空一律拒绝。
 - **已知误拦（改用别的工具即可）**：命令**文本**里出现 `cargo run` / `COM3` / `comtool-rs.exe`
@@ -396,9 +406,11 @@ impl eframe::App for ComTool {
 
 9. **不要用 `write_all` 发送**：`timeout()` 同时作用于写操作，`write_all` 失败时不报告已写字节数，会静默截断长报文。发送走 `VecDeque` 增量推进（见 `channel.rs` 的 `worker_main`）。
 
-10. **开发全程不得运行本项目，不得触碰 COM3**：见 §0。开发阶段的验证一律用
+10. **开发全程不得运行本项目；串口按 §0 分端口对待**：COM3 看长测门闩（门闩在就别碰），
+    COM4 是 AI 功能测试放行端口、但**必须置 DTR 才有日志**。开发阶段的验证一律用
     `cargo fmt && cargo check --all-targets && cargo test`，绝不用 `cargo run` 启动 GUI
-    来"看一眼效果"——那会占用串口并可能打断 COM3 上正在运行的其他程序。
+    来"看一眼效果"——那会占用串口并可能打断门闩期间 COM3 上正在运行的其他程序。
+    真要实机看效果，等用户批准运行，并在 COM4 上**先勾 DTR** 再判断收发是否正常。
 
 11. **日志长度上限只有一处实现**：`ComTool::trim_receive_logs()`，在 `receive_data()` 末尾无条件调用。四份镜像**各自**按同一字符预算裁剪——三种模式写入的镜像并不相同（HEX/文本模式写 `display_spans`，字节查看模式写 `ascii_spans`，`receive_text` 三种都写），它们之间没有下标对应关系，不要试图"按 `receive_text` 裁好再同步"。裁剪必须按**字符**边界（不是字节下标），并且要能把边界上的 `ColoredSpan` **从中间切开**且保留其 `AnsiStyle`。
 

@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 GUARD = os.path.join(os.path.expanduser("~"), ".workbuddy", "hooks", "comtool-run-guard.sh")
@@ -32,20 +33,39 @@ def find_bash():
 BASH = find_bash()
 
 
-def run(payload_raw: str) -> str:
-    """返回 'ALLOW' 或 'DENY'。"""
+def run(payload_raw: str, env_extra=None) -> str:
+    """返回 'ALLOW' 或 'DENY'。
+
+    env_extra 用来把守卫指向一个临时配置目录（WORKBUDDY_CONFIG_DIR），
+    从而能在「长测门闩已开启」的状态下断言 —— 不碰用户真实的门闩文件。
+    """
+    env = dict(os.environ)
+    if env_extra:
+        env.update(env_extra)
     proc = subprocess.run(
         [BASH, GUARD],
         input=payload_raw.encode("utf-8"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
     )
     out = proc.stdout.decode("utf-8", "replace")
     if '"permissionDecision":"deny"' in out:
         return "DENY"
+    # 放行也可能带输出：COM4 放行时附带一条 systemMessage 提醒（不下决策，只提示）
+    if '"permissionDecision":"allow"' in out or '"systemMessage"' in out:
+        return "ALLOW"
     if out.strip():
         return "UNEXPECTED:" + out.strip()[:200]
     return "ALLOW"
+
+
+def latch_env():
+    """造一个「长测门闩已开启」的临时配置目录，返回 (目录, 环境变量覆盖)。"""
+    d = tempfile.mkdtemp(prefix="guard-latch-")
+    with open(os.path.join(d, "soak-active"), "w", encoding="utf-8") as fh:
+        fh.write("2026-09-26 00:00:00\ntest latch\n")
+    return d, {"WORKBUDDY_CONFIG_DIR": d}
 
 
 def bash_payload(cmd: str) -> str:
@@ -104,18 +124,43 @@ CASES = [
     ),
     ("taskkill 本项目进程", bash_payload("taskkill /IM comtool-rs.exe /F"), "DENY"),
     ("cargo run（大小写）", bash_payload("CARGO RUN"), "DENY"),
-    # --- 必须拒绝：COM3 / 串口 ------------------------------------------------
-    ("mode COM3", bash_payload("mode COM3: baud=115200"), "DENY"),
-    ("echo 到 COM3", bash_payload("echo AT > COM3"), "DENY"),
-    ("pyserial 打开 COM3", bash_payload("python -c \"import serial; serial.Serial('COM3')\""), "DENY"),
-    ("pyserial 打开 COM4（不点名 COM3，仍拒）", bash_payload("python -c \"import serial; s=serial.Serial('COM4')\""), "DENY"),
+    # --- COM3 / 串口：门闩【未开启】时一律放行（用户 2026-09-24 修订的语义）------
+    # 门闩开启时的对应断言在下面的 LATCH_CASES 里，那里用一个临时配置目录造出门闩，
+    # 不去动用户真实的长测门闩文件。
+    ("mode COM3（无门闩 → 放行）", bash_payload("mode COM3: baud=115200"), "ALLOW"),
+    ("echo 到 COM3（无门闩 → 放行）", bash_payload("echo AT > COM3"), "ALLOW"),
     (
-        ".NET SerialPort 打开",
-        ps_payload("[System.IO.Ports.SerialPort]::new('COM3',9600)"),
-        "DENY",
+        "pyserial 打开 COM3（无门闩 → 放行）",
+        bash_payload("python -c \"import serial; serial.Serial('COM3')\""),
+        "ALLOW",
     ),
-    ("禁用设备", ps_payload("Disable-PnpDevice -InstanceId 'USB\\VID_1A86' -Confirm:$false"), "DENY"),
-    ("pnputil", ps_payload("pnputil /disable-device /instanceid X"), "DENY"),
+    (
+        ".NET SerialPort 打开（无门闩 → 放行）",
+        ps_payload("[System.IO.Ports.SerialPort]::new('COM3',9600)"),
+        "ALLOW",
+    ),
+    (
+        "禁用设备（无门闩 → 放行）",
+        ps_payload("Disable-PnpDevice -InstanceId 'USB\\VID_1A86' -Confirm:$false"),
+        "ALLOW",
+    ),
+    ("pnputil（无门闩 → 放行）", ps_payload("pnputil /disable-device /instanceid X"), "ALLOW"),
+    # --- COM4：AI 功能测试放行端口（用户 2026-09-26 修订）------------------------
+    (
+        "pyserial 打开 COM4",
+        bash_payload("python -c \"import serial; s=serial.Serial('COM4')\""),
+        "ALLOW",
+    ),
+    (
+        "pyserial 打开 COM4 并置 DTR",
+        bash_payload("python -c \"import serial; s=serial.Serial('COM4'); s.dtr=True\""),
+        "ALLOW",
+    ),
+    (
+        "PowerShell 打开 COM4",
+        ps_payload("$p=[System.IO.Ports.SerialPort]::new('COM4',115200); $p.DtrEnable=$true"),
+        "ALLOW",
+    ),
     # --- 必须拒绝：批准文件与批准脚本 -----------------------------------------
     (
         "写批准文件",
@@ -157,6 +202,45 @@ CASES = [
     ("仅空白 payload", "   \n\t ", "DENY"),
 ]
 
+# --- 长测门闩【已开启】状态下的断言（用临时配置目录，不碰真实门闩）---------------
+LATCH_CASES = [
+    ("mode COM3（门闩开 → 拒）", bash_payload("mode COM3: baud=115200"), "DENY"),
+    ("echo 到 COM3（门闩开 → 拒）", bash_payload("echo AT > COM3"), "DENY"),
+    (
+        "pyserial 打开 COM3（门闩开 → 拒）",
+        bash_payload("python -c \"import serial; serial.Serial('COM3')\""),
+        "DENY",
+    ),
+    (
+        ".NET SerialPort 打开（门闩开 → 拒）",
+        ps_payload("[System.IO.Ports.SerialPort]::new('COM3',9600)"),
+        "DENY",
+    ),
+    (
+        "禁用设备（门闩开 → 拒）",
+        ps_payload("Disable-PnpDevice -InstanceId 'USB\\VID_1A86' -Confirm:$false"),
+        "DENY",
+    ),
+    ("pnputil（门闩开 → 拒）", ps_payload("pnputil /disable-device /instanceid X"), "DENY"),
+    ("cargo run（门闩开且无批准 → 拒）", bash_payload("cargo run"), "DENY"),
+    # COM4 是放行端口，**不受门闩影响**
+    (
+        "pyserial 打开 COM4（门闩开 → 仍放行）",
+        bash_payload("python -c \"import serial; s=serial.Serial('COM4')\""),
+        "ALLOW",
+    ),
+    (
+        "PowerShell 打开 COM4（门闩开 → 仍放行）",
+        ps_payload("$p=[System.IO.Ports.SerialPort]::new('COM4',115200); $p.DtrEnable=$true"),
+        "ALLOW",
+    ),
+    (
+        "一条命令同时点名 COM3 与 COM4（COM3 优先 → 拒）",
+        bash_payload("python -c \"import serial; a=serial.Serial('COM4'); b=serial.Serial('COM3')\""),
+        "DENY",
+    ),
+]
+
 
 def main() -> int:
     if not BASH:
@@ -171,9 +255,11 @@ def main() -> int:
     print("-" * 78)
 
     failed = []
+    total = [0]
 
-    def check(name, raw, expect):
-        got = run(raw)
+    def check(name, raw, expect, env_extra=None):
+        total[0] += 1
+        got = run(raw, env_extra)
         ok = got == expect
         print("%-4s %-36s expect=%-6s got=%s" % ("ok" if ok else "FAIL", name, expect, got))
         if not ok:
@@ -186,12 +272,12 @@ def main() -> int:
     for name, raw, expect in CASES:
         check(name, raw, expect)
 
-    # 有效批准：cargo run 放行，COM3 仍然拒绝
+    # 有效批准：cargo run 放行
     print("[批准文件有效（+30 分钟）]")
     with open(GRANT, "w", encoding="utf-8") as fh:
         fh.write("%d\n" % (int(time.time()) + 1800))
     check("cargo run（已批准）", bash_payload("cargo run"), "ALLOW")
-    check("COM3（已批准，仍拒）", bash_payload("mode COM3:"), "DENY")
+    check("COM3（已批准 + 无门闩 → 放行）", bash_payload("mode COM3:"), "ALLOW")
 
     # 过期批准：回到拒绝
     print("[批准文件已过期]")
@@ -207,7 +293,25 @@ def main() -> int:
 
     os.remove(GRANT)
 
+    # 长测门闩开启：用临时配置目录造出门闩，不碰用户真实的门闩文件
+    latch_dir, env_latch = latch_env()
+    try:
+        print("[长测门闩已开启（临时配置目录 " + latch_dir + "）]")
+        for name, raw, expect in LATCH_CASES:
+            check(name, raw, expect, env_latch)
+
+        # 门闩开 + 有效批准：运行放行，串口仍拒（批准不影响串口判定）
+        with open(os.path.join(latch_dir, "combot-run-approval"), "w", encoding="utf-8") as fh:
+            fh.write("%d\n" % (int(time.time()) + 1800))
+        print("[长测门闩已开启 + 批准文件有效]")
+        check("cargo run（门闩开 + 已批准）", bash_payload("cargo run"), "ALLOW", env_latch)
+        check("COM3（门闩开 + 已批准 → 仍拒）", bash_payload("mode COM3:"), "DENY", env_latch)
+        check("COM4（门闩开 + 已批准 → 放行）", bash_payload("mode COM4: baud=115200"), "ALLOW", env_latch)
+    finally:
+        shutil.rmtree(latch_dir, ignore_errors=True)
+
     print("-" * 78)
+    print("断言总数：%d" % total[0])
     if failed:
         print("失败 %d 条：" % len(failed))
         for name, expect, got in failed:

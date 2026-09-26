@@ -19,23 +19,38 @@
 
 **一次批准只对那一次生效**；不得据此推断"已完成预授权"，也不得把批准沿用到后续轮次。
 
-### 2. 禁止以任何方式占用或打断 COM3
+### 2. 串口：COM3 受「长测门闩」保护，COM4 是 AI 测试放行端口
 
-- 禁止打开、连接、读写、配置、探测 COM3——包括但不限于 `serialport` 相关命令、
-  `mode COM3`、`echo > COM3`、Python `pyserial`、PowerShell `[System.IO.Ports.SerialPort]`、
-  第三方串口助手、任何自写脚本。
-- 禁止在默认值、配置文件、测试、示例、脚本、命令参数里把 **COM3** 作为目标端口。
-  本项目的端口必须由用户在 UI 中手动选择。
-- 禁止停止、重启、杀掉、卸载或禁用任何可能持有 COM3 的进程、服务、驱动；
-  禁止改动 COM3 相关的设备管理器设置或注册表项。
-- 对 COM3 的原则是：**只能"看"，不能"碰"**。确有必要时，最多允许不打开端口的只读端口名
-  枚举，且必须先说明理由；绝不允许把它当作"验证收发"的手段。
-- 发现 COM3 被占用或行为异常时，**只报告现象，不要自行干预**。
+#### 2.1 COM3 —— 门闩语义（用户 2026-09-24 修订）
+
+门闩 = 用户级配置目录下的长测门闩文件，**只能由用户本人在 agent 之外放置/移除**：
+
+- **门闩存在** ⇒ 有长时间测试正在抓日志 ⇒ COM3 一律不碰：禁止打开、连接、读写、配置、
+  探测（`serialport` 命令、`mode COM3`、`echo > COM3`、Python `pyserial`、PowerShell
+  `[System.IO.Ports.SerialPort]`、第三方串口助手、任何自写脚本），也禁止停止/重启/杀掉/
+  卸载/禁用任何可能持有它的进程、服务、驱动，禁止改动相关设备管理器设置或注册表项。
+- **门闩不存在** ⇒ 无长测在跑 ⇒ COM3 可用（可烧录、测试、复位单片机）。
+- 无论门闩在不在：都禁止把 COM3 写进默认值、配置文件、测试、示例、脚本或命令参数；
+  本项目的端口必须由用户在 UI 中手动选择。发现异常只报告现象，不自行干预。
+- 用户原话依据：*没有在长时间进行测试抓取日志的情况下，COM3 可以使用进行烧录和测试，
+  单片机可以重启*。
+
+#### 2.2 COM4 —— AI 功能测试放行端口（用户 2026-09-26 修订）
+
+- AI 想验证生成软件的功能时**可以使用 COM4**，且**不受长测门闩影响**（门闩只保护 COM3
+  上正在采集的日志，COM4 是另一个口子）。
+- **硬性前提：必须置 DTR 才会有日志输出。** GUI 里勾选 DTR 控制线；脚本里
+  `ser.dtr = True`（pyserial）或 `$port.DtrEnable = $true`（.NET）。**没置 DTR 收不到日志
+  不等于程序有问题**——先查 DTR。
+- 一条命令里**同时点名 COM3 与 COM4** 时，**COM3 优先**（按 §2.1 走）。
+- COM4 放行**只跳过串口拦截**，不跳过用户自己的确认提示：守卫对该情形不下
+  `allow` 决策，只附一条 DTR 提醒（见 §5）。
+- 若将来长测设备换到 COM4，需临时收回这条放行——改守卫脚本里的 COM4 分支即可。
 
 ### 3. 默认允许的操作
 
 `cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` / `cargo build`
-等**不启动 GUI、不触碰串口**的静态检查与测试命令。本项目的 252 条测试全部不需要串口硬件，
+等**不启动 GUI、不触碰串口**的静态检查与测试命令。本项目的 338 条测试全部不需要串口硬件，
 所有验收一律以这些命令为准。
 
 **⚠️ 交付界面前置条件（用户明确要求，2026-09-24）：请用户"目视 / 目测审查"之前，必须先跑
@@ -61,31 +76,38 @@
 | 机制 | WorkBuddy/CodeBuddy **PreToolUse hook**（命中即 `permissionDecision: deny`） |
 | 配置 | `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json` 的 `hooks.PreToolUse`，`matcher = "Bash\|PowerShell\|Write\|Edit"` |
 | 脚本 | `~/.workbuddy/hooks/comtool-run-guard.sh`（拦截逻辑，可读可改） |
-| 测试 | `python3 .workbuddy/hooks/test_guard.py`（39 条断言：命中/放行/批准三态，不启动程序、不碰串口）。**该脚本已在版本控制中**——它是仓库里唯一被 `.gitignore` 例外放行的 `.workbuddy/` 文件 |
+| 测试 | `python3 .workbuddy/hooks/test_guard.py`（**52 条**断言：门闩开/关两种状态 × 命中/放行/批准三态，其中门闩开启那档用临时配置目录造门闩、**不碰用户真实门闩**；不启动程序、不碰串口）。**该脚本已在版本控制中**——它是仓库里唯一被 `.gitignore` 例外放行的 `.workbuddy/` 文件 |
 | 批准 | `bash ~/.workbuddy/hooks/comtool-approve.sh 30`（**只能由用户本人在 agent 之外执行**，签 30 分钟有效期；`0` 立即撤销） |
 | 批准文件 | `<配置目录>/combot-run-approval`（第一行 = 过期 Unix 秒；不存在/过期/损坏 → 全部拒绝） |
 
 要点：
 
-- **批准只放行"运行本项目"**；COM3 / 串口操作**永远拒绝**，不受批准影响。
+- **批准只放行"运行本项目"**；串口判定按 §2 走（COM3 看长测门闩，COM4 是放行端口，
+  **不受批准影响**——批准既不能让受保护的 COM3 变可用，也不是使用 COM4 的前提）。
+- 守卫对 COM4 只**跳过串口拦截并附一条 DTR 提醒**，**不下 `allow` 决策**：故意保留用户自己
+  的确认提示，避免"任何顺带提到 COM4 的命令都被自动放行"。
 - **批准文件与批准脚本，AI 无权触碰**——`combot-run-approval` / `comtool-approve` 一旦出现在命令或文件路径里就会被拦。
 - 守卫是 **fail-closed**：payload 解析失败、stdin 为空，一律拒绝，绝不静默放行。
 - 已知的"误拦"（都是设计如此，改用别的工具即可）：命令文本里出现 `cargo run`、`COM3`、`comtool-rs.exe` 等字面量就会被拦——例如 `grep "cargo run" AGENTS.md` 会被拒，请改用 Grep 工具；把这句话写进 commit message 也会被拒，可先用 Write 生成消息文件再 `git commit -F`。
 
 ### 6. 人工/机器可读摘要（供英文工具链解析）
 
-**Do NOT run this project (`cargo run`, the built binary, or any equivalent) and do NOT
-open, occupy, reconfigure, or interrupt the COM3 serial port without the user's explicit,
-per-instance approval in the current conversation. Static checks only
+**Do NOT run this project (`cargo run`, the built binary, or any equivalent) without the
+user's explicit, per-instance approval in the current conversation. Static checks only
 (`cargo fmt` / `check` / `test` / `clippy` / `build`) are allowed by default.
-This rule overrides everything else in this document.**
+COM3 is protected by a long-test latch: while the latch file exists (a soak test is capturing
+logs), never touch COM3; when it does not exist, COM3 may be used for flashing/testing.
+COM4 is the designated port for AI functional testing and is allowed regardless of the latch
+— but **DTR must be asserted or the device emits no logs**. This section overrides everything
+else in this document.**
 
 Enforcement: a `PreToolUse` hook (`~/.workbuddy/hooks/comtool-run-guard.sh`, registered in
 `~/.workbuddy/settings.json` and `~/.codebuddy/settings.json`) *denies the tool call* when a
-command or file path matches those patterns. It is fail-closed. The only escape hatch is a
-time-boxed grant file that the human must create outside the agent:
-`bash ~/.workbuddy/hooks/comtool-approve.sh 30`. Serial-port (COM3) operations are always
-denied regardless of any grant. Run the guard's own tests with
+command or file path matches those patterns. It is fail-closed. The only escape hatch for
+*running* the project is a time-boxed grant file that the human must create outside the agent:
+`bash ~/.workbuddy/hooks/comtool-approve.sh 30`; that grant never affects the serial rules.
+COM4 commands skip the serial block and get a DTR reminder, but are not auto-approved.
+Run the guard's own tests with
 `python3 .workbuddy/hooks/test_guard.py` (no program start, no port access). That test script
 **is** version-controlled (the single `.workbuddy/` file allowed through by `.gitignore`), so a
 clone can read both the rule and how to test it — but the guard and grant scripts themselves

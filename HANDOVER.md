@@ -150,7 +150,7 @@ cd E:/Downloads/Zed/AI_comtool-rs
 cargo fmt && cargo check --all-targets && cargo test
 ```
 
-230 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
+338 条测试**都不需要串口硬件**，包括一条走完异步打开失败路径的集成测试、
 一条把字节经事件通道注入后核对日志文件内容的集成测试、八条用
 `egui::__run_test_ui` 跑的无头 UI 冒烟测试（菜单栏、设置/信息窗口、三种接收视图、
 侧边栏、**已连接状态的侧边栏**、图表面板、**常用数据一行**、英文界面），
@@ -2432,14 +2432,19 @@ F1 的「发送文件」仍未做，其前置条件**待发队列上限（背压
 
 来自 `AGENTS.md` 与 `DEVELOPMENT_GUIDE.md`，这里只列最容易踩的：
 
-0. **⛔ 未经项目所有者逐次批准，禁止运行本项目（`cargo run` / 直接跑 exe），禁止以任何方式
-   占用或打断 COM3。** 开发阶段只用 `cargo fmt` / `cargo check --all-targets` / `cargo test`
-   验证（230 条测试均不需要串口硬件）。需要实机运行时停下来请求批准，由所有者自行启动。
-   完整条文在 `AGENTS.md` 顶部与 `DEVELOPMENT_GUIDE.md` §0。
+0. **⛔ 未经项目所有者逐次批准，禁止运行本项目（`cargo run` / 直接跑 exe）。串口按端口分两类：**
+   **COM3 受长测门闩保护**（门闩在 ⇒ 一律不碰；门闩不在 ⇒ 可烧录/测试/复位）；
+   **COM4 是 AI 功能测试放行端口**（不受门闩影响），**但必须置 DTR 才有日志输出**
+   ——GUI 里勾 DTR 控制线，脚本里 `ser.dtr = True` / `DtrEnable = true`；没置 DTR 收不到日志
+   不是程序的问题，先查这一项。开发阶段只用 `cargo fmt` / `cargo check --all-targets` /
+   `cargo test` 验证（338 条测试均不需要串口硬件）。需要实机运行时停下来请求批准。
+   完整条文在 `AGENTS.md` §2 与 `DEVELOPMENT_GUIDE.md` §0（**两者 2026-09-26 同步更新过：
+   旧版写的是"COM3 永远拒绝"，与已实现的门闩语义不符**）。
    **该规则已配置机器级硬拦截**：PreToolUse 钩子 `~/.workbuddy/hooks/comtool-run-guard.sh`
    （注册于 `~/.workbuddy/settings.json` 与 `~/.codebuddy/settings.json`），命中即拒绝工具调用，
-   fail-closed；自测 `python3 .workbuddy/hooks/test_guard.py`；限时批准由所有者本人执行
-   `bash ~/.workbuddy/hooks/comtool-approve.sh 30`（批准只放行"运行"，COM3 永远拒绝）。
+   fail-closed；自测 `python3 .workbuddy/hooks/test_guard.py`（52 条断言）；限时批准由所有者
+   本人执行 `bash ~/.workbuddy/hooks/comtool-approve.sh 30`（批准只放行"运行"，与串口判定
+   互不影响）。
 
 1. **串口读写绝不能在 UI 线程。** 一切 IO 都在 `SerialChannel` 的后台线程；UI 只投递消息。
    停机靠向命令通道发 `Halt`，**不要改回共享标志位轮询**——那正是先前版本死锁风险的来源。
@@ -2538,7 +2543,8 @@ F1 的「发送文件」仍未做，其前置条件**待发队列上限（背压
     取消排除的原因很简单——它记的是"怎么改这个项目"的硬约定，而不是本机环境，放在仓库外
     等于换台机器就没人看得见。**同一批条文在 `DEVELOPMENT_GUIDE.md` §0/§6 与本文 §7 各有一份，
     三处仍需同步。**
-  - `.workbuddy/hooks/test_guard.py` 也在同一天开了例外（守卫拦截规则的行为自测，39 条断言）。
+  - `.workbuddy/hooks/test_guard.py` 也在同一天开了例外（守卫拦截规则的行为自测，
+    **2026-09-26 起 52 条断言**：门闩开/关两档分别断言，门闩档用临时配置目录造门闩）。
     写法是四行而不是一条否定规则：`.workbuddy/*` + `!.workbuddy/hooks/` + `.workbuddy/hooks/*`
     + `!.workbuddy/hooks/test_guard.py`——**父目录被排除时无法单独重新包含其中的文件**，
     必须先否定父目录让 git 愿意进去。第三行把 `hooks/` 重新收窄成"只放行名单"，
