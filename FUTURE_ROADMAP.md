@@ -653,7 +653,7 @@ F5 之后是 272，2026-09-24 修三缺陷 +19 → 291，
 #### 与原计划的六处偏离（都是"做法更严"，不是目标变了）
 
 1. **N1 的"打开端口不许自动拉线"有了实证依据。** 原计划只说"不许自动拉"。核实
-   `serialport` 4.10.0 源码后确认：Windows 侧打开端口时显式把两根线都置为 Disable
+   `serialport` 4.10.1 源码后确认：Windows 侧打开端口时显式把两根线都置为 Disable
    （`src/windows/dcb.rs:211` `set_fDtrControl(DtrControl::Disable)`，以及
    `FlowControl::None/Software` 两条分支的 `set_fRtsControl(RtsControl::Disable)`），
    而写电平走的是 `EscapeCommFunction`（`SETRTS` / `CLRRTS` / `SETDTR` / `CLRDTR`，

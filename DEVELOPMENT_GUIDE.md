@@ -559,7 +559,7 @@ impl eframe::App for ComTool {
     - **绘制时序是硬约束**：`Panel::bottom("status_bar")` 必须在 `egui::CentralPanel` **之前**画。egui 的面板"先画先占位"，后画的只能拿到剩余空间——放在中央区之后，状态栏只横跨中央区剩余宽度，左右露出缝隙，看起来像一条没对齐的横条。与顶部菜单栏同理（`ui()` 里 ① 菜单栏 / ② 侧边栏 / ③ 状态栏 / ④ 中央区，编号即顺序）。
     - **判据是纯函数**（`status_bar::connection_indicator(connected, kind, s)`）返回 `ConnectionIndicator { is_on, label }`，绘制只负责画。这样"UDP 该显示已绑定"这类规则可以直接断言，不必先画一遍再猜像素（同约定 43 的道理）。`is_on` 存的是**语义**（亮/灭）而非颜色值，颜色由 `ConnectionIndicator::color()` 单独给出——将来换配色、或加第三态时，判据这层不用动。
     - **必须沿用侧边栏的四态**：`ConnectionKind::Udp` 下 `connected == true` 只表示**套接字绑定成功**，不是"对端在线"。显示成"已连接"会让用户以为掉线会被发现——侧边栏早就为此分了 `status_bound` / `status_unbound` 两档（见 `sidebar.rs`）。状态栏若只做两态，同一个窗口里两处指示会互相打脸。有一条测试（`status_bar_agrees_with_the_sidebar_on_udp`）把两者的分叉绑在一起。
-    - **⛔ 圆点绝不要改回 emoji 字符**（这是本条最容易踩的坑，初版就踩过）：初版用 🟢(U+1F7E2)/🔴(U+1F534)，结果界面上是**两个大小不一、且都是灰黑色**的圆。根因不在字体选错，而在 egui 的文本管线：`epaint` 光栅化字形走的是 `skrifa` 的 `outline_glyphs()`（见 `epaint-0.36.1/src/text/font.rs::allocate_glyph_uncached`），**只取矢量轮廓**再填充成当前文字色；彩色 emoji 的颜色来自 `COLR`/`CPAL`（分层）或 `CBDT`/`CBLC`（位图）表，这些表 egui **从不读取**。实测两个候选字体的表结构：`seguiemj.ttf` 有 `COLR`+`CPAL`，但同一码点也有普通 `glyf` 轮廓（就是被当成单色圆画出来的那个）；`seguisym.ttf` 连 `COLR` 都没有。**所以换任何字体都得不到彩色——这是架构限制，不是配置问题。**
+    - **⛔ 圆点绝不要改回 emoji 字符**（这是本条最容易踩的坑，初版就踩过）：初版用 🟢(U+1F7E2)/🔴(U+1F534)，结果界面上是**两个大小不一、且都是灰黑色**的圆。根因不在字体选错，而在 egui 的文本管线：`epaint` 光栅化字形走的是 `skrifa` 的 `outline_glyphs()`（见 `epaint-0.36.2/src/text/font.rs::allocate_glyph_uncached`），**只取矢量轮廓**再填充成当前文字色；彩色 emoji 的颜色来自 `COLR`/`CPAL`（分层）或 `CBDT`/`CBLC`（位图）表，这些表 egui **从不读取**。实测两个候选字体的表结构：`seguiemj.ttf` 有 `COLR`+`CPAL`，但同一码点也有普通 `glyf` 轮廓（就是被当成单色圆画出来的那个）；`seguisym.ttf` 连 `COLR` 都没有。**所以换任何字体都得不到彩色——这是架构限制，不是配置问题。**
     - **正确做法**：用 `ui.painter().circle_filled(center, radius, color)` 画一个 `Color32` 实心圆。尺寸取 `ui.text_style_height(&TextStyle::Body) * DOT_SIZE_RATIO`（0.72，必须 < 1，否则满行高的圆会顶到相邻行），圆心取分配矩形的 `rect.center()` 而不是左上角——`allocate_exact_size` 按行高分配高度、比直径大，不居中会顶在上边缘。这样同时解决了三件事：颜色正确、两态大小一致（不再受 emoji 字形自带 advance 摆布）、垂直对齐（按行高居中而非跟字体基线漂移）。**副作用是状态栏对字体回退链的依赖归零**，`main.rs::setup_fonts` 里那档 emoji 字体已随之删除。
     - **颜色方向要断言，不能只断言"两色不同"**：只比"绿≠红"会被"亮=红、灭=绿"这种反色实现骗过。`the_dot_changes_colour_with_the_state` 额外断言 `green.g() > green.r() && green.g() > green.b()`（亮方确实偏绿）与对称的红方条件。
     - **绘制测试读 `Shape::Circle` 而不是 `Shape::Text`**：圆点是几何图形不是字符。`status_dot_is_painted_as_a_filled_circle_in_the_right_colour` 从 `FullOutput.shapes` 里取 `(radius, fill)`，断言**恰好一枚**颜色等于 `indicator.color()` 的圆——这同时拦住"没画出来"和"颜色写死"两种回归（两条都做过空转验证：把绘制注释掉 → 2 条红；把颜色改成 `Color32::GRAY` → 1 条红）。
@@ -628,9 +628,9 @@ impl eframe::App for ComTool {
 53. **界面的"表面色"一律取自主题，绝不写死；面板背景自己画，不要指望窗口底色**（2026-09-24 用户目视发现「浅色主题下状态栏没变色」后得出）：
     - **症状**：切到浅色主题后，整条底部状态栏仍是一条深色横带，而且那行字几乎看不见。
     - **根因不是配色表写错，而是那块面板根本没画背景**：`egui::Frame::NONE` 的 `fill` 是
-      `Color32::TRANSPARENT`（常量定义在 `egui-0.36.1/src/containers/frame.rs`），于是透出来的
+      `Color32::TRANSPARENT`（常量定义在 `egui-0.36.2/src/containers/frame.rs`），于是透出来的
       是 `eframe::App::clear_color` 的默认值——**写死的**深灰 `rgba(12,12,12,180)`，那个参数
-      的名字就叫 `_visuals`，**拿得到主题却不用**（`eframe-0.36.1/src/epi.rs`）。深色主题下
+      的名字就叫 `_visuals`，**拿得到主题却不用**（`eframe-0.36.2/src/epi.rs`）。深色主题下
       它 (12,12,12) 与 `panel_fill` gray(27) 几乎一样，所以长期没暴露；浅色主题下 `panel_fill`
       是 gray(248)、而文字色是 gray(80) ⇒ **深字压在近黑底上**，"既没变色、又像没内容"。
     - **正解**：① 面板背景用 **egui 自己的面板 frame** —— `Frame::side_top_panel(ui.style())`
@@ -680,7 +680,7 @@ impl eframe::App for ComTool {
       相反"。**"正在进行"由底色 + 状态点 + 下方小字交代，不由按钮文案交代。**（当天出设计稿
       时我把这一态画成了"正在打开"四个字，是错的，实现时纠正了。）
     - ⚠️ **别拿"与 egui 正文档一致"当理由，先实测**：这一档原取 14，注释写着"与
-      `TextStyle::Body`（14.0）一致"——**实测是 13.0**（0.36.1，运行期读
+      `TextStyle::Body`（14.0）一致"——**实测是 13.0**（0.36.2，运行期读
       `TextStyle::Body.resolve(ui.style()).size`）。于是 14 只是"比正文大 1 点"，放进实心色块里
       肉眼无差别，用户第二轮反馈就是「打开窗口这四个字太小了」。现在取 **16**，并且**故意大于
       正文**：它是主操作按钮的文案，不是正文。放不下时缩字号的下限取 **14**（不低于正文）。
@@ -780,7 +780,7 @@ impl eframe::App for ComTool {
     - **复用方式是抽构造函数，不是把参数抄一遍**：`receive.rs::capped_scroll_area(axis, id_salt, max_height)`
       是**唯一**落点（`auto_shrink([false, false])` + 上限 + id 只定义一处），接收区两处与图表共用它；
       照抄参数迟早漂移。⚠️ 图表的 `id_salt` 必须与 `Plot` 的 id **不同**——滚动位置与视图范围是两份独立状态。
-    - ⭐ **滚轮归属要先查清**（egui 0.36.1 `containers/scroll_area.rs:1219-1254`）：滚动区**只在"内容确实
+    - ⭐ **滚轮归属要先查清**（egui 0.36.2 `containers/scroll_area.rs:1219-1254`）：滚动区**只在"内容确实
       超出可视区、且该方向还能滚"时**才消费 `smooth_scroll_delta`（源码注释原文："Clear scroll delta so no
       parent scroll will use it"）。内容装得下 ⇒ 两个条件都不成立 ⇒ 滚轮原样留给内部控件。**这是"图表套
       滚动区"没有把交互弄坏的全部依据**；若把上限设成"永远装得下"，就等于套了个不会滚的空框（判据见下条）。

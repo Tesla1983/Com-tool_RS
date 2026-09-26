@@ -57,9 +57,11 @@ Rust 串口调试上位机（GUI 串口助手）。技术栈：
 | 项 | 值 |
 |---|---|
 | 语言/版本 | Rust **edition 2024**（需 rustc ≥ 1.85；实测工具链 `rustc 1.97.1`） |
-| GUI | `egui` / `eframe` **0.36.1**（`glow` 后端 + `persistence` feature） |
-| 串口 | `serialport` 4.10.0（manifest 写 `"4.7.2"` 是 caret 要求，实解析到 4.10.0） |
+| GUI | `egui` / `eframe` **0.36.2**（`glow` 后端 + `persistence` feature） |
+| 串口 | `serialport` **4.10.1**（manifest 写 `"4.7.2"` 是 caret 要求，实解析到 4.10.1） |
+| 编码 | `encoding_rs` **0.8.42**（manifest 写 `"0.8.35"`，实解析到 0.8.42） |
 | 其它 | `rfd`（文件对话框）、`serde`（持久化）、`chrono`（日志文件名与接收时间戳前缀的格式化，P4 起在用）、`egui_plot` 0.37（实时图表，P5 起在用）。`tokio` 与 `egui-chinese-font` 已作为死依赖移除（见 P6 第 1 批） |
+| 版本策略 | **manifest 只写"最低要求"，实际版本由 `Cargo.lock` 钉住**，升级补丁版只动 lock、不动 manifest。2026-09-26 一次性升级四个补丁版（技术债报告第 3 项），详见 §3.25 |
 | 类型 | 单 binary crate（无 workspace、无 CI、无 lint 配置） |
 
 ### 模块结构（`ai-refactor` 分支）
@@ -244,7 +246,7 @@ F4 带来的 28 条（`net_impl` 的 18 条：配置自检、TCP 的"连上 → 
 | 项 | 值 |
 |---|---|
 | 新增模块 | `src/chart.rs`（485 行 / 20 测试）、`src/panels/chart.rs`（223 行 / 5 测试） |
-| 新增依赖 | `egui_plot = "0.37.0"`（MIT OR Apache-2.0；依赖 `egui ^0.36`，与本项目 0.36.1 匹配——**注意它的版本号与 egui 并不同步**：0.36 依赖的是 `egui ^0.35`） |
+| 新增依赖 | `egui_plot = "0.37.0"`（MIT OR Apache-2.0；依赖 `egui ^0.36`，与本项目 0.36.2 匹配——**注意它的版本号与 egui 并不同步**：0.36 依赖的是 `egui ^0.35`） |
 | 新增持久化字段 | `show_chart_panel`（默认 **false**）、`chart_max_samples`（默认 2000）、`chart_auto_bounds`（默认 true） |
 | 新增运行时字段 | `chart: ChartData`（`#[serde(skip)]`） |
 | 门禁 | `cargo fmt --check` 干净 · `cargo check --all-targets` **0 warning** · `cargo test` **79 passed** · clippy **8 条**（与上轮逐条相同，**新代码 0 新增**） |
@@ -673,7 +675,7 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 
 **未做 / 未验证**：15 种新语言的**外观与文案通顺度从未有人看过**——只由文案表不变量 +
 无头渲染冒烟测试保证。第 3 档 `tr ru pl` **已落地**（本轮）。仍剩：`th`（泰文叠置记号整形
-需先做目视探针）、`ar`/`he`（**RTL 策略未决**，且 egui 0.36.1 有 GSUB/GPOS 整形但**无 bidi
+需先做目视探针）、`ar`/`he`（**RTL 策略未决**，且 egui 0.36.2 有 GSUB/GPOS 整形但**无 bidi
 重排**，RTL 与拉丁数字混排无保障）、`hi`（**字体挡住**：本机四候选字体全缺 52 个天城文字）。
 **复数**（俄语 / 波兰语等需要）**完全未涉及**——`fill()` 是纯位置替换，零复数逻辑，与现有
 英文列同等质量（现有英文列本身也没做复数，故本批三语复数成本为 **0**）；真要做复数需先改
@@ -1199,12 +1201,12 @@ TCP / UDP 的命令循环各补了一个空分支（它们没有控制线）。
 **触发**：用户目视审查（本会话第 6 轮）——「UI效果错误，底部状态栏在浅色的情况下没变色」。
 
 **根因不在配色表，而在状态栏原先根本没画背景。** 面板用的是 `egui::Frame::NONE`，
-它的 `fill` 是 `Color32::TRANSPARENT`（已读 `egui-0.36.1/src/containers/frame.rs` 的常量定义
+它的 `fill` 是 `Color32::TRANSPARENT`（已读 `egui-0.36.2/src/containers/frame.rs` 的常量定义
 确认）。`Frame::paint` 无论如何都会 emit 一个 `RectShape`，所以"背景"这个矩形是存在的、
 只是**透明的**——透出来的东西是 `eframe::App::clear_color` 的默认值：
 
 ```rust
-// eframe-0.36.1/src/epi.rs:248
+// eframe-0.36.2/src/epi.rs:248
 fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
     egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()
     // _visuals.window_fill() would also be a natural choice
@@ -1229,7 +1231,7 @@ gray(80)（`widgets.noninteractive.fg_stroke`）——**深字压在近黑底上
 | `app.rs` 的 `impl eframe::App` 新增 `clear_color()` | 返回 `visuals.panel_fill.to_normalized_gamma_f32()` | **兜底**：以后任何没被面板盖住的区域都跟着主题，不会再露一条深色。`clear_color` 拿到的是 `global_style().visuals`（实测 eframe 调用点：`glow_integration.rs:694` / `wgpu_integration.rs:813`），所以它真的能读到主题 |
 
 两条是**纵深防御而非重复**：主修让状态栏自己负责背景（症状消失），兜底让"没人画的区域"也不
-再是写死的深色（同一类问题的下一个入口）。**注意 `side_top_panel` 在 0.36.1 里不带描边**
+再是写死的深色（同一类问题的下一个入口）。**注意 `side_top_panel` 在 0.36.2 里不带描边**
 （源码只有 `inner_margin` + `fill`），所以没有因此多出一条边线；`show_separator_line(false)`
 仍然生效，`Frame` 的 `inner_margin` 是**覆盖**不是叠加，状态栏高度不变——既有的"下留白"
 与"整组居中"两条测试原样通过。
@@ -1265,7 +1267,7 @@ let button = egui::Button::new(label).selected(is_connected);   // ← 就这一
 ```
 
 宽度、高度、填充、描边、圆角一个都没给，全吃 egui 默认值。实测（本机
-`egui-0.36.1/src/style.rs`）：`button_padding` 只有 `vec2(4.0, 1.0)` ⇒ 高度≈文字行高、
+`egui-0.36.2/src/style.rs`）：`button_padding` 只有 `vec2(4.0, 1.0)` ⇒ 高度≈文字行高、
 宽度随文案长度；深色 `widgets.inactive` 是 `weak_bg_fill = gray(60)` 压在 `panel_fill`
 `gray(27)` 上、`corner_radius = 2`、**无描边**；已连接走 `selection.bg_fill`（深色主题
 `rgb(0,92,128)`）。结论：**问题不在配色难看，而在没有任何一处告诉用户"这里可以按"**。
@@ -1372,7 +1374,7 @@ let button = egui::Button::new(label).selected(is_connected);   // ← 就这一
 | 新增 `CONNECT_BUTTON_RIGHT_MARGIN` | — | 24.0 | 长译文下保证右边缘不贴面板边界 |
 
 **⚠️ 一个被实测纠正的事实（原注释写错了）**：`CONNECT_TEXT_SIZE` 的旧注释说"与 egui 正文档
-（`TextStyle::Body`，14.0）一致"——**这是错的**。egui 0.36.1 的 `TextStyle::Body` 实测是
+（`TextStyle::Body`，14.0）一致"——**这是错的**。egui 0.36.2 的 `TextStyle::Body` 实测是
 **13.0**（运行期打印 `TextStyle::Body.resolve(ui.style()).size` 得到，不是凭记忆），所以原来的
 14 只是"比正文大 1 点"，放进实心色块里肉眼几乎无差别——用户的判断是对的。注释已更正。
 
@@ -1661,7 +1663,7 @@ let width = content_width.max(CONNECT_BUTTON_MIN_WIDTH).min(width_ceiling);
 `Plot::height()` 是**固定**——把"缩"与"滚"分开、让容器负责夹高度，比让控件自己猜可用高度更可靠。
 `plot_height()` 与 `PLOT_HEIGHT_MIN` 随之删除（连带删掉 2 条测它们的纯函数测试）。
 
-**滚轮归属（读 egui 0.36.1 `containers/scroll_area.rs:1219-1254`）**：滚动区**只在"内容确实超出
+**滚轮归属（读 egui 0.36.2 `containers/scroll_area.rs:1219-1254`）**：滚动区**只在"内容确实超出
 可视区、且该方向还能滚"时**才消费 `smooth_scroll_delta`（源码注释原文："Clear scroll delta so no
 parent scroll will use it"）。内容装得下时两个条件都不成立，滚轮原样留给内部控件 ⇒ 图表平时照常
 缩放/平移；只有矮到出现滚动条，滚动块才接管滚轮。**这是"复用日志滚动区"没有把图表交互弄坏的依据。**
@@ -1786,6 +1788,46 @@ UI 文案**（15 种语言表不用动），也没有新增设置项。
 **验证**：`cargo clippy --all-targets` **0 warning**（此前 bin + test 各 8 条）；
 `fmt --check` 干净；`check --all-targets` 0 warning；`test` **338 passed + 1 ignored**。
 未运行本项目、未触碰任何串口。
+
+### 3.25 增量（2026-09-26：技术债报告第 3 项 —— 依赖补丁版升级）
+
+四个依赖落后一个补丁版，一次性升级。照报告的建议**单独一次提交**，不与其他改动混杂——
+本项目 338 条测试里有大量**形状级断言**（读 `Shape::Text` / `Shape::Circle` / `Shape::Rect`
+的矩形与颜色），egui 小版本一旦改排版就会当场变红，正好当回归网用。
+
+| crate | 升级 | 说明 |
+|---|---|---|
+| `egui` / `eframe` | 0.36.1 → **0.36.2** | 连带 `emath` / `epaint` / `egui_glow` / `epaint_default_fonts` 一起 |
+| `serialport` | 4.10.0 → **4.10.1** | |
+| `encoding_rs` | 0.8.41 → **0.8.42** | 顺带摘掉 `multiversion` + `multiversion-macros` 两个传递依赖 |
+| `egui_plot` 0.37.0 / `chrono` 0.4.45 / `serde` 1.0.229 / `rfd` 0.17.2 | 已是最新 | 无需动 |
+
+**升级前先量了改动范围（这是"低风险"的依据，不是推测）**：
+
+- `egui` 0.36.1 → 0.36.2：61 个文件、**589 行**差异，但**几乎全是 `std::` → `core::`
+  的机械替换**。`containers/scroll_area.rs` 只动了 4 行，全是 `std::ops` / `std::mem` →
+  `core::ops` / `core::mem`；`style.rs` 同理。布局与排版逻辑零改动——这解释了为什么
+  338 条形状级断言一条都没红。
+- `serialport` 4.10.0 → 4.10.1：**只动了 4 行，全在 `posix/tty.rs`**（波特率常量解析
+  `B500000 => 500_000` 改成 `Ok(500_000)`）。**Windows 侧一行未改** ⇒ §5 那条
+  "Windows 打开端口时显式把两根控制线置为 Disable"的结论在 4.10.1 下依然成立。
+
+**⭐ 顺手做了一件容易被漏掉的事**：文档里有五处**带行号的 egui 源码引用**，版本一升就
+可能悄悄失效。升级后逐条回查，**全部仍然成立**（这才有把握把 `0.36.1` 全部改写成
+`0.36.2`）：`containers/scroll_area.rs:1219-1254` 的滚轮归属那段（"Clear scroll delta
+so no parent scroll will use it" 原注释仍在原位）、`eframe/src/epi.rs:248` 的
+`fn clear_color(&self, _visuals: ...)`（连行号都没变，仍是写死的 `rgba(12,12,12,180)`）、
+`containers/frame.rs` 的 `Frame::NONE.fill == TRANSPARENT`、`style.rs` 的
+`button_padding == vec2(4.0, 1.0)`。
+
+**版本策略（写入 §1 依赖表）**：manifest 只写"最低要求"，实际版本由 `Cargo.lock` 钉住；
+升级补丁版**只动 lock、不动 manifest**（`egui = "0.36.1"` 的 caret 本就允许 0.36.2，
+把它改成 0.36.2 等于凭空多声明一条我们并不需要的最低要求）。
+
+**验证**：`fmt --check` 干净 · `check --all-targets` 0 warning ·
+`clippy --all-targets` **0 warning** · `test` **338 passed + 1 ignored**（零失败）。
+未运行本项目、未触碰任何串口。**仍需目视一眼**：自动化测的是断言里的形状，测不了
+"整体观感"，而 GUI 补丁版有可能改了断言之外的观感细节。
 
 ## 4. 未决事项
 
@@ -2366,7 +2408,7 @@ UI 文案**（15 种语言表不用动），也没有新增设置项。
 | ~~中~~ **已修** | ~~自动重连无退避~~ | `app.rs::auto_reconnect` | **已于 2026-09-24 修复**：新增 `reconnect_backoff(failures)` 纯函数（500 ms 起、指数翻倍、封顶 30 s）+ `reconnect_failures` 计数（`#[serde(skip)]`）+ `MAX_RECONNECT_ATTEMPTS = 6` 上限；到顶后彻底停手并在接收区留一条说明。**只对串口生效**（F4 起对 TCP / UDP 直接返回）。见 §3.15 |
 | ~~中~~ **已修** | ~~待发队列无上限~~ | `communicationtrait::worker` | **已于 2026-09-24 修复**：新增共享上限 `MAX_PENDING_BYTES = 1 MiB` 与**两侧共享**的 `PendingLedger`（`Arc<AtomicUsize>`）；三个通道的 `write()` 统一走 `worker::submit`（先预约额度 → 再投递 → 失败退还），`worker_main` 只 `push_back`、不再自己判上限。满了**在调用线程当场**返回 `Err`（不判掉线、不停定时发送），而不是继续吃内存或静默丢弃。见 §3.15 ① 与 **①附**（初版是"后台线程判 + 报 `Notice`"，当天订正为"调用线程判"） |
 | ~~低~~ **已修** | ~~**待发队列被拒时状态栏的发送字节数仍累加、输入框仍被清空**~~ | `communicationtrait::worker::submit` + 三个通道的 `write()` | **已于 2026-09-24 修复**：根因是"队列满"判在**后台线程**里做，而 `write()` 只把命令投进 mpsc 就返回 `Ok` ⇒ app 层照常 `tx_bytes += len`、`send_data` 照常清空输入框，用户看到「本条未发送」的提示与**仍在增长**的发送计数并存。改法是把这个判定**挪到调用线程**——新增两侧共享的 `PendingLedger`，`write()` 在**投递之前**就 `reserve(len)`，失败即当场返回 `Err`。**`app.rs` 一行未改**（它本来就是"`Ok` 才记账、`Ok` 才清空"），两个症状一起消失。旧的 `Notice` 通路退场，但文案逐字保留（差别只在"当场说"）。见 §3.15 ①附 |
-| ~~**高**~~ **已修** | ~~**状态栏在浅色主题下不变色（整条仍是深色横带）**~~ | `status_bar.rs` 的 `.frame(...)` + `app.rs` 的 `clear_color` | **已于 2026-09-24 修复**（用户目视发现）：面板用的是 `Frame::NONE`，其 `fill` 是 `TRANSPARENT` ⇒ **状态栏自己不画背景**，透出 `eframe::App::clear_color` 的默认值——一个**写死的**深灰 `rgba(12,12,12,180)`，参数名就叫 `_visuals`、**拿得到主题却不用**（`eframe-0.36.1/src/epi.rs:248`）。深色主题下 (12,12,12) 与面板底色 gray(27) 几乎一样所以一直没暴露；浅色主题下面板底色是 gray(248)、文字色是 gray(80) ⇒ **深字压在近黑底上**，整条状态栏"没变色、也像没内容"。修法：① 面板改用 `Frame::side_top_panel(ui.style())`（只覆盖内边距），背景 = 该主题的 `panel_fill`；② 兜底重写 `App::clear_color()` 返回 `visuals.panel_fill`，让任何未被面板覆盖的区域也跟主题走。⚠️ **它躲过全部自动化测试的原因是"没画背景"测不出来**——原测试问的是圆点数/文字/位置/留白，没有一条问"这块面板自己的背景是什么颜色"。见 §3.17 |
+| ~~**高**~~ **已修** | ~~**状态栏在浅色主题下不变色（整条仍是深色横带）**~~ | `status_bar.rs` 的 `.frame(...)` + `app.rs` 的 `clear_color` | **已于 2026-09-24 修复**（用户目视发现）：面板用的是 `Frame::NONE`，其 `fill` 是 `TRANSPARENT` ⇒ **状态栏自己不画背景**，透出 `eframe::App::clear_color` 的默认值——一个**写死的**深灰 `rgba(12,12,12,180)`，参数名就叫 `_visuals`、**拿得到主题却不用**（`eframe-0.36.2/src/epi.rs:248`）。深色主题下 (12,12,12) 与面板底色 gray(27) 几乎一样所以一直没暴露；浅色主题下面板底色是 gray(248)、文字色是 gray(80) ⇒ **深字压在近黑底上**，整条状态栏"没变色、也像没内容"。修法：① 面板改用 `Frame::side_top_panel(ui.style())`（只覆盖内边距），背景 = 该主题的 `panel_fill`；② 兜底重写 `App::clear_color()` 返回 `visuals.panel_fill`，让任何未被面板覆盖的区域也跟主题走。⚠️ **它躲过全部自动化测试的原因是"没画背景"测不出来**——原测试问的是圆点数/文字/位置/留白，没有一条问"这块面板自己的背景是什么颜色"。见 §3.17 |
 | 中 | 写路径瞬态错误静默重试 | `channel.rs::worker_main` | `WouldBlock` / `Interrupted` 直接重试是合理的，但设备长期不接受数据时用户得不到提示。背压修好后已有"队列已满"的 `Notice` 兜底，但队列**未满而长期写不动**时仍无提示。建议侧边栏显示「待发字节数」 |
 | ~~中~~ **已修** | ~~**TCP 写侧没有写超时 ⇒ 背压不生效，还可能卡住界面**~~ | `net_impl/tcp.rs::open` / `worker_main` | **已于 2026-09-24 修复，走的是「非阻塞写」那条路**：`open()` 把 `set_read_timeout` 换成 `stream.set_nonblocking(true)`（另加 `set_nodelay(true)`），worker 循环加了 `idle` 标记与显式的 `IDLE_SLEEP = 1 ms`（非阻塞 socket 上 `set_read_timeout` 无效——阻塞性是**每 fd** 的），`WouldBlock` 时让出时间片后下一轮再试。<br>**修掉的两条后果**：① 对端彻底停读时 worker 不再卡在 `write`，1 MiB 上限真正生效（`TcpChannel` 现在跑的是与串口同一套 `PendingLedger` 账本，队列满**在调用线程当场**返回 `Err`）；② `close()` 里那个 `join()` 不再无限等——实测对端完全不读时 `close()` 也能在毫秒级返回（`close_returns_promptly_even_when_the_peer_never_reads` 钉住，3 秒上限）。代价：读侧不能再靠 `set_read_timeout`，改成 1 ms 轮询（这就是 `IDLE_SLEEP` 的另一个用途，同时决定 `close()` 的最大响应延迟）。<br>⚠️ **为什么没走"加一行写超时"**（已实测排除）：Windows 上带 `SO_SNDTIMEO` 的阻塞 `send` 超时后，数据**可能已经进入内核缓冲并发出**，而调用方只拿到 `WSAETIMEDOUT`、拿不到已写字节数；worker 于是重发整片。实测（64 KB 一片、片内含片号、超时 10 ms、对端停读 2 秒）：同一片在接收端出现 **126** 遍（片 42 的词数 1032192 = 126×8192）。非阻塞写没有这个歧义——`Ok(n)` 就是**准确**的已写字节数。串口也没有（驱动不接受就一个字节都不排队），所以那里 `.timeout(10ms)` 同时落成 `WriteTotalTimeoutConstant` 是安全的。<br>**UDP 刻意不动**（同日的对照实测）：向一个从不 `recv` 的对端发 4000 × 60 KB（`SO_SNDBUF=4096`）→ **0 次失败**、单次 `send` 最坏 **0.1 ms**（TCP 对照组挂了 **2 分 05 秒**）⇒ UDP 没有"对端停读 ⇒ worker 卡住"这条路径。见 §3.15 ④ 与 `tools/backpressure_check.py` 的 `--self-test` |
 | 低 | UDP 的 `send` 仍可能被本机网卡出口堵住 | `net_impl/udp.rs::write`（刻意保持阻塞） | 与 TCP 那条**不是同一个问题**：本机到对端的**网卡出口**被打满时（例如 100 Mbps 网卡上持续满速发大包），`send` 仍会阻塞。实测在回环上向从不 `recv` 的对端发 4000 × 60 KB 是 **0 次失败 / 最坏 0.1 ms**，所以没有"对端停读 ⇒ worker 卡住"这条常被踩到的路径，这是 UDP 不改非阻塞的依据。但要构造出出口饱和需要真实网卡与真实流量，**未实测**，因此保留为已知残余风险；真出现时应按 TCP 同样的方式改非阻塞（`WouldBlock` 对 UDP 是"本机队列满、报文未发出"，语义清晰、无重发歧义） |
