@@ -193,19 +193,19 @@ graph LR
 | **P0** 架构拆分 | `app.rs` 拆为 `app.rs` / `receive.rs` / `sidebar.rs` / `panels/`；清理 `config.rs` 空文件 | `src/**` | `cargo check` + 6 个测试全绿，行为零变化 | 1-2 天 | ✅ 完成（29/29 逐行等价） |
 | **P1** 配置与持久化 | 引入 `pub struct AppSettings`（serde 现成）；`ComTool` derive `Serialize/Deserialize`，`serial` / `event_rx` / `decoder` / `Instant` 全部 `#[serde(skip)]`；实现 `fn save()` | 新增 `src/settings.rs`；改 `src/app.rs`、`src/main.rs` | 改设置 → 退出 → 重启，设置全保留 | 2-3 天 | ✅ 完成（未做磁盘实测） |
 | **P2** 菜单栏 + 设置面板 | 顶部 `TopBottomPanel`：File(Info/Quit) · Settings（真正接线的设置项）· 主题切换 · Byte mode · 面板显隐互斥（至少保留一个面板） | `src/panels/menu_bar.rs`、`src/panels/settings.rs` | 上游 F 组 4 项 + G 组 6 项全部可用 | 1-2 天 | ✅ 完成（实际用 `egui::Panel::top`，egui 0.36 已无 `TopBottomPanel`；G 组 2 项待 P4/P6 消费，界面已标注） |
-| **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，注意 `ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | `src/receive.rs` | 挂机 1 小时内存稳定；上游 B 组 100% | 1 天 | ✅ **完成**：FIFO + `auto_scroll`（提前随 P2 落地）+ 可选时间戳前缀（`TimestampPrefix::{Off, PerLine, PerBatch}`，默认关闭，见 `HANDOVER.md` §3.5） |
+| **P3** 接收链路补齐 | `max_log_string_length` FIFO 淘汰（**三镜像同步淘汰，注意 `ColoredSpan` 需支持部分切分**）；`auto_scroll` 开关；可选时间戳前缀 | `src/receive.rs` | 挂机 1 小时内存稳定；上游 B 组 100% | 1 天 | ✅ **完成**：FIFO + `auto_scroll`（提前随 P2 落地）+ 可选时间戳前缀（`TimestampPrefix::{Off, PerLine, PerBatch}`，默认关闭，见 `HISTORY_2026.md` §3.5） |
 | **P4** 实时文件日志 | Start/Stop Log 开关；默认文件名 `LogFile_%Y-%m-%d_%H-%M-%S.txt`（chrono 现成）；**写入走独立线程 + `BufWriter`，绝不在 UI 线程 `write_all`** | `src/panels/file_log.rs` | 开启后数据实时落盘，UI 无卡顿 | 1-2 天 | ✅ 完成（落在 `src/log_file.rs`，另含目录选择与同名防截断） |
 | **P5** 实时图表 | 建议引 `egui_plot` 而非移植上游手绘代码；支持逗号分隔多通道；`stream_buffer` 处理跨包分片；样本上限可配 | `src/panels/chart.rs` | ≥4 通道实时曲线 + 自动缩放 | 2-4 天 | ✅ 完成（数据层落在 `src/chart.rs`、绘制层在 `src/panels/chart.rs`；16 通道上限、绘制点封顶 4000、缺通道断线而不补 0） |
-| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或超时 3s 静默失败**，内网环境要能跳过）；应用图标；`[profile.release] opt-level = 2`；清理未使用依赖；补文档 | `src/info.rs`、`src/update.rs`、`Cargo.toml`、`src/app_icon.rs` | 上游 33 项覆盖率 ≥ 85% | 1-2 天 | ✅ **除版本检查外全部完成**：Info 弹窗 ✅；依赖清理 ✅（移除 `tokio`、`egui-chinese-font`）；release profile ✅；应用图标 ✅（代码绘制、11 测试）。**版本检查：所有者决定不做**，`check_update_on_start` 设置项与其设置段落已一并删除（界面上不留无效开关，见 `HANDOVER.md` §3.5）。**既有 clippy 警告已于 2026-09-26 清零**（8 → 0，见 `HANDOVER.md` §3.24） |
+| **P6** 收尾 | Info 弹窗；版本检查（**默认关闭或超时 3s 静默失败**，内网环境要能跳过）；应用图标；`[profile.release] opt-level = 2`；清理未使用依赖；补文档 | `src/info.rs`、`src/update.rs`、`Cargo.toml`、`src/app_icon.rs` | 上游 33 项覆盖率 ≥ 85% | 1-2 天 | ✅ **除版本检查外全部完成**：Info 弹窗 ✅；依赖清理 ✅（移除 `tokio`、`egui-chinese-font`）；release profile ✅；应用图标 ✅（代码绘制、11 测试）。**版本检查：所有者决定不做**，`check_update_on_start` 设置项与其设置段落已一并删除（界面上不留无效开关，见 `HISTORY_2026.md` §3.5）。**既有 clippy 警告已于 2026-09-26 清零**（8 → 0，见 `HISTORY_2026.md` §3.24） |
 
 **总工期估算：10 ~ 17 个工作日**（单人，含调试与回归）。
 
 **里程碑**：P2 完成 → 覆盖率约 75%，达到"可日常使用"；**P5 完成 → 约 88%，达到"功能对齐上游"**；
 **P3 + P6 两批完成 → 约 90%，计划内功能项全部落地**（唯一明确不做的是版本检查）。
 2026-09-21 又顺手修掉一个既有缺陷（「HEX 接收 + 字节查看」同时勾选时字节视图为空，改为两者互斥，
-见 `HANDOVER.md` §3.6）。剩下的都不是功能开发：磁盘持久化实机验证（需所有者亲手跑）、
+见 `HISTORY_2026.md` §3.6）。剩下的都不是功能开发：磁盘持久化实机验证（需所有者亲手跑）、
 GPLv3 合规二选一（最低优先级）、以及「颜色 + 字节查看」的显示优先级决策
-（**已于 2026-09-24 修掉**，见 `HANDOVER.md` §3.16）。既有 clippy 警告也**已于 2026-09-26 清零**。
+（**已于 2026-09-24 修掉**，见 `HISTORY_2026.md` §3.16）。既有 clippy 警告也**已于 2026-09-26 清零**。
 
 ---
 

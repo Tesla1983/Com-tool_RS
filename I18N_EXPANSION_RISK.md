@@ -203,7 +203,7 @@ fn has_cjk(text: &str) -> bool {
 > ✅ **2026-09-24 同时落地**：本文 R 框架里 `tr` / `ru` / `pl` 已实施（总数 12 → 15）。
 > 实测证实三者的字体与复数风险均为零；但**暴露了一个 R2 之外的检测器漏洞**——
 > `columns_have_no_foreign_script` 原本缺西里尔检测器，整列 `ru` 被换成拉丁语会静默通过
-> （见 `I18N_REMAINING_LANGUAGES.md` §4 与 `HANDOVER.md` §3.10 第 3 条）。
+> （见 `I18N_REMAINING_LANGUAGES.md` §4 与 `HISTORY_2026.md` §3.10 第 3 条）。
 
 **建议**：
 - 加语言时**先看实测表**：日语**不用加字体**；韩语**必须**加（`malgun.ttf`）；
