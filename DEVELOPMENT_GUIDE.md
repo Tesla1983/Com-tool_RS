@@ -23,10 +23,10 @@ COM3 受「长测门闩」保护，COM4 是 AI 功能测试放行端口（但必
   或 `DtrEnable = true`。**没置 DTR 收不到日志不是程序的问题**，先查这一项。
   一条命令同时点名 COM3 与 COM4 时 COM3 优先。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。**356** 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。**357** 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **门禁口径（四项全绿才算过）**：`cargo fmt --check` 干净 · `cargo check --all-targets`
-  **0 warning** · `cargo test` **356 passed + 1 ignored** · `cargo clippy --all-targets`
+  **0 warning** · `cargo test` **357 passed + 1 ignored** · `cargo clippy --all-targets`
   **0 warning**。最后一项 2026-09-26 起从"0 新增"收紧为 **0 warning**——原先的口径等于
   默许 8 条历史欠账永久存在（逐条见 `HISTORY_2026.md` §3.24）。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
@@ -99,7 +99,7 @@ COM3 受「长测门闩」保护，COM4 是 AI 功能测试放行端口（但必
 | `src/strings.rs` | 界面文案表：`Strings` + `ZH` / `EN` + `Language::strings()`；`fill()` 填充 `{}` 模板；源码级守卫测试（UI 源码不许硬编码中文） |
 | `src/log_file.rs` | 实时文件日志：后台写盘线程（`LogSink`）、文件名模板渲染、同名防截断、待写队列上限 |
 | `src/chart.rs` | 实时图表数据层：原始字节 → 多通道数值序列（`ChartData`）、跨包分片、样本 FIFO、非数值计数；不依赖 `egui` |
-| `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态；连接类型单选 + 「串口参数 / 网络参数」双分支（F4）；F5 起含发送字节计数、波特率自由输入与控制线 RTS/DTR 一行 |
+| `src/sidebar.rs` | 右侧边栏；返回 `SidebarAction` 而不是在绘制过程中改状态；连接类型单选 + 「串口参数 / 网络参数」双分支（F4）；F5 起含波特率自由输入与控制线 RTS/DTR 一行（勾选框在通道未就绪时置灰，并在下面常显一行原因，见 §6 约定 60） |
 | `src/panels/mod.rs` | 面板模块声明 + 无头 UI 冒烟测试（含英文界面、已连接侧边栏、常用数据行） |
 | `src/panels/menu_bar.rs` | 顶部菜单栏（文件 / 设置 / 视图 / 文本——**没有「发送」**）；返回 `MenuAction`；各档单选（主题 / 时间戳 / 编码 / 发送格式与行尾）共用一处定义；`apply_always_on_top` 挂在 `show_menu_bar` 上（理由见 §6 约定 59） |
 | `src/panels/settings.rs` | 设置窗口：把用户偏好接到真正的控件上 |
@@ -877,6 +877,36 @@ impl eframe::App for ComTool {
       能被注入弄红，但红不红对用户**没有任何差别**（窗口创建时本来就是 Normal）。
       **判据不对着"用户会不会不满意"的就是空转**，删掉。
 
+60. **"这个控件能不能点"的判据全项目只有一条；禁用时**必须**常显说明理由**（2026-09-27，见 §3.30）。
+    - **判据统一到"通道就绪"**：`ComTool::channel_is_ready()`（`pub(crate)`）是**唯一**入口，
+      发送闸门与侧边栏的控制线勾选框都读它。⚠️ **`connected` 不是判据**——它的含义是"已经发起过
+      一次打开"（F4 为修"假阳性"专门分出来的记账位）：串口 `open()` 返回后到端口真正打开之间，
+      `connected` 为真而通道未就绪（界面显示"正在打开"）。拿它当"能不能操作"的判据，会出现
+      **控件可点、命令只能进后台队列排队、而控件已经显示成点了**——界面在说谎。这条不一致在
+      控制线勾选框上一直存在到 2026-09-27（发送闸门那边早就统一了，漏的是侧边栏）。
+    - **禁用理由要常显，不能只挂 `on_disabled_hover_text`**：不把鼠标放到那个灰框上就看不到
+      原因，用户只看到一个点不动的东西。既有的正确写法在「面板显隐」那处
+      （`if !can_hide { ui.weak(s.at_least_one_panel) }`），照它来。**同一件事不要写两处**
+      （悬停给一次、常显再给一次）——迟早一处改了一处没改；悬停留给**另一件事**
+      （比如"勾的是请求电平、不是测量值"）。
+    - **无头测试怎么断言"这就是禁用态"**：不能只断"提示语画出来了"（有人可能把
+      `add_enabled` 改成恒真而提示照旧）。正解是**在同一套默认样式里画一对参照勾选框**
+      （一个正常、一个 `add_enabled(false, …)`），读它们文字的
+      `epaint::TextShape::fallback_color` 当标尺，再与目标控件的颜色比对——**不要写死颜色常量**
+      （那是 egui 的实现细节，它一升级就假红，也说明不了"这就叫禁用态"）。
+      实测（egui 0.36.2 深色默认）：启用 `#B4B4B4FF`、禁用 `#5A5A5A80`（**连 alpha 一起**被乘 0.5）。
+      **非空转前提要写进断言**：先断 `enabled_ref != disabled_ref`，否则下面每条都拿同一个值比、
+      怎么写都过。
+    - ⚠️ **egui 0.36 的控件样式读的是上一帧同 id 的 `WidgetState`**
+      （`widget_style::checkbox_style(&classes, state)` 里 `ui.ctx().read_response(id)`）⇒ 在**同一个
+      `Context`** 里连着画"禁用 → 启用"，后一帧会拿到前一帧的状态、颜色滞后一帧。测不同状态时
+      **每个状态新建一个 `Context`**。
+    - ⚠️ **`ctx.run_ui` 要显式给 `screen_rect`**：不给的话 `Panel::right` 的可用尺寸会退化，
+      侧边栏内容可能整个落进 `is_rect_visible` 的判否侧——"文字画没画出来"这类判据会全成假红。
+    - **先量后写**：颜色能不能区分、差在哪，先用一个临时 `#[cfg(test)] mod` 打出来看，
+      确认之后再把断言写死成"与参照对相等"。跳过量测很容易写出一条"两边都取到同一个占位色、
+      怎么都通过"的空转测试。临时模块交付前删掉。
+
 
 ---
 
@@ -950,7 +980,7 @@ impl eframe::App for ComTool {
 - **UDP stays blocking on purpose** (measured, not assumed): 4000 × 60 KB datagrams to a peer that never `recv`s produced **0** failures and a worst single `send` of **0.1 ms**, while the TCP control group hung for **2 m 05 s**. So UDP has no "peer stops reading ⇒ worker wedges" path, and non-blocking there would buy an unnecessary pace loop. Residual risk: a saturated **local NIC egress** can still block `send` (untested) — see `HANDOVER.md` §5.
 - ⭐ **Every panel paints its own background — never let the window clear colour stand in for it.** A panel built with `Frame::NONE` has `fill: Color32::TRANSPARENT`: nothing is painted, and whatever `eframe::App::clear_color` returned shows through. eframe's *default* implementation returns a **hard-coded** dark gray `rgba(12,12,12,180)` and ignores the `Visuals` it is handed (its parameter is literally named `_visuals` — `eframe-0.36.2/src/epi.rs`), so any transparent area stays dark in the light theme. That is the 2026-09-24 「浅色主题下状态栏没变色」defect found by the user's own eyes: the status bar used `Frame::NONE`, so in the light theme it kept a near-black band while its labels turned `gray(80)` (`widgets.noninteractive.fg_stroke`) — dark text on a dark band, which reads as "the bar never changed colour *and* looks empty". In the dark theme the same band was `(12,12,12)` against a `panel_fill` of `gray(27)`, i.e. nearly invisible, which is why it survived so long. The status bar now uses `Frame::side_top_panel(ui.style())` — the same frame `Panel::resolve_frame` would have chosen on its own — overriding **only** the inner margin, and `ComTool::clear_color()` overrides the eframe default to return `visuals.panel_fill` as a backstop for regions no panel covers. Prefer `Frame::side_top_panel` / `Frame::central_panel` over a hand-written `.fill(ui.visuals().panel_fill)`: the value then tracks egui, and hard-coding surface colours is exactly how this bug happened. ⭐ **Why no test caught it**: they asked about dot count, label text, position and padding — none asked *what colour this panel's own background is*, and "painted nothing" is indistinguishable from "painted a transparent rect" unless you read the fill. Locked by `status_bar::tests::status_bar_background_follows_the_theme` (headless render per theme; find the full-width rect whose bottom edge is the screen's bottom edge — the panel background — and assert its fill **equals that theme's `panel_fill`**) and `app::tests::window_clear_color_follows_the_theme`. Assert **equality with the theme's fill**, never merely "the two themes differ": the weaker form is satisfied by any other hard-coded colour, which is precisely injections G2/G4 in `.workbuddy/tmp_probe_theme_bg.py`.
 - Transport-specific ignorable errors stay in that transport, not in the shared helper: `worker::is_transient` lists only the three kinds every transport shares (`TimedOut` / `WouldBlock` / `Interrupted`). Windows reports ICMP port-unreachable on a connected UDP socket as `ConnectionReset`, so `udp.rs` adds that case itself — putting it in the shared function would make serial ignore a real fault.
-- Control lines (RTS / DTR, F5): opening a port must **never** touch them. `open_connection()` only syncs the `rts` / `dtr` checkboxes to `false` and sends no `SetLineState` command — `serialport` on Windows already leaves both lines disabled on open (`windows/dcb.rs`), and pulling DTR high at open time resets a large class of dev boards while the user only wanted to look at the port. The checkbox means "**the level we requested**", not a measurement: `serialport` only offers writes, never reads, so the UI cannot know where the hardware actually drove the lines. Say that in the tooltip, the comments and the wording alike.
+- Control lines (RTS / DTR, F5): opening a port must **never** touch them. `open_connection()` only syncs the `rts` / `dtr` checkboxes to `false` and sends no `SetLineState` command — `serialport` on Windows already leaves both lines disabled on open (`windows/dcb.rs`), and pulling DTR high at open time resets a large class of dev boards while the user only wanted to look at the port. The checkbox means "**the level we requested**", not a measurement: `serialport` only offers writes, never reads, so the UI cannot know where the hardware actually drove the lines. Say that in the tooltip, the comments and the wording alike. Both checkboxes are **disabled until the channel is actually ready** — the gate is `ComTool::channel_is_ready()`, **not** `connected` (that flag only means "an open has been started", and it is true during the serial `OPENING` window, where a click would only queue a command in the worker while the box already shows as ticked). The reason they are greyed is **always visible** as a `ui.weak(...)` line under the row, matching what the panel-visibility checkboxes already did — `on_disabled_hover_text` alone is invisible unless the user happens to hover the dead box. `on_disabled_hover_text` was dropped for that reason; `on_hover_text` stays because it explains something else (requested vs measured level). Pinned by `sidebar::tests::control_line_checkboxes_follow_the_channel_not_the_connected_flag`, which compares the painted `Shape::Text::fallback_color` of "DTR" against a reference pair of enabled/disabled checkboxes drawn with the same default style (never against hard-coded colours), plus the presence/absence of the hint line; four injections confirmed it is non-vacuous (revert the gate to `connected`; make the boxes always enabled; hide the hint; always show the hint).
 - Control-line failures are **not** disconnects: `ChannelEvent::Notice` is the non-fatal channel event. `receive_data` writes a note for it and deliberately leaves `connected` alone and keeps repeat-send running, because data keeps flowing while a line toggle may have failed. Use `Notice` for new "failed but not fatal" channel reports instead of relaxing `Failed`; `Failed` / `Closed` still mean the channel is gone and stop repeat-send.
 - `ByteChannel::set_line_state(rts: Option<bool>, dtr: Option<bool>)` uses `Option` (not two bools) because the driver can only write: `None` means "leave that line alone". It has a default impl returning `Unsupported` (same precedent as `configure`); only `SerialChannel` overrides it, and TCP / UDP just ignore `WorkerCommand::SetLineState` in their command loops.
 - Which baud entry is selected lives in its **own field** (`ComTool::baud_custom: bool`), never inferred from the value. Deriving it from "is `baud_rate` in `BAUD_RATES`" collapses under a user who picks Custom and then types a value that *happens* to be listed (9600): the dropdown jumps back to that entry and the input box **vanishes under their cursor**. Click semantics have exactly one implementation, the pure `sidebar::apply_baud_pick(baud_rate, baud_custom, BaudPick)`; the drawing block only accumulates an `Option<BaudPick>` and applies it after the closure — do not mutate those fields inline inside the ComboBox. `BAUD_CUSTOM_SEED` (250000) is a **seed, not a marker**: it is substituted only when Custom is picked *and* the current value is listed; an unlisted value (e.g. 74880 restored from an old archive) must be preserved. `baud_custom` never participates in building `SerialConfig` — `baud_rate` is the only real value handed to the driver.

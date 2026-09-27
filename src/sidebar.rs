@@ -412,6 +412,13 @@ impl ComTool {
         let is_connected = self.connected;
         // "已经发起打开、但通道还没就绪"——只有串口会有这一档。
         let is_opening = self.opening();
+        // 控制线（RTS / DTR）勾选框**能不能点**。判据是"通道是否真的就绪"
+        // （与发送闸门同一条），⚠️ **不是 `is_connected`**：那一位的含义是
+        // "已经发起过一次打开"，串口在 `open()` 返回后到端口真正打开之间会短暂停在
+        // 那一档（界面显示"正在打开"）。此时点下去命令只能进后台队列排队
+        // （见 [`crate::app::ComTool::apply_line_state`] 的投递语义），
+        // 而勾选框会先显示成已勾选 ⇒ 界面在说谎。
+        let lines_controllable = self.channel_is_ready();
         let current_baud = self.baud_rate;
         let hex_mode = self.hex_view;
         let color_mode = self.color_view;
@@ -763,9 +770,13 @@ impl ComTool {
                         //
                         // 三个约束都体现在这一段里：
                         //
-                        // * 未连接时**置灰**。通道没开就没有地方投递命令，"点了没反应"
-                        //   不如一眼看出不能点；置灰的理由挂在 `on_disabled_hover_text`
-                        //   上，不让用户去猜。
+                        // * **通道没就绪时置灰**（判据 = `lines_controllable`，见它上面
+                        //   那段注释）。通道没开就没有地方投递命令，"点了没反应"不如
+                        //   一眼看出不能点；置灰的理由**常显**在勾选框下面
+                        //   （`ui.weak(line_state_hint)`），与「面板显隐」那处置灰时
+                        //   的写法一致。⚠️ 早先只用 `on_disabled_hover_text` 给理由，
+                        //   不把鼠标放上去就看不到——用户只看到一个点不动的框，
+                        //   不知道为什么。
                         // * 只画勾选框、**不画"当前电平"**。`serialport` 只提供写、不
                         //   提供读（见 [`crate::app::ComTool::rts`]），驱动回读不到引脚，
                         //   界面就绝不能假装知道自己把线拉到了哪里。措辞也照这个来：
@@ -782,25 +793,26 @@ impl ComTool {
                             ui.add_sized([70.0, 20.0], egui::Label::new(s.line_state_header));
                             let mut rts = self.rts;
                             let mut dtr = self.dtr;
-                            let rts_response =
-                                ui.add_enabled(is_connected, egui::Checkbox::new(&mut rts, "RTS"));
-                            let dtr_response =
-                                ui.add_enabled(is_connected, egui::Checkbox::new(&mut dtr, "DTR"));
+                            let rts_response = ui.add_enabled(
+                                lines_controllable,
+                                egui::Checkbox::new(&mut rts, "RTS"),
+                            );
+                            let dtr_response = ui.add_enabled(
+                                lines_controllable,
+                                egui::Checkbox::new(&mut dtr, "DTR"),
+                            );
 
                             // 先把 `changed()` 取出来：`on_hover_text` 会**消费**
                             // `Response`（它不是 `Copy`），链式调用之后再问就晚了。
                             let rts_changed = rts_response.changed();
                             let dtr_changed = dtr_response.changed();
 
-                            // 两种提示各管一段，都挂上就不用在这里写 if：
-                            // `on_hover_text` 在控件被禁用时本来就不显示（egui 的定义），
-                            // 禁用的解释交给 `on_disabled_hover_text`。
-                            rts_response
-                                .on_hover_text(s.line_state_hover)
-                                .on_disabled_hover_text(s.line_state_hint);
-                            dtr_response
-                                .on_hover_text(s.line_state_hover)
-                                .on_disabled_hover_text(s.line_state_hint);
+                            // 悬停提示只管"勾选框的含义"这一件事（勾的是请求电平、
+                            // 不是测量值）。**为什么不能操作**改由下面那行常显小字说，
+                            // 所以这里不再挂 `on_disabled_hover_text`——同一件事写两处，
+                            // 迟早一处改了一处没改。
+                            rts_response.on_hover_text(s.line_state_hover);
+                            dtr_response.on_hover_text(s.line_state_hover);
 
                             // 一次只改一根：`None` 表示"那一根不动"（见
                             // [`crate::app::ComTool::apply_line_state`]）。
@@ -811,6 +823,14 @@ impl ComTool {
                                 self.apply_line_state(None, Some(dtr));
                             }
                         });
+
+                        // 不能操作的原因**常显**在这两个勾选框下面。这一行与上面
+                        // `add_enabled(lines_controllable, …)` 读的是**同一个变量**，
+                        // 两处不可能说两套话；判据一旦退化（例如有人改回
+                        // `is_connected`），这一行会同进同出，测试据此就能抓到。
+                        if !lines_controllable {
+                            ui.weak(s.line_state_hint);
+                        }
                     } else {
                         // 网络参数：地址 + 端口。串口那一整组（端口名 / 波特率 /
                         // 数据位 / 停止位 / 校验 / 流控）在这里**整段不画**——
@@ -1715,5 +1735,178 @@ mod tests {
                 .map(|(rect, fill)| (*rect, *fill))
                 .collect::<Vec<_>>()
         );
+    }
+
+    // ——— 控制线（RTS / DTR）勾选框的置灰判据（2026-09-27）———
+
+    /// 给侧边栏/参照控件用的画面尺寸。
+    ///
+    /// 和 [`painted_frame`] 一样显式给屏幕尺寸：不给的话 `Panel::right` 拿到的可用
+    /// 尺寸会退化，侧边栏里的内容可能整个落进 `is_rect_visible` 的判否侧 ——
+    /// 那样"文字有没有画出来"这类判据就全成了假红。
+    fn sidebar_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1000.0, 700.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// 画出侧边栏，返回 **DTR 勾选框文字的颜色** 与 **「为什么不能勾」那一行是否画了出来**。
+    ///
+    /// 每次都用**全新的 `Context`**：egui 0.36 的控件样式要读**上一帧**同 id 的
+    /// `WidgetState`（`widget_style::checkbox_style(&classes, state)`），复用同一个
+    /// context 连着画「禁用 → 启用」会让后一帧拿到前一帧的状态、颜色滞后一帧。
+    /// 每次新建就没有这层交叉污染。
+    fn dtr_color_and_hint(app: &mut ComTool) -> (egui::Color32, bool) {
+        let ctx = egui::Context::default();
+        let hint = app.language.strings().line_state_hint;
+        let mut out = ctx.run_ui(sidebar_input(), |ui| {
+            let mut open = true;
+            app.show_sidebar(ui, &mut open);
+        });
+
+        let mut color = None;
+        let mut hint_painted = false;
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text) = &clipped.shape {
+                let painted = text.galley.text();
+                if painted == "DTR" {
+                    color = Some(text.fallback_color);
+                }
+                if painted == hint {
+                    hint_painted = true;
+                }
+            }
+        }
+        out.textures_delta.clear();
+
+        (
+            color.expect("侧边栏这一帧没有画出 DTR 勾选框"),
+            hint_painted,
+        )
+    }
+
+    /// 「启用 / 禁用分别长什么样」的**标尺**：画一对参照勾选框（一个正常、一个
+    /// `add_enabled(false, …)`），返回它们文字的前景色。
+    ///
+    /// **为什么不写死颜色常量**：颜色是 egui 按主题与控件状态算出来的，写死等于把
+    /// egui 的实现细节钉进断言——它一升级就假红，而且那也说明不了"这就叫禁用色"。
+    /// 拿同一套默认样式里的参照对当标尺，判据就变成"侧边栏那个框画得跟『禁用参照』一样"。
+    ///
+    /// 颜色落在 `epaint::TextShape::fallback_color` 上（galley 里写
+    /// `Color32::PLACEHOLDER` 的地方由它填，见该字段的文档）。实测：启用
+    /// `#B4B4B4FF`、禁用 `#5A5A5A80`（禁用态连 alpha 一起被乘了 0.5）。
+    fn reference_checkbox_colors() -> (egui::Color32, egui::Color32) {
+        let ctx = egui::Context::default();
+        let mut enabled = true;
+        let mut disabled = false;
+        let mut out = ctx.run_ui(sidebar_input(), |ui| {
+            ui.add(egui::Checkbox::new(&mut enabled, "REF_ENABLED"));
+            ui.add_enabled(false, egui::Checkbox::new(&mut disabled, "REF_DISABLED"));
+        });
+
+        let mut enabled_color = None;
+        let mut disabled_color = None;
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text) = &clipped.shape {
+                match text.galley.text() {
+                    "REF_ENABLED" => enabled_color = Some(text.fallback_color),
+                    "REF_DISABLED" => disabled_color = Some(text.fallback_color),
+                    _ => {}
+                }
+            }
+        }
+        out.textures_delta.clear();
+
+        (
+            enabled_color.expect("参照勾选框没画出启用那一个"),
+            disabled_color.expect("参照勾选框没画出禁用那一个"),
+        )
+    }
+
+    /// 造一个**串口**应用：`open_connection()` 走真实路径、通道用替身。
+    ///
+    /// `ready = false` 让替身扮「后台线程已经起来、端口还没打开」（串口的 `OPENING`
+    /// 那一档：`connected` 为真、通道未就绪）——这正是本轮收紧判据要治的状态。
+    fn serial_app(ready: bool) -> ComTool {
+        let (channel, handle) = crate::communicationtrait::fake::FakeChannel::new();
+        if !ready {
+            // 必须在 `open()` **之前**登记：替身由它决定"打开后是否当场就绪"。
+            handle.defer_ready();
+        }
+        let mut app = ComTool {
+            channel: Some(Box::new(channel)),
+            channel_kind: Some(ConnectionKind::Serial),
+            connection_kind: ConnectionKind::Serial,
+            selected_port: "COM_TEST".to_string(),
+            ..ComTool::default()
+        };
+        app.open_connection();
+        assert!(app.connected, "替身通道应当能打开成功");
+        assert_eq!(
+            app.channel_is_ready(),
+            ready,
+            "替身没摆成预期的那一档（ready = {ready}）"
+        );
+        app
+    }
+
+    /// **RTS / DTR 能不能点，看的是"通道就绪"，不是 `connected`。**
+    ///
+    /// 这是 2026-09-27 收的一处判据不一致：发送闸门看 `channel_is_ready()`，而这两个
+    /// 勾选框看的是 `connected`（含义只是"已经发起过一次打开"）。串口在 `open()` 返回后
+    /// 到端口真正打开之间会短暂停在前者真、后者假的那一档，那时勾选框可点、命令只能进
+    /// 后台队列排队，而勾选框**已经显示成勾上了**——界面在说谎。
+    ///
+    /// 四条断言各有分工：
+    /// ① 参照对本身必须能区分启用与禁用（否则下面的颜色断言全是空转：都拿同一个值比）；
+    /// ② 完全没连接 ⇒ 画成禁用态，**且把原因常显出来**（原先只在悬停时给）；
+    /// ③ 串口「正在打开」⇒ 同样是禁用态（老判据在这一档是可点的，所以这条会红）；
+    /// ④ 通道真的就绪 ⇒ 才是启用态，且那行原因不再出现。
+    #[test]
+    fn control_line_checkboxes_follow_the_channel_not_the_connected_flag() {
+        let (enabled_ref, disabled_ref) = reference_checkbox_colors();
+        assert_ne!(
+            enabled_ref, disabled_ref,
+            "参照的那对勾选框画出了同一个颜色 —— 拿它们做判据的断言会全部变成空转"
+        );
+
+        // ② 完全没连接：默认应用没有通道。
+        let mut idle = ComTool::default();
+        let (color, hint) = dtr_color_and_hint(&mut idle);
+        assert_eq!(
+            color, disabled_ref,
+            "没连接时 DTR 勾选框没画成禁用态（实测 {color:?}，禁用参照 {disabled_ref:?}）"
+        );
+        assert!(
+            hint,
+            "没连接时没有把「为什么不能勾」写出来 —— 用户只看到一个点不动的框"
+        );
+
+        // ③ 串口「正在打开」：`connected` 为真、通道未就绪。
+        let mut opening = serial_app(false);
+        assert!(
+            opening.connected,
+            "前提：这一档里 `connected` 必须为真 —— 老判据正是看它，所以那时勾选框可点"
+        );
+        assert!(opening.opening(), "前提：应当是「正在打开」那一档");
+        let (color, hint) = dtr_color_and_hint(&mut opening);
+        assert_eq!(
+            color, disabled_ref,
+            "串口正在打开时 DTR 勾选框可点了 —— 命令只能进后台队列排队，界面却在说已勾上"
+        );
+        assert!(hint, "「正在打开」那一档也没写出为什么不能勾");
+
+        // ④ 通道就绪：这才该是可点的。
+        let mut ready = serial_app(true);
+        let (color, hint) = dtr_color_and_hint(&mut ready);
+        assert_eq!(
+            color, enabled_ref,
+            "通道已就绪，DTR 勾选框却还是灰的（实测 {color:?}，启用参照 {enabled_ref:?}）"
+        );
+        assert!(!hint, "通道已就绪，却还在显示「连接后才能手动控制」");
     }
 }

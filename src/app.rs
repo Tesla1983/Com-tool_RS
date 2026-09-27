@@ -984,7 +984,11 @@ impl ComTool {
     /// 那正是把这次修的缺陷原样请回来。串口那三态由
     /// [`crate::serial_impl::SerialChannel`] 覆盖 [`ByteChannel::is_ready`] 提供，
     /// 网络通道走 trait 的默认实现（等价于 `is_active()`），分叉点**只有一处**。
-    fn channel_is_ready(&self) -> bool {
+    ///
+    /// **调用方**：发送闸门（`send_data` / `send_preset` / `tick_repeat_send`）与
+    /// 侧边栏的 RTS / DTR 勾选框（见 `crate::sidebar`）。后者原先用的是 `connected`，
+    /// 于是串口"正在打开"那一档里勾选框是可点的（命令只能排队）——判据统一到这条。
+    pub(crate) fn channel_is_ready(&self) -> bool {
         self.channel.as_ref().is_some_and(|c| c.is_ready())
     }
 

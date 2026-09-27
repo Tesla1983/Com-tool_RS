@@ -1891,3 +1891,75 @@ so no parent scroll will use it" 原注释仍在原位）、`eframe/src/epi.rs:2
 
 **验证**：`fmt --check` 干净 · `check --all-targets` 0 warning · `clippy --all-targets` 0 warning
 · `test` **356 passed + 1 ignored**（本轮 +2 条）。未运行本项目、未触碰串口。
+
+## 3.30 控制线勾选框：判据统一到「通道就绪」，禁用原因改为常显（2026-09-27，用户提问后动手）
+
+**用户问**：「在串口没有打开的时候，不能勾选 DTR 是正常的设计吗？」——是（见下面「为什么置灰
+是对的」）。但核对时量出**两处口径不一致**，用户看到结论后要求一并改掉。
+
+### 为什么置灰是对的（这一段是本轮保留的原设计，不是缺陷）
+
+1. **没打开的端口没有可投递命令的对象**。`apply_line_state` 在 `self.channel` 为 `None` 时只推一条
+   「设置 RTS/DTR 失败: 通道未打开」；而它是**先改勾选态、再投递**（`app.rs:1309` 起）⇒ 若放开
+   可点，勾选框会显示"已勾上"而线上毫无变化——界面在说谎，比置灰更坏。
+2. **"先勾上、等打开后生效"这条路径本来就不存在**：打开端口时代码显式不去动这两根线
+   （`app.rs:899-905`：勾选态复位为未勾选、不发任何指令），因为上电瞬间拉 DTR 会把 ESP32 这类
+   自动下载电路直接拽进复位/下载模式。允许预勾选也没有落地时机。
+3. **断开后勾选态归位**（`app.rs:1123-1124`）：端口一关"线现在是什么电平"就不可知
+   （`serialport` 只提供写、不提供读）。
+
+### 改的两处
+
+**① 判据从 `connected` 换成 `channel_is_ready()`。** 原代码
+`ui.add_enabled(is_connected, …)`，而 `is_connected` = `self.connected`，它的含义只是"已经发起过
+一次打开"（F4 为修"假阳性"专门区分出来的记账位）。串口 `open()` 返回后到端口真正打开之间会停在
+**前者真、后者假**的那一档（界面显示"正在打开"），那时勾选框是可点的，命令只能进后台队列排队，
+而勾选框已经显示成勾上了。发送闸门（`send_data` / `send_preset` / `tick_repeat_send`）早就统一到
+`channel_is_ready()` 了，这两处是漏网的。为此把 `ComTool::channel_is_ready` 从私有的 `fn` 提为
+`pub(crate)`（并补上调用方说明）。
+
+**② 禁用原因从"悬停才有"改成"常显"。** 原先挂的是 `on_disabled_hover_text(line_state_hint)`，
+不把鼠标放到那个灰框上就看不到原因——而"面板显隐"那处置灰时是**常显**一行 `ui.weak(...)`
+（`at_least_one_panel`）。两处口径不一致，改为跟后者一致：`if !lines_controllable { ui.weak(s.line_state_hint) }`。
+判据变量与 `add_enabled` 的实参**是同一个** `lines_controllable`，两处不可能说两套话。
+顺带：`on_disabled_hover_text` 撤掉（同一件事写两处迟早改漏一处），`on_hover_text(line_state_hover)`
+保留——它讲的是另一件事（勾的是"请求电平"，不是测量值）。
+
+⚠️ **没有新增文案**：两条提示都是既有条目（`line_state_hint` / `line_state_hover`），15 个语种
+不用重译、也不用重新验字形。
+
+### 判据：怎么在无头测试里断言"这就是禁用态"
+
+新增 1 条测试（356 → **357 passed**）：`sidebar::tests::control_line_checkboxes_follow_the_channel_not_the_connected_flag`。
+手法是**在同一套默认样式里画一对参照勾选框**（一个正常、一个 `add_enabled(false, …)`），读它们文字
+的 `epaint::TextShape::fallback_color` 当标尺，再与侧边栏里 "DTR" 的颜色比对：
+
+- 实测（egui 0.36.2 深色默认）：启用 `#B4B4B4FF`、禁用 `#5A5A5A80`（禁用态连 **alpha** 一起被
+  乘了 0.5）；侧边栏没连接时 "DTR" 正是 `#5A5A5A80`。
+- **为什么不写死这两个颜色**：它们由 egui 的主题 + 控件状态算出，写死等于把 egui 实现细节钉进
+  断言，一升级就假红；而且写死也说明不了"这就叫禁用态"。参照对是**自校准**的。
+- **非空转前提写进了断言**：先断 `enabled_ref != disabled_ref`，否则下面每条颜色断言都拿同一个值
+  比、怎么写都通过。
+- 四个状态覆盖：完全没连接 / 串口「正在打开」（`connected` 为真、通道未就绪）/ 通道就绪 /
+  外加"参照对本身能区分"。第二档正是老判据会放过的那一档。
+
+三条只有量出来才知道的坑：
+- **egui 0.36 的控件样式要读上一帧同 id 的 `WidgetState`**（`widget_style::checkbox_style(&classes, state)`
+  里 `ui.ctx().read_response(id)`）⇒ 在同一个 `Context` 里连着画"禁用 → 启用"，后一帧会拿到前一帧的
+  状态、颜色滞后一帧。测试里每个状态都**新建 Context**，避免交叉污染。
+- **`run_ui` 必须显式给 `screen_rect`**（沿用 `painted_frame` 的做法）：不给的话 `Panel::right` 的可用
+  尺寸退化，侧边栏内容可能整个落进 `is_rect_visible` 的判否侧，"文字画没画出来"就成了假红。
+- 量测阶段先用一个临时 `#[cfg(test)] mod` 把颜色打出来看，确认**颜色真的能区分**再写断言——
+  否则很容易写出一条"两边都取到同一个占位色、怎么都通过"的空转测试。临时模块交付前已删除。
+
+### 空转验证（四处，全部确认会红）
+
+① 判据退回 `is_connected` ⇒ 红在「串口正在打开时 DTR 勾选框可点了」；
+② `add_enabled(true, …)`（无视判据一律可点）⇒ 红在「没连接时 DTR 勾选框没画成禁用态
+（实测 `#B4_B4_B4_FF`，禁用参照 `#5A_5A_5A_80`）」——这条证明**颜色断言真的在盯启用/禁用**，
+不是只看提示语；
+③ 提示改回"只在悬停时给"（`if false`）⇒ 红在「没把为什么不能勾写出来」；
+④ 提示改成恒显（`if true`）⇒ 红在「通道已就绪，却还在显示『连接后才能手动控制』」。
+
+**验证**：`fmt --check` 干净 · `check --all-targets` 0 warning · `clippy --all-targets` 0 warning
+· `test` **357 passed + 1 ignored**（本轮 +1 条）。未运行本项目、未触碰串口。
