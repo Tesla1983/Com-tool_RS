@@ -50,6 +50,46 @@ pub(crate) const SCROLL_AREA_ID: &str = "receive_scroll";
 /// 同一列里的其它区块。
 pub(crate) const RECEIVE_SCROLL_MAX_HEIGHT: f32 = 400.0;
 
+/// 接收区滚动块的**下限**（像素）。
+///
+/// 短窗口下让它给下面的发送区让位（见 [`receive_scroll_max_height`]），但不能让到
+/// 看不见——用户至少得能读几行日志。约 4 行等宽文字的高度。
+pub(crate) const RECEIVE_SCROLL_MIN_HEIGHT: f32 = 72.0;
+
+/// 接收区这一帧能用多高：**空间充足时是上限，紧张时按剩余空间缩，但保底**。
+///
+/// `available` = 画到接收区时中央区剩下的高度（已经扣掉菜单栏 / 工具栏 / 图表 /
+/// 接收设置行 / 筛选行）；`reserved_below` = 要留给下面那块（发送区）的高度。
+///
+/// 为什么需要它（`HANDOVER.md` §5 那一行「短窗口下接收区会吃光可用高度」）：中央区
+/// 的几块是**自上而下**顺序排的，接收区用 `max_height(RECEIVE_SCROLL_MAX_HEIGHT)`
+/// 时，短窗口里它照样把 `min(400, 剩下多少)` 全吃掉，**排在它下面的发送区就被挤出
+/// 可视区**——而中央区没有滚动条，用户够不着。修法不是"把上限调小"（宽窗口会跟着
+/// 变矮），而是让上限随**实际可用高度**回落。
+///
+/// 保底 `RECEIVE_SCROLL_MIN_HEIGHT`：窗口再矮也要能读几行——那时候下面的发送区
+/// 确实可能仍被挤出一点，但那是**窗口物理高度**的限制，不是"接收区贪心"造成的。
+pub(crate) fn receive_scroll_max_height(available: f32, reserved_below: f32) -> f32 {
+    (available - reserved_below).clamp(RECEIVE_SCROLL_MIN_HEIGHT, RECEIVE_SCROLL_MAX_HEIGHT)
+}
+
+impl ComTool {
+    /// 画接收区时该用多高——把上面那些判断与 `ComTool` 的当前面板状态接起来。
+    ///
+    /// `ui.available_height()` 在这里正是"剩下的高度"：中央区是顺序布局，走到接收区
+    /// 这一句时上面几块（工具栏 / 图表 / 接收设置行 / 筛选行）都已经占过位了。
+    /// 而下面的发送区**还没画**，所以要靠 [`crate::app::send_panel_min_height`] 估计
+    /// 它至少要多高——发送区没显示时当然不用留。
+    pub(crate) fn receive_scroll_max_height(&self, ui: &Ui) -> f32 {
+        let reserved_below = if self.show_send_panel {
+            crate::app::send_panel_min_height(ui)
+        } else {
+            0.0
+        };
+        receive_scroll_max_height(ui.available_height(), reserved_below)
+    }
+}
+
 /// 用户翻到历史里阅读时，在 [`crate::app::ComTool::max_log_chars`] 之上**额外**允许
 /// 保留的字符数。
 ///
@@ -980,16 +1020,13 @@ fn show_receive_scroll(
     stick_to_bottom: bool,
     copy_all_label: &str,
     offset_y: Option<f32>,
+    max_height: f32,
 ) -> ReceiveScrollOutcome {
     let mut copy_all = false;
     // 字符数要和 `content_size` 对上：两者一个来自这份 job、一个来自它排版的结果。
     let job_chars = job.text.chars().count();
-    let mut area = capped_scroll_area(
-        ScrollAxis::Vertical,
-        SCROLL_AREA_ID,
-        RECEIVE_SCROLL_MAX_HEIGHT,
-    )
-    .stick_to_bottom(stick_to_bottom);
+    let mut area = capped_scroll_area(ScrollAxis::Vertical, SCROLL_AREA_ID, max_height)
+        .stick_to_bottom(stick_to_bottom);
     if let Some(y) = offset_y {
         area = area.vertical_scroll_offset(y);
     }
@@ -1043,6 +1080,7 @@ pub(crate) fn show_plain_receive(
     stick_to_bottom: bool,
     copy_all_label: &str,
     offset_y: Option<f32>,
+    max_height: f32,
 ) -> ReceiveScrollOutcome {
     let text_chars = text.chars().count();
     let job = egui::text::LayoutJob::simple(
@@ -1051,7 +1089,7 @@ pub(crate) fn show_plain_receive(
         ui.visuals().text_color(),
         f32::INFINITY,
     );
-    let mut area = capped_scroll_area(ScrollAxis::Both, SCROLL_AREA_ID, RECEIVE_SCROLL_MAX_HEIGHT)
+    let mut area = capped_scroll_area(ScrollAxis::Both, SCROLL_AREA_ID, max_height)
         .stick_to_bottom(stick_to_bottom);
     if let Some(y) = offset_y {
         area = area.vertical_scroll_offset(y);
@@ -1768,7 +1806,15 @@ impl ComTool {
                 // 实时日志文件、图表解析都不受影响。关掉筛选时这里是 `Cow::Borrowed`
                 // ⇒ 不复制、不扫描。
                 let (shown, matched, total) = filter_lines(&self.receive_text, &self.filter_text);
-                let out = show_plain_receive(ui, &shown, self.auto_scroll, copy_all_log, offset_y);
+                let max_height = self.receive_scroll_max_height(ui);
+                let out = show_plain_receive(
+                    ui,
+                    &shown,
+                    self.auto_scroll,
+                    copy_all_log,
+                    offset_y,
+                    max_height,
+                );
                 self.note_receive_scroll(&out);
                 self.note_filter_counts(matched, total);
             }
@@ -1803,12 +1849,16 @@ impl ComTool {
         // 补偿放在 ①（`receive_data`，裁剪在那里面）**之后**：先裁才谈得上补。
         // 这个视图会折行 ⇒ 按上一帧的可视区宽度排版被裁文本。
         let offset_y = self.take_front_trim_compensation(ui, self.receive_viewport_w);
+        // 短窗口下主动让位：把下面发送区需要的高度留出来（见 `receive_scroll_max_height`）。
+        // 空间充足时它仍然是 `RECEIVE_SCROLL_MAX_HEIGHT`，宽窗口的表现一点不变。
+        let max_height = self.receive_scroll_max_height(ui);
         let out = show_receive_scroll(
             ui,
             job,
             self.auto_scroll,
             self.language.strings().copy_all_log,
             offset_y,
+            max_height,
         );
         self.note_receive_scroll(&out);
         self.note_filter_counts(matched, total);
@@ -1846,12 +1896,16 @@ impl ComTool {
         // ③ 绘制滚动区（样式与彩色模式一致）。补偿同上：在 `receive_data` 之后、
         //    绘制之前，按折行宽度换算。
         let offset_y = self.take_front_trim_compensation(ui, self.receive_viewport_w);
+        // 短窗口下主动让位：把下面发送区需要的高度留出来（见 `receive_scroll_max_height`）。
+        // 空间充足时它仍然是 `RECEIVE_SCROLL_MAX_HEIGHT`，宽窗口的表现一点不变。
+        let max_height = self.receive_scroll_max_height(ui);
         let out = show_receive_scroll(
             ui,
             job,
             self.auto_scroll,
             self.language.strings().copy_all_log,
             offset_y,
+            max_height,
         );
         self.note_receive_scroll(&out);
         self.note_filter_counts(matched, total);

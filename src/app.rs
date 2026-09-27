@@ -625,6 +625,34 @@ pub struct ComTool {
     /// 这才让"上次勾选过置顶"能在启动时恢复）。
     #[serde(skip)]
     pub applied_always_on_top: Option<bool>,
+    /// 待发队列里还没写出去的字节数（状态栏读数）。**不落盘**。
+    ///
+    /// 每帧由 [`ComTool::poll_pending_bytes`] 从通道刷新。它是 `HANDOVER.md` §5
+    /// 「写路径瞬态错误静默重试」那条缺陷的可见面：`write` 被拒时用户有提示，
+    /// 而**队列没满却一直写不动**（对端不读、流控拉住）原先毫无痕迹——
+    /// 现在"这个数长时间不下降"就是痕迹。
+    #[serde(skip)]
+    pub pending_bytes: usize,
+    /// 「待发字节数上一次**下降**」的时刻；`None` = 当前没有停滞中的队列。
+    ///
+    /// 判据是**下降**而不是"变化"：待发量还在增加说明用户仍往队列里排东西，
+    /// 那同样不算有进展。归零时清空——队列空了就没有可等的。
+    #[serde(skip)]
+    pub pending_stall_since: Option<Instant>,
+    /// 待发字节数是否已经「停滞」（连续 [`PENDING_STALL_AFTER`] 没有下降）。
+    /// 由 [`ComTool::note_pending_bytes`] 算出，状态栏据此换色。**不落盘**。
+    ///
+    /// ⚠️ 与 `pending_bytes` 一样必须是 `pub`：别的模块（`sidebar.rs` / `panels/*`）
+    /// 大量使用 `ComTool { ..ComTool::default() }` 造测试样本，而结构体字面量的
+    /// `..base` 语法**要求字面量里出现的每个字段对当前作用域可见**——留一个私有
+    /// 字段会把那些地方全部变成 E0451（实测：45 条编译错误）。
+    #[serde(skip)]
+    pub pending_stalled: bool,
+    /// 正在进行的「发送文件」；`None` = 没在发。
+    ///
+    /// **不落盘**：它握着一个打开的文件句柄与读取进度，跨进程没有意义。
+    #[serde(skip)]
+    pub send_file: Option<SendFileJob>,
     /// 接收区筛选关键字（空 = 不筛选）。
     ///
     /// **不落盘**（与 `theme` / `auto_scroll` 那批用户偏好刻意不同）：筛选是一次排查
@@ -682,6 +710,156 @@ const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 /// `pub(crate)`：`receive.rs` 在收到 `Failed` 时要判断"是不是刚好撞到上限"，
 /// 以便只提示一次"自动重连已停止"。
 pub(crate) const MAX_RECONNECT_ATTEMPTS: u32 = 6;
+
+/// 待发字节数「多久没有下降」就算写不动了（状态栏据此把它标成警示色）。
+///
+/// 3 秒是"明显不对劲"的量级：9600 波特下 3 秒也能送走近 3 KB，正常发送时这个数
+/// 早就掉下去了；而设备侧流控拉住、对端不读时会一直停在原处。
+///
+/// **不能取更短**：一大段数据正在分包写出的过程中，这个数本来就会短暂不动几帧，
+/// 阈值太短会把"正在发"报成"卡住了"。
+pub(crate) const PENDING_STALL_AFTER: Duration = Duration::from_secs(3);
+
+/// 「发送文件」每次交给通道的最大字节数。
+///
+/// 取 4 KiB 的两个理由：**必须远小于**待发队列上限（1 MiB，见
+/// `communicationtrait::worker::MAX_PENDING_BYTES`），否则一块就占掉大半额度、
+/// 背压会变得极粗糙；也没有小到让每次系统调用都在搬几行数据。
+///
+/// ⚠️ 这个常量**不是**"读多大块"的自由选择，它是"背压能不能起作用"的前提：
+/// 曾经设想过的"整个文件一次塞进队列"正是被 1 MiB 上限当场拒掉的做法。
+pub(crate) const SEND_FILE_CHUNK: usize = 4096;
+
+/// 「发送文件」的一次推进结果。
+///
+/// 把三种结局显式写出来，是为了让调用点的 `loop` 一眼能看清"什么时候继续、
+/// 什么时候收工"——挤成 `bool` 的话"队列满（等下一帧）"与"发完了"会长得一样。
+pub(crate) enum SendFileStep {
+    /// 又有一块排进队列了，可以继续推进。
+    Progress,
+    /// 队列排不下了：本帧到此为止，**那一块原样留着**，下一帧接着试。
+    WouldBlock,
+    /// 任务结束（文件读完 / 读失败）。附带要写进接收区的说明。
+    Done(String),
+}
+
+/// 一次「发送文件」的进行状态。
+///
+/// **为什么在 UI 线程分块推进、而不是另起一个后台线程**（这是本功能最关键的取舍）：
+///
+/// * `ByteChannel::write` 的背压判定**必须在调用线程里做**（`PendingLedger` 的额度
+///   预约，见 `communicationtrait` 的模块文档与 `HANDOVER.md` §3.15 ①附）——把写操作
+///   挪到后台线程就等于绕开那条约定，"队列满⇒当场报错"会退化成又一轮静默重试；
+/// * `channel` 是 `ComTool` 独占的 `Box<dyn ByteChannel>`、`write` 还要 `&mut self`。
+///   要让别的线程拿到它就得引入共享句柄（`Arc<Mutex<..>>` 之类），那会搅动刚刚稳定
+///   下来的并发契约，收益却只是"搬走几十行循环"。
+///
+/// 每帧推进同样满足"**分块读 + 分块写**"（那是 N7 立项时就写下的硬约束），而且天然
+/// 受背压保护、零新线程、完全可单测。吞吐由**队列的消耗速度**决定而不是帧率：一次
+/// tick 会一直写到队列排不进为止。
+pub(crate) struct SendFileJob {
+    /// 数据来源。用 `Box<dyn Read + Send>` 而不是 `File`：测试要能喂一个内存源
+    /// （`Cursor`）——否则唯一的验法就是往磁盘上写临时文件。
+    source: Box<dyn std::io::Read + Send>,
+    /// 正在发送的文件路径（提示与界面显示用）。
+    pub(crate) path: std::path::PathBuf,
+    /// 文件总字节数（进度显示用）。
+    pub(crate) total: u64,
+    /// 已经**排进队列**的字节数。
+    ///
+    /// ⚠️ 含义是"交给通道了"，不是"对端收到了"——`write` 只是排队。文案里也不许
+    /// 把它说成"已送达"。
+    pub(crate) sent: u64,
+    /// 上一帧读到、但没排进队列（队列满）的那一块；下一帧**先写它**。
+    ///
+    /// 必须留着：丢掉它就是静默少发一段数据（收方拿到一个截断的文件，还无从察觉）；
+    /// 重新读则要 `seek`，而"来源能不能 seek"是另一件不该由这里假设的事。
+    carry: Option<Vec<u8>>,
+}
+
+/// 推进一次发送：读一块、写一块。**读与写各只做一次**，由调用方循环。
+///
+/// 拆成自由函数（而不是 `ComTool` 的方法）是为了让它能拿着
+/// `&mut SendFileJob` + `&mut dyn ByteChannel` 直接单测——不必造一个完整的应用，
+/// 也不必假装有一帧界面。
+pub(crate) fn step_send_file(
+    job: &mut SendFileJob,
+    channel: Option<&mut Box<dyn ByteChannel>>,
+) -> SendFileStep {
+    use std::io::Read;
+
+    // ① 这一块从哪来：优先补上一帧没排进去的
+    let chunk = match job.carry.take() {
+        Some(carried) => carried,
+        None => {
+            let mut buf = vec![0u8; SEND_FILE_CHUNK];
+            match job.source.read(&mut buf) {
+                Ok(0) => {
+                    return SendFileStep::Done(format!(
+                        "文件发送完成: {} 字节（已全部排进队列；对端何时收完不在此处可知）\n",
+                        job.sent
+                    ));
+                }
+                Ok(n) => {
+                    buf.truncate(n);
+                    buf
+                }
+                Err(e) => {
+                    return SendFileStep::Done(format!(
+                        "读取文件失败（已送出 {} 字节）: {e}\n",
+                        job.sent
+                    ));
+                }
+            }
+        }
+    };
+
+    let Some(channel) = channel else {
+        return SendFileStep::Done(format!(
+            "文件发送中止（通道不存在）: 已送出 {} 字节\n",
+            job.sent
+        ));
+    };
+
+    // ② 交给通道。`Ok` 只代表"排上队了"。
+    //
+    // ⚠️ 这里**必须克隆**：`write` 收的是 `Vec<u8>`（拿走所有权），而它在"预约额度
+    // 失败"时会把那个 Vec 直接丢掉——于是失败路径上就再也拿不回这一块了。4 KiB 的
+    // 一次拷贝相对"漏发一段数据"完全划算（而且只有队列满那一次会真的多留一份）。
+    // 项目在这里刻意不为省这一次拷贝去改 `write` 的签名：那个契约是三条通道共用的，
+    // 为了一个 UI 侧的便利改它得不偿失。
+    let len = chunk.len();
+    match channel.write(chunk.clone()) {
+        Ok(()) => {
+            job.sent += len as u64;
+            SendFileStep::Progress
+        }
+        Err(_) => {
+            // 排不进去（通道就绪时这基本就是"队列满"）。**把这一块原样留下**，
+            // 下一帧先写它——它是这一批数据里唯一还没排上队的部分。
+            job.carry = Some(chunk);
+            SendFileStep::WouldBlock
+        }
+    }
+}
+
+/// 发送区里除编辑框之外的固定开销（设置行 + 预览行 + 按钮行 + 间距，像素）。
+///
+/// 只在"短窗口下接收区让位"这一处用到（见 [`send_panel_min_height`]），是个**保守
+/// 估计**：估小了会把发送区挤出可视区（那正是要修的缺陷），估大了只是让接收区少占
+/// 几行——两种误差的方向不对称，所以宁可往大里估。
+const SEND_PANEL_CHROME: f32 = 56.0;
+
+/// 发送区**最少**要占多高——短窗口下接收区据此让位。
+///
+/// 组成：设置行 + 编辑框（至少 `MIN_SEND_VISIBLE_ROWS` 行）+ 预览行 + 按钮行。
+/// **按当前字体的真实行高算，不写死像素**：用户可以把字体档位调到"特大"，写死的
+/// 数字在那一档必然不够，发送区又会被挤出去（同一个缺陷换个档位复发）。
+pub(crate) fn send_panel_min_height(ui: &egui::Ui) -> f32 {
+    let row = ui.text_style_height(&egui::TextStyle::Monospace);
+    let body = ui.text_style_height(&egui::TextStyle::Body);
+    row * crate::send::MIN_SEND_VISIBLE_ROWS as f32 + body * 3.0 + SEND_PANEL_CHROME
+}
 
 /// 第 `failures` 次连续失败之后，下一次重连前应等待多久（**纯函数**）。
 ///
@@ -1156,6 +1334,16 @@ impl ComTool {
         // 通道没了，定时发送必须一起停：否则重连之后它会自己接着发，
         // 而用户并不知道是谁在发。
         self.stop_repeat_send();
+
+        // 「发送文件」同理，而且理由更硬：留着它等于**重连后自动把剩下的内容灌进
+        // 新连接**——收方会收到一个前一段属于旧连接的截断文件。中止时把进度念出来，
+        // 用户才知道打住的位置在哪。
+        if let Some(job) = self.send_file.take() {
+            self.push_receive_note(format!(
+                "文件发送中止（连接已关闭）: 已送出 {} 字节\n",
+                job.sent
+            ));
+        }
     }
 
     /// 用户主动断开：拆掉通道、清掉"上次连接"的记忆，并在接收区留一条提示。
@@ -1358,6 +1546,111 @@ impl ComTool {
         }
     }
 
+    /// 选一个文件并开始发送（用户在对话框里取消时什么都不做）。
+    pub fn pick_and_send_file(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(self.language.strings().send_file)
+            .pick_file()
+        else {
+            return;
+        };
+        self.start_send_file(&path);
+    }
+
+    /// 开始发送一个真实文件。打不开就当场把原因写进接收区——不静默。
+    pub fn start_send_file(&mut self, path: &std::path::Path) {
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) => {
+                self.push_receive_note(format!("打开文件失败（{}）: {e}\n", path.display()));
+                return;
+            }
+        };
+        // 拿不到长度不阻止发送（进度条会显示 0 总数），但那是异常情况：正常文件都拿得到。
+        let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+        self.begin_send_file(Box::new(file), path.to_path_buf(), total);
+    }
+
+    /// 把「发送文件」的任务挂上——`start_send_file` 与测试共用这一个落点，
+    /// 免得"真实路径挂了任务、测试路径没挂"这种两套写法漂开。
+    pub(crate) fn begin_send_file(
+        &mut self,
+        source: Box<dyn std::io::Read + Send>,
+        path: std::path::PathBuf,
+        total: u64,
+    ) {
+        self.send_file = Some(SendFileJob {
+            source,
+            path: path.clone(),
+            total,
+            sent: 0,
+            carry: None,
+        });
+        let note = format!(
+            "开始发送文件: {}（{} 字节，每 {} 字节一块）\n",
+            path.display(),
+            total,
+            SEND_FILE_CHUNK
+        );
+        self.push_receive_note(note);
+    }
+
+    /// 取消发送文件。
+    ///
+    /// ⚠️ **已经排进队列的那部分不会撤回**——它在通道自己的队列里，这里够不着。
+    /// 提示里必须说明这一点：否则用户会以为"点了取消"就等于"对方没收到"，
+    /// 而收方那边其实已经拿到了一截。
+    pub fn cancel_send_file(&mut self) {
+        let Some(job) = self.send_file.take() else {
+            return;
+        };
+        let note = format!("已取消发送文件（已送出的 {} 字节不会撤回）\n", job.sent);
+        self.push_receive_note(note);
+    }
+
+    /// 「发送文件」的推进，每帧调用一次（真正的读/写逻辑在 [`step_send_file`]）。
+    ///
+    /// 两种"停下来"必须分开对待，这是本函数的要点：
+    ///
+    /// * **通道不再就绪** ⇒ **中止任务**。连接断了就没法接着写，留着只会每帧空转；
+    ///   更要紧的是"重连之后自动接着灌数据"是必须避免的行为（见 `teardown_channel`）。
+    /// * **队列满**（通道就绪、`write` 当场返回 `Err`）⇒ 只是本帧不推进，
+    ///   **任务原样留着**，下一帧接着来。这正是背压在起作用，不是故障。
+    pub fn tick_send_file(&mut self) {
+        if self.send_file.is_none() {
+            return;
+        }
+
+        if !self.channel_is_ready() {
+            let job = self.send_file.take().expect("上面刚判过");
+            let note = format!(
+                "文件发送中止（{}尚未就绪）: 已送出 {} 字节\n",
+                self.transport_noun(),
+                job.sent
+            );
+            self.push_receive_note(note);
+            return;
+        }
+
+        // 一直推到队列排不下为止：一次 tick 里写多少块由**队列的消耗速度**决定，
+        // 而不是帧率（每帧只写一块的话，60 fps × 4 KiB 会把大文件拖成龟速）。
+        loop {
+            let step = {
+                let job = self.send_file.as_mut().expect("上面刚判过");
+                step_send_file(job, self.channel.as_mut())
+            };
+            match step {
+                SendFileStep::Progress => continue,
+                SendFileStep::WouldBlock => return,
+                SendFileStep::Done(note) => {
+                    self.send_file = None;
+                    self.push_receive_note(note);
+                    return;
+                }
+            }
+        }
+    }
+
     /// 停掉定时发送。
     ///
     /// 断开连接（正常关闭、对端断开、通道报错）时都会调用它。**"自动开始往外发数据"
@@ -1416,6 +1709,52 @@ impl ComTool {
             + usize::from(self.show_receive_panel)
             + usize::from(self.show_chart_panel)
             + usize::from(self.show_send_panel)
+    }
+
+    /// 记一帧的待发字节读数，并推进「停滞」判定。
+    ///
+    /// 刻意写成**收 `now` 与 `at` 的状态推进**、而不是自己去读时钟与通道：停滞与否
+    /// 是时间相关的行为，只有把时刻作为入参，测试才能稳定地验它（否则要么真等 3 秒、
+    /// 要么什么都断言不出来）。
+    ///
+    /// 三个分支对应三种真实情形，各自是一条"用户会不会不满意"的判据：
+    /// * `now == 0`：队列空了 ⇒ 读数与停滞状态一起归位（不能把上一轮的"卡住"留在界面上）；
+    /// * `now < 上一个读数`：**有进展** ⇒ 从这一刻重新起算（这是唯一的"顺利"信号）；
+    /// * 其余（不变 / 还在变多）：从**上一次有进展**起算，够 [`PENDING_STALL_AFTER`]
+    ///   就置停滞——"还在往里排、但一直出不去"同样要报，那正是设备不读时的样子。
+    pub fn note_pending_bytes(&mut self, now: usize, at: Instant) {
+        if now == 0 {
+            self.pending_bytes = 0;
+            self.pending_stall_since = None;
+            self.pending_stalled = false;
+            return;
+        }
+
+        if now < self.pending_bytes {
+            self.pending_stall_since = Some(at);
+            self.pending_stalled = false;
+        } else {
+            let since = *self.pending_stall_since.get_or_insert(at);
+            self.pending_stalled = at.duration_since(since) >= PENDING_STALL_AFTER;
+        }
+        self.pending_bytes = now;
+    }
+
+    /// 每帧从通道取一次待发字节数（见 [`ComTool::note_pending_bytes`]）。
+    ///
+    /// 不额外请求重绘：`ui()` 本来就按 `repaint_interval_ms` 每帧重绘，停滞提示
+    /// 到点时自然会跟着那一帧变色。再加一次 `request_repaint_after` 只会多一份空转。
+    pub fn poll_pending_bytes(&mut self) {
+        let now = self
+            .channel
+            .as_ref()
+            .map_or(0, |channel| channel.pending_bytes());
+        self.note_pending_bytes(now, Instant::now());
+    }
+
+    /// 待发字节数是否已经「停滞」——连续 [`PENDING_STALL_AFTER`] 没有下降。
+    pub fn pending_is_stalled(&self) -> bool {
+        self.pending_stalled
     }
 
     /// 把主题偏好同步给 egui——仅在与当前生效值不同时调用，避免每帧都触发
@@ -1569,6 +1908,10 @@ impl Default for ComTool {
             receive_viewport_w: 0.0,
             receive_px_per_char: 0.0,
             applied_always_on_top: None,
+            pending_bytes: 0,
+            pending_stall_since: None,
+            pending_stalled: false,
+            send_file: None,
             filter_text: String::new(),
             show_filter_row: false,
             filter_matched_lines: 0,
@@ -2021,6 +2364,12 @@ impl eframe::App for ComTool {
         // 定时发送的节拍（只在自己请求重绘的前提下工作，见该方法注释）
         self.tick_repeat_send(ui.ctx());
 
+        // 待发队列读数（状态栏那个「待发 N 字节」）——每帧取一次，见方法注释
+        self.poll_pending_bytes();
+
+        // 「发送文件」的分块推进（每次只推到队列排不下为止，不阻塞）
+        self.tick_send_file();
+
         // 主题偏好只在与当前生效值不同时下发一次
         self.apply_theme(ui.ctx());
 
@@ -2221,6 +2570,8 @@ impl ComTool {
 
             let mut do_send = false;
             let mut do_clear = false;
+            let mut do_send_file = false;
+            let mut do_cancel_file = false;
             ui.horizontal(|ui| {
                 // 「发送」是这一区的主操作 ⇒ 绿；「清空」是普通操作 ⇒ 中性灰。
                 if crate::button::primary(ui, s.send_title).clicked() {
@@ -2229,10 +2580,44 @@ impl ComTool {
                 if crate::button::standard(ui, s.clear_send_button).clicked() {
                     do_clear = true;
                 }
+                // 「发送文件」与「取消发送」共用这一处：正在发的时候**只画取消**——
+                // 同一时刻只发一个文件（再点一次"发送文件"要么覆盖任务、要么排队，
+                // 两种含义都说不清），而此刻唯一有意义的动作就是停手。
+                if self.send_file.is_some() {
+                    if crate::button::standard(ui, s.send_file_cancel).clicked() {
+                        do_cancel_file = true;
+                    }
+                } else if crate::button::standard(ui, s.send_file).clicked() {
+                    do_send_file = true;
+                }
                 if self.repeat_send && !self.connected {
                     ui.weak(s.repeat_needs_connection);
                 }
             });
+            if do_send_file {
+                self.pick_and_send_file();
+            }
+            if do_cancel_file {
+                self.cancel_send_file();
+            }
+
+            // 进度行：**只在真的在发时出现**，不占常驻高度（发送区本来就挤）。
+            // 数字是"已排进队列 / 文件总长"——不是"对方已收到"，文案与注释都不许含糊。
+            //
+            // 带上文件名（只显示末段，完整路径挂悬停）：同时在发多个文件是不可能的，
+            // 但"我刚才点的是哪个文件"这件事必须一眼可答，否则进度条在报谁的进度都不知道。
+            if let Some(job) = &self.send_file {
+                ui.horizontal(|ui| {
+                    let full = job.path.display().to_string();
+                    let name = job
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| full.clone());
+                    ui.weak(name).on_hover_text(&full);
+                    ui.weak(fill(s.send_file_progress, &[&job.sent, &job.total]));
+                });
+            }
             if enter_to_send {
                 do_send = true;
             }
@@ -3930,6 +4315,437 @@ mod tests {
         assert!(
             hint_y < marker_y,
             "筛选输入框没画在接收区上方（筛选行 y={hint_y}，接收区内容 y={marker_y}）"
+        );
+    }
+    // ——— 待发队列读数与「停滞」判定（2026-09-27，`HANDOVER.md` §5 那条缺陷）———
+
+    /// **只有「下降」才算有进展**，其余一律计时。
+    ///
+    /// 判据对着的是真实场景"设备不读、数据一直堆在队列里"：读数**不变**（对端彻底
+    /// 不读）或**还在变大**（用户继续点发送）都说明数据没出去，必须同样报出来。
+    /// 时间作为入参传入，所以这里能精确验到阈值两侧，而不是真等 3 秒。
+    #[test]
+    fn pending_stall_is_measured_from_the_last_time_the_number_fell() {
+        let t0 = Instant::now();
+        let mut app = ComTool::default();
+
+        // 队列本来是空的
+        app.note_pending_bytes(0, t0);
+        assert_eq!(app.pending_bytes, 0);
+        assert!(!app.pending_is_stalled());
+
+        // 第一次出现积压：从这一刻起算
+        app.note_pending_bytes(4096, t0);
+        assert_eq!(app.pending_bytes, 4096);
+        app.note_pending_bytes(4096, t0 + PENDING_STALL_AFTER / 2);
+        assert!(
+            !app.pending_is_stalled(),
+            "才过了一半阈值就报「卡住」——正在分包写出的数据会被误报"
+        );
+
+        // 到点仍不下降 ⇒ 停滞
+        app.note_pending_bytes(4096, t0 + PENDING_STALL_AFTER);
+        assert!(
+            app.pending_is_stalled(),
+            "队列连续 {PENDING_STALL_AFTER:?} 没有下降，界面却毫无表示——这正是 §5 那条缺陷"
+        );
+
+        // 一有下降就解除，并从那一刻重新起算
+        let t1 = t0 + PENDING_STALL_AFTER * 2;
+        app.note_pending_bytes(1024, t1);
+        assert!(!app.pending_is_stalled(), "读数明明下降了，却还报「卡住」");
+        app.note_pending_bytes(1024, t1 + PENDING_STALL_AFTER / 2);
+        assert!(
+            !app.pending_is_stalled(),
+            "下降之后才过一半阈值，不该已经算停滞（计时必须从「有进展」那一刻重起）"
+        );
+
+        // ⭐ **「还在往里排、但一直出不去」不算有进展**——这一段是两种判据的分水岭。
+        //
+        // 判据若是「读数**变化**就算有进展」，用户每多发一次就把计时归零，队列越堆
+        // 越多反而**永远不报警**——正是要修的那个场景被修没了。必须是「**下降**才算」。
+        // （这条断言专为区分两者而写：把 `<` 改成 `!=` 时它会红。）
+        app.note_pending_bytes(4096, t1 + PENDING_STALL_AFTER);
+        assert!(
+            app.pending_is_stalled(),
+            "待发量还在增长，说明数据仍然出不去，停滞不该因此解除"
+        );
+
+        // 队列清空：读数与停滞状态一起归位
+        app.note_pending_bytes(0, t1 + PENDING_STALL_AFTER * 2);
+        assert_eq!(app.pending_bytes, 0);
+        assert!(
+            !app.pending_is_stalled(),
+            "队列已经空了，却还把「卡住」留在界面上"
+        );
+    }
+    // ——— 接收区让位（2026-09-27，`HANDOVER.md` §5「短窗口下接收区会吃光可用高度」）———
+
+    /// 让位纯函数的三档：**空间充足取上限、紧张时按剩余缩、极紧保底**。
+    ///
+    /// 第一条最容易被顺手改坏：把上限直接调小（而不是让它随可用高度回落）能让短窗口
+    /// 变好，代价是**宽窗口跟着变矮**——所以这一档必须单独钉住。
+    #[test]
+    fn receive_height_budget_yields_before_it_starves_the_send_panel() {
+        use crate::receive::{
+            RECEIVE_SCROLL_MAX_HEIGHT, RECEIVE_SCROLL_MIN_HEIGHT, receive_scroll_max_height,
+        };
+
+        // 空间充足：还是上限，宽窗口的表现一点不变
+        assert_eq!(
+            receive_scroll_max_height(900.0, 160.0),
+            RECEIVE_SCROLL_MAX_HEIGHT,
+            "宽窗口下接收区不该跟着变矮"
+        );
+        // 发送区没显示：不用为它留
+        assert_eq!(
+            receive_scroll_max_height(500.0, 0.0),
+            RECEIVE_SCROLL_MAX_HEIGHT,
+            "发送区都没画，别白留一截高度"
+        );
+
+        // 紧张：就是「剩下多少减掉要给下面的」
+        assert_eq!(
+            receive_scroll_max_height(500.0, 160.0),
+            340.0,
+            "短窗口下要让位：高度应当是「可用高度 − 留给发送区的」"
+        );
+
+        // 极紧：保底，不能缩成 0 或负数（那样接收区看不见了）
+        assert_eq!(
+            receive_scroll_max_height(120.0, 160.0),
+            RECEIVE_SCROLL_MIN_HEIGHT,
+            "窗口再矮也要能读几行日志——不能让成 0 或负数"
+        );
+    }
+
+    /// **短窗口下接收区让位之后，发送区仍在屏幕上**。
+    ///
+    /// 判据就是用户会遇到的那件事：把窗口拖矮，**发送区还在不在**。中央区没有滚动条，
+    /// 一旦被挤出可视区就再也够不着了（这正是 §5 那一行记的现状）。
+    ///
+    /// 两种做法都断，缺一不可：
+    /// ① 标记串**画出来了**——只断位置的话，`Shape` 列表里留下一个越界形状也能"通过"；
+    /// ② 它的 y **落在窗口内**——只断"画出来了"的话，被挤出可视区的形状照样在列表里。
+    ///
+    /// 空转验证：把 `ComTool::receive_scroll_max_height` 改回常量
+    /// `RECEIVE_SCROLL_MAX_HEIGHT` ⇒ 矮窗口那条立刻红。
+    #[test]
+    fn short_window_keeps_the_send_panel_on_screen() {
+        /// 画完整条中央区，返回落笔的 `(文字, y)`。
+        fn central_column(app: &mut ComTool, height: f32) -> Vec<(String, f32)> {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, height),
+                )),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| app.render_central_column(ui));
+            });
+
+            let mut texts = Vec::new();
+            for clipped in &out.shapes {
+                if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                    texts.push((t.galley.text().to_owned(), t.pos.y));
+                }
+            }
+            out.textures_delta.clear();
+            texts
+        }
+
+        let s = Language::Zh.strings();
+        // 发送区里独有的一行（「将发送 N 字节」预览行），拿它当"发送区在不在"的标尺。
+        let marker = fill(s.will_send_bytes, &[&0usize]);
+
+        // ① 前提：宽窗口下它当然画得出来
+        let mut tall = ComTool::default();
+        let texts = central_column(&mut tall, 900.0);
+        assert!(
+            texts.iter().any(|(t, _)| *t == marker),
+            "宽窗口下发送区就没画出来——前提不成立，下面的断言没有意义。实际：{texts:?}"
+        );
+
+        // ② 矮窗口：让位之后发送区仍要在屏幕内
+        const SHORT: f32 = 520.0;
+        let mut short = ComTool::default();
+        let texts = central_column(&mut short, SHORT);
+        let y = texts
+            .iter()
+            .find(|(t, _)| *t == marker)
+            .map(|(_, y)| *y)
+            .unwrap_or_else(|| {
+                panic!("矮窗口下发送区整块被挤出可视区——接收区没让位。实际画出：{texts:?}")
+            });
+        assert!(
+            y < SHORT,
+            "发送区落在窗口之外（y={y} 不小于窗口高 {SHORT}）——接收区没让位"
+        );
+    }
+    // ——— 「发送文件」（N7，2026-09-27）———
+
+    /// 造一个「通道已就绪」的应用（发送文件必须先有就绪的通道）。
+    fn app_with_ready_channel() -> (ComTool, FakeHandle) {
+        let (channel, handle) = FakeChannel::new();
+        let mut app = ComTool {
+            channel: Some(Box::new(channel)),
+            channel_kind: Some(ConnectionKind::Serial),
+            connection_kind: ConnectionKind::Serial,
+            selected_port: "COM_TEST".to_string(),
+            ..ComTool::default()
+        };
+        app.open_connection();
+        assert!(app.channel_is_ready(), "前提：替身通道应当已经就绪");
+        (app, handle)
+    }
+
+    /// 推进到任务结束（给足帧数，避免把"还没推完"误判成缺陷）。
+    fn run_send_file_to_end(app: &mut ComTool) {
+        for _ in 0..1_000 {
+            app.tick_send_file();
+            if app.send_file.is_none() {
+                return;
+            }
+        }
+        panic!("推了 1000 帧还没发完——任务卡住了");
+    }
+
+    /// **分块读 + 分块写**：整份文件要变成多次 `write`，每次不超过 `SEND_FILE_CHUNK`。
+    ///
+    /// 三条判据缺一不可：
+    /// ① 写出的字节拼起来**与原文逐字节相同**（不多不少、顺序不乱）；
+    /// ② **块数 > 1**——"分块"真的发生了。整文件一次塞队列正是背压要挡的写法，而它
+    ///    在"内容对得上"这一条上照样通过，所以必须单独钉住；
+    /// ③ 每一块都不超过上限。
+    ///
+    /// 空转验证：把 `step_send_file` 改成"一次读完整份再写一次" ⇒ ② 立刻红；
+    /// 让 `carry` 在队列满时被丢掉 ⇒ 下面那条 `a_full_queue_...` 红。
+    #[test]
+    fn sending_a_file_writes_it_in_chunks_that_reassemble_exactly() {
+        // 长度刻意不是块大小的整数倍：最后一块是"零头"，能顺带验出多写/漏写。
+        let data: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+
+        let (mut app, handle) = app_with_ready_channel();
+        app.begin_send_file(
+            Box::new(std::io::Cursor::new(data.clone())),
+            std::path::PathBuf::from("memory.bin"),
+            data.len() as u64,
+        );
+        run_send_file_to_end(&mut app);
+
+        assert_eq!(
+            handle.written_bytes(),
+            data,
+            "发出去的字节与文件内容对不上（多了、少了或顺序错了）"
+        );
+
+        let writes = handle.written();
+        assert!(
+            writes.len() > 1,
+            "整个文件只写了一次——没有分块。背压挡的正是这种写法"
+        );
+        // ⚠️ 这里的 4096 是**字面量**、不是 `SEND_FILE_CHUNK`：引用实现常量的话，
+        // 谁把常量改大这条断言就自动放宽（把块改成 1 MiB 也能通过），那就成了空转。
+        // 4 KiB 是需求侧的约定（"必须分块，且远小于 1 MiB 队列上限"），该由测试自己写死。
+        assert!(
+            writes.len() >= 3,
+            "10 000 字节按 4 KiB 一块至少该分成 3 次写，实际只有 {} 次",
+            writes.len()
+        );
+        assert!(
+            writes.iter().all(|w| w.len() <= 4096),
+            "有块超过 4 KiB：{:?}",
+            writes.iter().map(|w| w.len()).collect::<Vec<_>>()
+        );
+    }
+
+    /// **队列满只暂停、不丢数据**：那一块原样留着，等通道能收时**先写它**。
+    ///
+    /// 挡的是两种"看着也能跑"的错法：把没排上去的那块丢掉（收方拿到一个中间缺一段
+    /// 的文件，谁都不会发现），或者干脆把任务清掉（等于静默取消）。
+    #[test]
+    fn a_full_queue_pauses_the_file_send_without_losing_a_byte() {
+        let data: Vec<u8> = (0..9_000u32).map(|i| (i % 241) as u8).collect();
+
+        let (mut app, handle) = app_with_ready_channel();
+        app.begin_send_file(
+            Box::new(std::io::Cursor::new(data.clone())),
+            std::path::PathBuf::from("memory.bin"),
+            data.len() as u64,
+        );
+
+        // 通道拒收 = 队列满
+        handle.reject_writes(true);
+        app.tick_send_file();
+        assert_eq!(handle.write_count(), 0, "通道在拒收，却还是写进去了？");
+        assert!(
+            app.send_file.is_some(),
+            "队列一满就把任务清掉了——那等于静默取消，用户以为还在发"
+        );
+        let job = app.send_file.as_ref().expect("上面刚断言还在");
+        assert_eq!(job.sent, 0, "没排进队列的字节不该算进进度");
+        assert!(
+            job.carry.is_some(),
+            "读到的那一块没留下来——下一帧只能丢掉它或从头再读"
+        );
+
+        // 通道恢复：必须把留下的那一块补上，且全文一字不差
+        handle.reject_writes(false);
+        run_send_file_to_end(&mut app);
+        assert_eq!(
+            handle.written_bytes(),
+            data,
+            "队列恢复之后发出去的字节与原文不符——留下的那一块没补上或补重了"
+        );
+    }
+
+    /// 通道不再就绪 ⇒ **中止任务**（不是每帧空转地留着）。
+    ///
+    /// 这一条对着的是一件真会出事的行为：任务挂着，用户重连之后它**自己接着往新连接
+    /// 里灌**剩下的内容——收方会拿到一个前半段属于旧连接的截断文件，而用户不知道谁在发。
+    /// 与定时发送同一条规矩（见 `teardown_channel`）。
+    #[test]
+    fn a_file_send_stops_when_the_channel_goes_away() {
+        let data: Vec<u8> = vec![7u8; 1_000];
+        let (mut app, handle) = app_with_ready_channel();
+        app.begin_send_file(
+            Box::new(std::io::Cursor::new(data)),
+            std::path::PathBuf::from("memory.bin"),
+            1_000,
+        );
+
+        // 让替身报告"通道没了"（不走 app 的拆装流程，专门验 tick 自己那一支）
+        handle.emit(ChannelEvent::Closed);
+        assert!(!app.channel_is_ready(), "前提：通道应当已经不就绪");
+
+        let writes_before = handle.write_count();
+        app.tick_send_file();
+        assert!(
+            app.send_file.is_none(),
+            "通道没了任务还挂着——重连之后它会自己接着灌数据"
+        );
+        assert_eq!(
+            handle.write_count(),
+            writes_before,
+            "通道都不就绪了，却还往它里面写——中止必须发生在写之前"
+        );
+    }
+
+    /// 取消发送：任务清掉，但**已经排进队列的部分撤不回来**——提示必须说清这点。
+    ///
+    /// 只推一块（用 [`step_send_file`] 而不是 `tick_send_file`）：替身通道没有背压，
+    /// 一次 tick 会把整份文件读完，"发到一半"这个状态就构造不出来了。
+    #[test]
+    fn cancelling_a_file_send_says_what_was_already_queued() {
+        let data: Vec<u8> = vec![3u8; SEND_FILE_CHUNK * 3];
+        let (mut app, handle) = app_with_ready_channel();
+        app.begin_send_file(
+            Box::new(std::io::Cursor::new(data)),
+            std::path::PathBuf::from("memory.bin"),
+            (SEND_FILE_CHUNK * 3) as u64,
+        );
+
+        {
+            let job = app.send_file.as_mut().expect("刚挂上");
+            let step = step_send_file(job, app.channel.as_mut());
+            assert!(
+                matches!(step, SendFileStep::Progress),
+                "第一块应当能顺利排上队"
+            );
+        }
+        let queued = handle.written_bytes().len();
+        assert_eq!(queued, SEND_FILE_CHUNK, "一块就是一次 write");
+
+        app.cancel_send_file();
+        assert!(app.send_file.is_none(), "取消之后任务应当没了");
+        assert_eq!(
+            handle.written_bytes().len(),
+            queued,
+            "取消把已经排进队列的数据也撤回了？——它做不到，文案里也说明了这一点"
+        );
+        assert!(
+            app.receive_text.contains("不会撤回"),
+            "取消提示没说清「已送出的部分收不回」，用户会以为对方什么都没收到。实际：{:?}",
+            app.receive_text
+        );
+    }
+
+    /// 发送区的按钮与进度行：**空闲时是「发送文件」、在发时换成「取消发送」+ 进度行**。
+    ///
+    /// 三条各自挡一件事：
+    /// ① 空闲时不该有进度行（常驻一行只是占高度，发送区本来就挤）；
+    /// ② 在发时**不能再画「发送文件」按钮**——同一时刻只发一个文件，那个按钮此刻
+    ///    按下去的含义说不清（覆盖当前任务？排队？）；
+    /// ③ 进度行要带上**文件名**，否则用户不知道这条进度在报谁。
+    #[test]
+    fn the_send_file_row_and_button_follow_the_sending_state() {
+        /// 画完整条中央区，返回落笔的 `(文字, y)`。
+        fn texts_of(app: &mut ComTool) -> Vec<(String, f32)> {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| app.render_central_column(ui));
+            });
+            let mut texts = Vec::new();
+            for clipped in &out.shapes {
+                if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                    texts.push((t.galley.text().to_owned(), t.pos.y));
+                }
+            }
+            out.textures_delta.clear();
+            texts
+        }
+
+        let s = Language::Zh.strings();
+        let progress_prefix = s.send_file_progress.split("{}").next().unwrap_or("");
+        assert!(!progress_prefix.is_empty(), "前提：这条文案应当带占位符");
+
+        // ① 空闲
+        let mut idle = ComTool::default();
+        let idle_texts = texts_of(&mut idle);
+        assert!(
+            idle_texts.iter().any(|(t, _)| t == s.send_file),
+            "空闲时没有「发送文件」按钮。实际：{idle_texts:?}"
+        );
+        assert!(
+            !idle_texts
+                .iter()
+                .any(|(t, _)| t.starts_with(progress_prefix)),
+            "没在发文件却画出了进度行。实际：{idle_texts:?}"
+        );
+
+        // ② 在发
+        let mut sending = ComTool::default();
+        sending.begin_send_file(
+            Box::new(std::io::Cursor::new(vec![0u8; 10])),
+            std::path::PathBuf::from("firmware.bin"),
+            10,
+        );
+        let sending_texts = texts_of(&mut sending);
+        assert!(
+            sending_texts.iter().any(|(t, _)| t == s.send_file_cancel),
+            "在发的时候没有「取消发送」按钮——用户没法停手。实际：{sending_texts:?}"
+        );
+        assert!(
+            !sending_texts.iter().any(|(t, _)| t == s.send_file),
+            "在发的时候还画着「发送文件」按钮——同一时刻只发一个文件，这个按钮此刻含义不明"
+        );
+        assert!(
+            sending_texts.iter().any(|(t, _)| t == "firmware.bin"),
+            "进度行没带文件名，用户不知道这条进度在报谁。实际：{sending_texts:?}"
+        );
+        let want = fill(s.send_file_progress, &[&0u64, &10u64]);
+        assert!(
+            sending_texts.iter().any(|(t, _)| *t == want),
+            "没画出进度数字 {want:?}。实际：{sending_texts:?}"
         );
     }
 }

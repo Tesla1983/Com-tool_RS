@@ -63,6 +63,8 @@ mod tests {
                 // 也就没有可补偿的东西。补偿本身由 `receive::tests` 里那条
                 // 长时间停留的回归测试覆盖。
                 None,
+                // 高度上限：这条不验布局，给默认上限即可（让位逻辑另有一条测试）。
+                crate::receive::RECEIVE_SCROLL_MAX_HEIGHT,
             );
         });
         egui::__run_test_ui(|ui| {
@@ -81,6 +83,7 @@ mod tests {
                 app.auto_scroll,
                 app.language.strings().copy_all_log,
                 None,
+                crate::receive::RECEIVE_SCROLL_MAX_HEIGHT,
             );
         });
     }

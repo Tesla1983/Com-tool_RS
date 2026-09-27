@@ -320,6 +320,16 @@ impl ByteChannel for TcpChannel {
         submit(&self.ledger, commands, bytes, "TCP")
     }
 
+    /// 待发队列里还没写出去的字节数（诊断读数，显示在状态栏）。
+    ///
+    /// 读的是 [`PendingLedger`]：额度由**调用线程**在投递前预约、由后台线程整段写完后
+    /// 归还，所以这个数就是"已经答应要发、但还没送出去"的字节。界面用它来回答
+    /// "发送看起来成功、对端却没收到"——`write` 被拒时有提示，而**没满却一直写不动**
+    /// 原先没有任何可见痕迹（`HANDOVER.md` §5「写路径瞬态错误静默重试」）。
+    fn pending_bytes(&self) -> usize {
+        self.ledger.bytes()
+    }
+
     fn configure(&mut self, settings: &dyn std::any::Any) -> io::Result<()> {
         let cfg = settings
             .downcast_ref::<NetConfig>()
@@ -688,5 +698,29 @@ mod tests {
 
         ch.close().expect("关闭应成功");
         peer.join().expect("对端线程不应 panic");
+    }
+    /// ⭐ **待发读数必须真的接上账本**（`HANDOVER.md` §5「写路径瞬态错误静默重试」的接入测试）。
+    ///
+    /// 缺陷的原样是：`write` 被拒时用户有提示，但**队列没满却一直写不动**时完全
+    /// 没有可见痕迹——界面上唯一能显示它的地方就是这条读数。
+    ///
+    /// 为什么必须**通过 trait 方法**断言（而不是直接读 `ch.ledger.bytes()`）：
+    /// 账本本身早就有别的用例覆盖，界面拿到的那个数走的是
+    /// `Box<dyn ByteChannel>` 上的 `pending_bytes()`。忘了覆盖它时 trait 的默认
+    /// 实现会**一直返回 0**——只写 `ledger.bytes()` 的断言照样全绿，那正是空转。
+    #[test]
+    fn pending_bytes_reports_what_the_ledger_holds() {
+        let ch = TcpChannel::new();
+        assert_eq!(ByteChannel::pending_bytes(&ch), 0, "没排队时读数应当是 0");
+
+        ch.ledger.reserve(4096).expect("额度充足，应当预约成功");
+
+        // 换成 trait 方法读（界面拿到的就是 `Box<dyn ByteChannel>` 上的这一条）。
+        let channel: &dyn ByteChannel = &ch;
+        assert_eq!(
+            channel.pending_bytes(),
+            4096,
+            "账本里明明压着 4096 字节，待发读数却是 0 —— 界面上那个数会是死的"
+        );
     }
 }

@@ -345,6 +345,13 @@ impl ComTool {
             }
         });
         ui.weak(s.log_note);
+        // 记录中改「文件名模板 / 输出目录」**不会切到新文件**（下次开始记录才生效）
+        // ——原先界面上一声不响：用户改完文件名、看见文件还在照旧增长，只会以为自己
+        // 改错了或改动没保存。`HANDOVER.md` §5「记录中途改配置不切换文件」要修的正是
+        // 这个"静默"。切换语义**刻意不改**：改一次配置就换新文件会留下一堆碎片。
+        if self.is_logging() {
+            ui.weak(s.log_config_locked_hint);
+        }
 
         ui.separator();
         ui.weak(s.prefs_note);
@@ -367,5 +374,78 @@ impl ComTool {
         if clear_send_presets {
             self.send_presets.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 画出设置窗口主体（`settings_body` 是抽出来的那条可测路径），返回落笔的全部文字。
+    ///
+    /// `screen_rect` 给得**很高**：这个主体套在滚动区里，视口太矮会把它后半段裁掉，
+    /// 那样"没画出来"就是假红（判据会变成在考视口高度，而不是在考界面）。
+    fn painted_settings_texts(app: &mut ComTool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 3000.0),
+            )),
+            ..Default::default()
+        };
+        let s = crate::app::Language::Zh.strings();
+        let mut out = ctx.run_ui(input, |ui| app.settings_body(ui, s));
+
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                texts.push(text_shape.galley.text().to_owned());
+            }
+        }
+        // 不清会在 drop 时 panic（假红）
+        out.textures_delta.clear();
+        texts
+    }
+
+    /// 造一个"正在记录"的状态。
+    ///
+    /// `is_logging()` 就是 `log.is_some()`，所以必须造一个真的 `LogSink`——它是
+    /// 唯一能被 `Drop` 正确收尾的形态（写盘线程要 `join`）。用临时目录，不碰用户文件。
+    fn logging_app() -> ComTool {
+        let dir = std::env::temp_dir().join("comtool-settings-hint-test");
+        std::fs::create_dir_all(&dir).expect("临时目录应当可创建");
+        let (path, file) =
+            crate::log_file::create_log_file(&dir, "hint.txt").expect("临时日志文件应当可创建");
+        ComTool {
+            log: Some(crate::log_file::LogSink::start(path, file)),
+            ..ComTool::default()
+        }
+    }
+
+    /// **记录中必须写出「改动下次生效」**（`HANDOVER.md` §5「记录中途改配置不切换文件」）。
+    ///
+    /// 两侧都要断：只断"记录中有这行字"，把它写成**常显**也会通过——那就从提示变成了
+    /// 噪音（没在记录时这行字毫无意义，还占着一行）。
+    ///
+    /// 空转验证：把 `if self.is_logging()` 去掉换成常显 ⇒ 第一条断言红；把整段删掉
+    /// 或改成 `if false` ⇒ 第二条红。
+    #[test]
+    fn log_settings_note_that_changes_apply_next_time() {
+        let hint = crate::app::Language::Zh.strings().log_config_locked_hint;
+
+        let mut idle = ComTool::default();
+        let painted = painted_settings_texts(&mut idle);
+        assert!(
+            !painted.iter().any(|t| t == hint),
+            "还没开始记录就写着「改动下次生效」——那是常驻噪音。实际：{painted:?}"
+        );
+
+        let mut logging = logging_app();
+        let painted = painted_settings_texts(&mut logging);
+        assert!(
+            painted.iter().any(|t| t == hint),
+            "正在记录，却没说「文件名与输出目录的改动下次生效」——用户改完看文件照旧增长，             会以为改动没生效。实际：{painted:?}"
+        );
     }
 }

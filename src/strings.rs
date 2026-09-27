@@ -973,6 +973,94 @@ strings! {
         "Alım arabelleğinde şu an bulunan bayt sayısı (bu bağlantının toplam alımı değil); alma alanı temizlendiğinde sıfırlanır ve üst sınırda kırpılır",
         "Число байтов, находящихся сейчас в буфере приёма (не суммарный объём за это подключение); сбрасывается при очистке области приёма и обрезается по достижении предела",
         "Liczba bajtów aktualnie znajdujących się w buforze odbioru (nie łączna suma tego połączenia); zerowana przy czyszczeniu obszaru odbioru i przycinana po osiągnięciu limitu";
+    pending_bytes_label: "待发: {} 字节", "Pending: {} B",
+        "待發: {} 位元組",
+        "送信待ち: {} バイト",
+        "Pendiente: {} bytes",
+        "In attesa: {} byte",
+        "Pendente: {} bytes",
+        "Tertunda: {} byte",
+        "En attente : {} octets",
+        "Ausstehend: {} Bytes",
+        "대기: {} 바이트",
+        "Đang chờ: {} byte",
+        "Bekleyen: {} bayt",
+        "Ожидает: {} байт",
+        "Oczekuje: {} bajtów";
+    pending_bytes_hover:
+        "已排进队列、还没写出去的字节数。这个数长时间不下降，说明设备或对端没有在接收——「发送看起来成功、对端却没收到」时，这是唯一能看到的线索",
+        "Bytes queued but not yet written out. If this number stops falling, the device or peer is not accepting data — the only visible clue when a send looks successful but nothing arrives",
+        "已排進佇列、還沒寫出去的位元組數。這個數長時間不下降，表示裝置或對端沒有在接收——「傳送看起來成功、對端卻沒收到」時，這是唯一能看到的線索",
+        "キューに入ったがまだ送信されていないバイト数です。この数が長時間減らない場合は、デバイスまたは相手側がデータを受け取っていません——送信は成功したように見えるのに対向側へ届いていないとき、唯一の手がかりになります",
+        "Bytes en cola que aún no se han escrito. Si este número no baja durante mucho tiempo, el dispositivo o el interlocutor no están aceptando datos: la única pista visible cuando el envío parece correcto pero no llega nada",
+        "Byte in coda non ancora scritti. Se questo numero non scende per molto tempo, il dispositivo o l'interlocutore non stanno accettando dati: è l'unico indizio visibile quando l'invio sembra riuscito ma non arriva nulla",
+        "Bytes em fila que ainda não foram gravados. Se este número não baixar durante muito tempo, o dispositivo ou o par não está aceitando dados — é a única pista visível quando o envio parece bem-sucedido mas nada chega",
+        "Bita yang sudah masuk antrean tetapi belum ditulis. Jika angka ini lama tidak menurun, perangkat atau lawan bicara tidak menerima data — satu-satunya petunjuk saat pengiriman tampak berhasil tetapi tidak ada yang sampai",
+        "Octets mis en file mais pas encore écrits. Si ce nombre ne baisse pas pendant longtemps, l'appareil ou le correspondant n'accepte plus de données — c'est le seul indice visible quand l'envoi semble réussir mais que rien n'arrive",
+        "Bytes, die in der Warteschlange stehen, aber noch nicht geschrieben wurden. Sinkt diese Zahl längere Zeit nicht, nimmt das Gerät oder die Gegenstelle keine Daten mehr an — der einzige sichtbare Hinweis, wenn das Senden erfolgreich aussieht, aber nichts ankommt",
+        "대기열에 들어갔지만 아직 기록되지 않은 바이트 수입니다. 이 숫자가 오랫동안 줄지 않으면 장치나 상대방이 데이터를 받지 않고 있다는 뜻입니다——전송은 성공한 것처럼 보이는데 상대방이 받지 못할 때 볼 수 있는 유일한 단서입니다",
+        "Số byte đã vào hàng đợi nhưng chưa được ghi ra. Nếu con số này lâu không giảm, thiết bị hoặc đầu kia không nhận dữ liệu — đây là manh mối duy nhất khi việc gửi có vẻ thành công mà không có gì đến",
+        "Kuyruğa girmiş ama henüz yazılmamış bayt sayısı. Bu sayı uzun süre düşmüyorsa cihaz veya karşı taraf veri kabul etmiyor demektir — gönderim başarılı görünüp karşı tarafa hiçbir şey ulaşmadığında görülebilen tek ipucu budur",
+        "Байты, поставленные в очередь, но ещё не записанные. Если это число долго не уменьшается, устройство или собеседник не принимает данные — единственная видимая подсказка, когда отправка выглядит успешной, а на другом конце ничего не приходит",
+        "Bajty w kolejce, które nie zostały jeszcze zapisane. Jeśli ta liczba długo nie spada, urządzenie lub druga strona nie przyjmuje danych — to jedyna widoczna wskazówka, gdy wysyłka wygląda na udaną, a nic nie dociera";
+    send_file: "发送文件", "Send file",
+        "傳送檔案",
+        "ファイル送信",
+        "Enviar archivo",
+        "Invia file",
+        "Enviar ficheiro",
+        "Kirim berkas",
+        "Envoyer un fichier",
+        "Datei senden",
+        "파일 보내기",
+        "Gửi tệp",
+        "Dosya gönder",
+        "Отправить файл",
+        "Wyślij plik";
+    send_file_cancel: "取消发送", "Cancel send",
+        "取消傳送",
+        "送信を中止",
+        "Cancelar envío",
+        "Annulla invio",
+        "Cancelar envio",
+        "Batalkan kirim",
+        "Annuler l'envoi",
+        "Senden abbrechen",
+        "보내기 취소",
+        "Hủy gửi",
+        "Gönderimi iptal et",
+        "Отменить отправку",
+        "Anuluj wysyłanie";
+    send_file_progress: "发送文件: {} / {} 字节", "Sending file: {} / {} bytes",
+        "傳送檔案: {} / {} 位元組",
+        "ファイル送信中: {} / {} バイト",
+        "Enviando archivo: {} / {} bytes",
+        "Invio file: {} / {} byte",
+        "A enviar ficheiro: {} / {} bytes",
+        "Mengirim berkas: {} / {} bita",
+        "Envoi du fichier : {} / {} octets",
+        "Datei wird gesendet: {} / {} Bytes",
+        "파일 전송 중: {} / {} 바이트",
+        "Đang gửi tệp: {} / {} byte",
+        "Dosya gönderiliyor: {} / {} bayt",
+        "Отправка файла: {} / {} байт",
+        "Wysyłanie pliku: {} / {} bajtów";
+    log_config_locked_hint:
+        "记录中：文件名与输出目录的改动，会在下次开始记录时生效",
+        "Recording: changes to the file name and output folder take effect the next time you start recording",
+        "記錄中：檔名與輸出目錄的變更，會在下次開始記錄時生效",
+        "記録中: ファイル名と出力先の変更は、次に記録を開始したときから有効になります",
+        "Grabando: los cambios de nombre de archivo y carpeta de salida se aplican la próxima vez que inicies la grabación",
+        "Registrazione in corso: le modifiche a nome file e cartella di output valgono dalla prossima registrazione",
+        "A gravar: as alterações de nome de ficheiro e pasta de saída só se aplicam na próxima gravação",
+        "Sedang merekam: perubahan nama berkas dan folder keluaran berlaku saat mulai merekam berikutnya",
+        "Enregistrement en cours : les changements de nom de fichier et de dossier de sortie s'appliquent au prochain démarrage",
+        "Aufzeichnung läuft: Änderungen an Dateiname und Ausgabeordner gelten beim nächsten Start",
+        "기록 중: 파일 이름과 출력 폴더 변경은 다음 기록 시작부터 적용됩니다",
+        "Đang ghi: thay đổi tên tệp và thư mục đầu ra có hiệu lực từ lần bắt đầu ghi tiếp theo",
+        "Kayıt sürüyor: dosya adı ve çıktı klasörü değişiklikleri bir sonraki kayıt başlangıcında geçerli olur",
+        "Идёт запись: изменения имени файла и папки вывода вступят в силу при следующем запуске записи",
+        "Trwa zapis: zmiany nazwy pliku i folderu wyjściowego zadziałają przy następnym rozpoczęciu zapisu";
     display_mode_line: "显示模式: {}", "Display mode: {}",
         "顯示模式: {}",
         "表示モード: {}",
@@ -3421,9 +3509,15 @@ mod tests {
     /// 越南语列**实际出现的全部字符集**。抽查找不出"某个生僻变音字符恰好缺字形"
     /// 这类问题——它会静默显示成豆腐块 □。
     ///
-    /// 字体链与 `main.rs::setup_fonts` 保持一致：微软雅黑（中文）→ tahoma（拉丁扩展）。
-    /// 雅黑缺全部 U+1EA0–U+1EF9，靠 tahoma 兜底；tahoma 若读不到（非 Windows CI），
-    /// 本测试**跳过**而不是误报。
+    /// 字体链必须与 `main.rs::setup_fonts` **逐项一致**：微软雅黑（中文）→ tahoma
+    /// （拉丁扩展）→ malgun（谚文）→ seguisym（符号）。雅黑缺全部 U+1EA0–U+1EF9，
+    /// 靠 tahoma 兜底；tahoma 若读不到（非 Windows CI），本测试**跳过**而不是误报。
+    ///
+    /// ⚠️ **2026-09-27 修**：这份清单原先只列了雅黑与 tahoma，漏掉 malgun 与
+    /// seguisym。字形检测器重写（见 [`font_has_glyph`]）之后这条测试立刻红在
+    /// `☰`（`sidebar_toggle` 那个图标）上——它确实不在雅黑/tahoma 里，而在
+    /// **seguisym** 里。漏列一个字体就是**假红**：测试在报一个用户根本不会遇到的
+    /// 缺字（界面照常显示）。清单必须跟着真实字体链走。
     #[test]
     fn every_vietnamese_character_has_a_glyph_in_the_font_chain() {
         let index = Language::ALL
@@ -3441,7 +3535,11 @@ mod tests {
         let candidates = [
             r"C:\Windows\Fonts\msyh.ttc",
             r"C:\Windows\Fonts\msyhbd.ttc",
+            r"C:\Windows\Fonts\simsun.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
             r"C:\Windows\Fonts\tahoma.ttf",
+            r"C:\Windows\Fonts\malgun.ttf",
+            r"C:\Windows\Fonts\seguisym.ttf",
         ];
         let loaded: Vec<Vec<u8>> = candidates
             .iter()
@@ -3469,25 +3567,136 @@ mod tests {
         );
     }
 
-    /// 用 `fontcull`/简易 cmap 解析太依赖外部 crate；这里只判断"字体文件里能不能
-    /// 找到这个码点"。Windows 的 TrueType 用 `cmap` 表；我们用最省事的办法：
-    /// 在字体字节里搜 UTF-16BE 码点**并**确认字体确实含 `cmap` 表头。
+    /// 在字体文件里查"这个码点有没有字形"——**真正解析 `cmap` 表**。
     ///
-    /// 这不是完美实现，但足够抓住"整个字体缺某一段"（越南语缺 1EA0–1EF9 时，
-    /// 每一个字符都找不到）。**不要**把它当成通用字形存在性判定器。
+    /// ⚠️ **本函数是 2026-09-27 重写的，旧实现是个假阳性工厂。** 旧实现在整个字体
+    /// 字节流里**直接搜该码点的 UTF-16BE 两字节**，靠"这两个字节出现过"猜字形存在。
+    /// 它有多离谱：对 `msyh.ttc`（中文字体）报"有"格拉哥里 `U+2C00`、吠陀扩展
+    /// `U+1CD0`、卢恩 `U+16A0` —— 一个中文字体不可能有这些字形，纯粹是那两个字节
+    /// 恰好出现在文件的别处。**结果就是拿它做判据的测试全部空转**（越南语那条"每个
+    /// 字符都有字形"能通过，不是因为字形齐，而是因为这个函数几乎对什么都点头）。
+    /// 它还被反过来用错过一次：本轮探针据此得出"天城文 128/128 全覆盖"的结论，
+    /// 与 `I18N_REMAINING_LANGUAGES.md` §3.1 的真实实测（四个候选字体全缺）矛盾——
+    /// 矛盾逼出了这次重写。
+    ///
+    /// 现在的实现走真正的表结构：`ttcf`（.ttc 集合）→ sfnt offset table → `cmap` →
+    /// 选一个 Unicode 子表（优先 `(3,10)` UCS-4，其次 `(3,1)` BMP，再次 platform 0）
+    /// → 在 format 4 / format 12 里查，并且**要求 glyphId != 0**（0 是 `.notdef`，
+    /// 那等于没有）。
+    ///
+    /// **解析不动时返回 `false`**（保守方向）：宁可把"其实有"报成没有（测试变红、
+    /// 有人去看一眼），也不要报成有（测试静默通过、缺陷留下）。这条与本项目对
+    /// "判据宁可假红不可假绿"的一贯要求一致。
     fn font_has_glyph(font_bytes: &[u8], c: char) -> bool {
-        // 前提：确认是 TrueType/OpenType（有 `cmap` 表）。
-        if !font_bytes.windows(4).any(|w| w == b"cmap") {
-            return false;
+        fn u16_at(b: &[u8], i: usize) -> Option<u16> {
+            b.get(i..i + 2).map(|s| u16::from_be_bytes([s[0], s[1]]))
         }
-        let cp = c as u32;
-        if cp > 0xFFFF {
-            // 基本多文种平面之外，本测试不涉及（越南语全在 BMP）。
-            return false;
+        fn u32_at(b: &[u8], i: usize) -> Option<u32> {
+            b.get(i..i + 4)
+                .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
         }
-        let be = (cp as u16).to_be_bytes();
-        // 16 位码点在 cmap 的 format 4 子表里以 big-endian 出现；直接搜。
-        font_bytes.windows(2).any(|w| w == be)
+
+        fn lookup(font_bytes: &[u8], c: char) -> Option<bool> {
+            // ① sfnt 起点：.ttc 是集合文件，真正的 offset table 在 `ttcf` 头之后
+            let sfnt = if font_bytes.starts_with(b"ttcf") {
+                u32_at(font_bytes, 12)? as usize
+            } else {
+                0
+            };
+
+            // ② 表目录里找 `cmap`
+            let num_tables = u16_at(font_bytes, sfnt + 4)? as usize;
+            let mut cmap = None;
+            for i in 0..num_tables {
+                let rec = sfnt + 12 + i * 16;
+                if font_bytes.get(rec..rec + 4).is_some_and(|s| s == b"cmap") {
+                    cmap = Some(u32_at(font_bytes, rec + 8)? as usize);
+                    break;
+                }
+            }
+            let cmap = cmap?;
+
+            // ③ 选一个 Unicode 子表
+            let n = u16_at(font_bytes, cmap + 2)? as usize;
+            let mut sub = None;
+            let mut best = 0u8;
+            for i in 0..n {
+                let rec = cmap + 4 + i * 8;
+                let pid = u16_at(font_bytes, rec)?;
+                let eid = u16_at(font_bytes, rec + 2)?;
+                let off = cmap + u32_at(font_bytes, rec + 4)? as usize;
+                let rank = match (pid, eid) {
+                    (3, 10) => 3,
+                    (3, 1) => 2,
+                    (0, _) => 1,
+                    _ => 0,
+                };
+                if rank > best {
+                    best = rank;
+                    sub = Some(off);
+                }
+            }
+            let sub = sub?;
+
+            let cp = c as u32;
+            match u16_at(font_bytes, sub)? {
+                // format 4：BMP，段查找（endCode / startCode / idDelta / idRangeOffset）
+                4 => {
+                    if cp > 0xFFFF {
+                        return Some(false);
+                    }
+                    let cp = cp as u16;
+                    let seg_x2 = u16_at(font_bytes, sub + 6)? as usize;
+                    let seg = seg_x2 / 2;
+                    let end_base = sub + 14;
+                    let start_base = end_base + seg_x2 + 2;
+                    let delta_base = start_base + seg_x2;
+                    let range_base = delta_base + seg_x2;
+                    for i in 0..seg {
+                        let end = u16_at(font_bytes, end_base + i * 2)?;
+                        if cp > end {
+                            continue;
+                        }
+                        let start = u16_at(font_bytes, start_base + i * 2)?;
+                        if cp < start {
+                            return Some(false);
+                        }
+                        let delta = u16_at(font_bytes, delta_base + i * 2)?;
+                        let range = u16_at(font_bytes, range_base + i * 2)?;
+                        let glyph = if range == 0 {
+                            cp.wrapping_add(delta)
+                        } else {
+                            let at =
+                                range_base + i * 2 + range as usize + (cp - start) as usize * 2;
+                            match u16_at(font_bytes, at)? {
+                                0 => return Some(false),
+                                g => g.wrapping_add(delta),
+                            }
+                        };
+                        return Some(glyph != 0);
+                    }
+                    Some(false)
+                }
+                // format 12：UCS-4，分段表
+                12 => {
+                    let groups = u32_at(font_bytes, sub + 12)? as usize;
+                    for i in 0..groups {
+                        let g = sub + 16 + i * 12;
+                        let lo = u32_at(font_bytes, g)?;
+                        let hi = u32_at(font_bytes, g + 4)?;
+                        let start_glyph = u32_at(font_bytes, g + 8)?;
+                        if cp >= lo && cp <= hi {
+                            return Some(cp - lo + start_glyph != 0);
+                        }
+                    }
+                    Some(false)
+                }
+                // 其它 format（0/6/13…）本测试用不到 —— 保守报 false，等有人真需要时再补。
+                _ => Some(false),
+            }
+        }
+
+        lookup(font_bytes, c).unwrap_or(false)
     }
 
     /// 每列**条目数必须相同**（宏保证了编译期一致，这里再钉一次运行期长度）。
@@ -3802,6 +4011,8 @@ mod tests {
             ("baud_custom_hint", 2),
             ("rx_bytes_label", 1),
             ("tx_bytes_label", 1),
+            ("pending_bytes_label", 1),
+            ("send_file_progress", 2),
             ("preset_full", 1),
             ("preset_count_text", 2),
             ("display_mode_line", 1),
@@ -3873,6 +4084,10 @@ mod tests {
             "filter_hint",
             "filter_clear",
             "filter_note",
+            "pending_bytes_hover",
+            "log_config_locked_hint",
+            "send_file",
+            "send_file_cancel",
         ];
         for field in plain {
             let (_, columns) = ALL
@@ -4039,6 +4254,135 @@ mod tests {
             assert!(
                 !contains_token(&source, "r\"") && !contains_token(&source, "r#\""),
                 "{relative} 里出现了原始字符串，扫描器需要相应升级"
+            );
+        }
+    }
+    /// ⭐ **字形检测器自己必须先证明不会假阳性**（2026-09-27）。
+    ///
+    /// 这条是拿血换来的。上一版 `font_has_glyph` 在字体字节流里直接搜码点的 UTF-16BE
+    /// 两字节，对中文字体 `msyh` 报"有"格拉哥里 / 吠陀扩展 / 卢恩字形——一个中文字体
+    /// 不可能有这些。**所有**拿它做判据的测试因此空转（"没有任何字符缺字形"永远成立），
+    /// 而且它还被拿去得出了一个**相反的结论**（"天城文 128/128 全覆盖"），与
+    /// `I18N_REMAINING_LANGUAGES.md` §3.1 的真实实测（四个候选字体全缺）冲突。矛盾
+    /// 逼出了检测器的重写。
+    ///
+    /// 判据两侧都断：既验"绝不该有的不许报有"，也验"确实有的必须报有"——只断前者会
+    /// 放过"谎报无"（那会把真缺陷误报成字体问题，白白折腾人）。最后两个断言用**两个
+    /// 字体恰好相反**的样本（汉字 / 泰文在 msyh 与 tahoma 里正好一有一无），那是"它
+    /// 真的在读 cmap 表"的直接证据——一个瞎点头或瞎摇头的实现过不了这一关。
+    #[test]
+    fn the_glyph_probe_is_not_a_yes_machine() {
+        let fonts = [
+            (r"C:\Windows\Fonts\msyh.ttc", "msyh"),
+            (r"C:\Windows\Fonts\tahoma.ttf", "tahoma"),
+        ];
+        let loaded: Vec<(&str, Vec<u8>)> = fonts
+            .iter()
+            .filter_map(|(path, name)| std::fs::read(path).ok().map(|b| (*name, b)))
+            .collect();
+        if loaded.is_empty() {
+            eprintln!("跳过：本机读不到字体文件（非 Windows 环境？）");
+            return;
+        }
+
+        for (c, label) in [
+            ('\u{2C00}', "格拉哥里字母"),
+            ('\u{1CD0}', "吠陀扩展"),
+            ('\u{16A0}', "卢恩字母"),
+            ('\u{10330}', "哥特字母"),
+            ('\u{12000}', "楔形文字"),
+        ] {
+            for (name, bytes) in &loaded {
+                assert!(
+                    !font_has_glyph(bytes, c),
+                    "{name} 报出它有{label}的字形——绝无可能，说明字形检测器在假阳性"
+                );
+            }
+        }
+
+        let pick = |want: &str| -> Vec<u8> {
+            loaded
+                .iter()
+                .find(|(n, _)| *n == want)
+                .unwrap_or_else(|| panic!("本机读不到 {want}"))
+                .1
+                .clone()
+        };
+        let msyh = pick("msyh");
+        let tahoma = pick("tahoma");
+
+        assert!(font_has_glyph(&msyh, '中'), "msyh 必须有汉字字形");
+        assert!(font_has_glyph(&tahoma, 'A'), "tahoma 必须有拉丁字形");
+        assert!(
+            !font_has_glyph(&tahoma, '中'),
+            "tahoma 里没有汉字——报有就是瞎点头"
+        );
+        assert!(
+            !font_has_glyph(&msyh, '\u{0E01}'),
+            "msyh 里没有泰文字形（泰文靠 tahoma）——报有就是瞎点头"
+        );
+    }
+
+    /// **字体链对候选语言的覆盖**——加 `th` / `ar` / `he` / `hi` 之前必须先看这一条。
+    ///
+    /// 实测（2026-09-27，用重写后的 [`font_has_glyph`]；字体链 =
+    /// msyh / msyhbd / simsun / simhei / tahoma / malgun / seguisym）：
+    ///
+    /// | 文字 | 字母区覆盖 | 结论 |
+    /// |---|---|---|
+    /// | 泰文 U+0E01–0E3A | 全 | ✅ 字体**已就绪**（`tahoma.ttf` 提供） |
+    /// | 阿拉伯文 U+0621–064A | 全 | ✅ 字体已就绪；但 **bidi 重排**这一层 `epaint` 没有 ⇒ 排出来是**反的**，所以不做 |
+    /// | 希伯来文 U+05D0–05EA | 全 | 同上 |
+    /// | **天城文 U+0900–097F** | **0** | ❌ **本字体链完全没有**——加 `hi` 必须先挂 `Nirmala UI` / `Mangal` |
+    ///
+    /// ⚠️ **口径是"字母区"，不是整个 Unicode 区块**——这一点踩过：拿整块
+    /// `U+0590–05FF` 算，希伯来文只到 **87/112（77%）**，看着像个缺陷，其实那 25 个
+    /// 缺口全是**本来就未分配**的码点：任何字体都不会有它们的字形，拿它们算覆盖率
+    /// 只会得到一条永远红的测试。判据要看的是"用户真会用到的那批字符"。
+    ///
+    /// 这条测试**只断言字体链已经提供的三种**，天城文不进断言：它现在的确是 0，但那
+    /// 是"尚未做的先决条件"，不是缺陷——把它断言成"必须缺"等于把缺陷固化成预期，
+    /// 将来补上字体反而要改测试。
+    ///
+    /// 为什么值得留成正式测试：它把"字体够不够"从一次性实测变成持续保证。将来谁动
+    /// `main.rs::setup_fonts`（换字体、少挂一个回退档），这里会立刻红，而不是等真加了
+    /// 那种语言、用户看到满屏方框才发现。
+    #[test]
+    fn font_chain_covers_the_scripts_it_already_provides() {
+        let candidates = [
+            r"C:\Windows\Fonts\msyh.ttc",
+            r"C:\Windows\Fonts\msyhbd.ttc",
+            r"C:\Windows\Fonts\simsun.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
+            r"C:\Windows\Fonts\tahoma.ttf",
+            r"C:\Windows\Fonts\malgun.ttf",
+            r"C:\Windows\Fonts\seguisym.ttf",
+        ];
+        let loaded: Vec<Vec<u8>> = candidates
+            .iter()
+            .filter_map(|path| std::fs::read(path).ok())
+            .collect();
+        if loaded.is_empty() {
+            eprintln!("跳过：本机读不到字体文件（非 Windows 环境？）");
+            return;
+        }
+
+        // 字母区（不是整块）：辅音 / 字母 / 元音符号这些用户真会用到的字符。
+        for (label, lo, hi) in [
+            ("泰文", 0x0E01u32, 0x0E3Au32),
+            ("阿拉伯文", 0x0621, 0x064A),
+            ("希伯来文", 0x05D0, 0x05EA),
+        ] {
+            let all: Vec<char> = (lo..=hi).filter_map(char::from_u32).collect();
+            let covered = all
+                .iter()
+                .filter(|c| loaded.iter().any(|b| font_has_glyph(b, **c)))
+                .count();
+            let pct = covered * 100 / all.len();
+            assert!(
+                pct >= 90,
+                "{label}（U+{lo:04X}–{hi:04X}）的字母区在字体链里只覆盖 {covered}/{}（{pct}%）——换过字体链？掉下去之后加该语言会满屏方框 □",
+                all.len()
             );
         }
     }

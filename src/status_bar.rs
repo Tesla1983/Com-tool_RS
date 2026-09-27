@@ -264,6 +264,22 @@ impl ComTool {
             .on_hover_text(s.rx_bytes_hover);
         ui.label(fill(s.tx_bytes_label, &[&tx_bytes]))
             .on_hover_text(s.tx_bytes_hover);
+
+        // 待发队列读数（2026-09-27，`HANDOVER.md` §5「写路径瞬态错误静默重试」）。
+        //
+        // **只在真有积压时出现**：0 的时候显示"待发 0 字节"只是噪音（绝大多数时间
+        // 都是 0，状态栏宽度本来就紧）；而它要回答的问题恰恰是"有东西没出去"。
+        //
+        // **停滞时换警示色**：只给一个数字，用户得盯着它才知道没动；颜色一变就是
+        // "现在不对劲"。判据与配色都由 `ComTool` 给，这里只负责画。
+        if self.pending_bytes > 0 {
+            let text = fill(s.pending_bytes_label, &[&self.pending_bytes]);
+            let mut rich = egui::RichText::new(text);
+            if self.pending_is_stalled() {
+                rich = rich.color(ui.visuals().warn_fg_color);
+            }
+            ui.label(rich).on_hover_text(s.pending_bytes_hover);
+        }
     }
 
     /// 量出状态栏那一行需要多宽（用于水平居中）。
@@ -861,5 +877,130 @@ mod tests {
         }
         out.textures_delta.clear();
         circles
+    }
+    /// 画出的**文字用的是什么颜色**。
+    ///
+    /// ⚠️ 必须**两处都看**，只看 `fallback_color` 会漏掉本用例要验的那一半（实测踩过）：
+    /// * `ui.label(...)` 这类默认着色的文字，颜色落在 `TextShape::fallback_color` 上；
+    /// * 而 `RichText::new(x).color(c)`（待发读数停滞时就是这个）走的是 galley 里
+    ///   section 的 `color`，`fallback_color` **原样不变**——于是"换了色"在只读
+    ///   `fallback_color` 的断言里看不出来（实测两者都是 `#8C8C8CFF`，测试假绿）。
+    ///
+    /// 取 section 色时遇到 `PLACEHOLDER` 才回退到 `fallback_color`，与 epaint 的
+    /// 填充规则一致。
+    fn painted_text_color(text_shape: &egui::epaint::TextShape) -> egui::Color32 {
+        text_shape
+            .galley
+            .job
+            .sections
+            .first()
+            .map(|section| section.format.color)
+            .filter(|color| *color != egui::Color32::PLACEHOLDER)
+            .unwrap_or(text_shape.fallback_color)
+    }
+
+    /// 画出状态栏，返回落笔的 `(文字, 颜色)` 与**当帧的警示色**。
+    ///
+    /// 警示色从**同一帧的 `ui.visuals()`** 取，而不是写死一个色值——写死等于把主题的
+    /// 实现细节钉进断言，换个主题就假红，而且那也说明不了"警示色是什么"。
+    fn painted_labels_with_warn(
+        app: &mut ComTool,
+    ) -> (Vec<(String, egui::Color32)>, egui::Color32) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let mut warn = None;
+        let mut out = ctx.run_ui(input, |ui| {
+            warn = Some(ui.visuals().warn_fg_color);
+            app.show_status_bar(ui);
+        });
+
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                texts.push((
+                    text_shape.galley.text().to_owned(),
+                    painted_text_color(text_shape),
+                ));
+            }
+        }
+        // 不清会在 drop 时 panic（假红）
+        out.textures_delta.clear();
+        (texts, warn.expect("绘制过程中应当拿得到 visuals"))
+    }
+
+    /// ⭐ **状态栏真的把待发读数画了出来，并在停滞时换色**（2026-09-27）。
+    ///
+    /// 走的是**真实链路**：替身通道摆出积压 → `poll_pending_bytes()` → `show_status_bar()`。
+    /// 三条判据各对应一件用户能感知的事：
+    /// ① 没积压时**不出现**——常驻一个"待发 0 字节"只是噪音，且它要回答的问题恰恰是
+    ///    "有东西没出去"；
+    /// ② 有积压时出现，且**数字是本帧真实值**（不是画了标签却恒为 0）；
+    /// ③ 停滞时**颜色与未停滞时不同**——只给数字不变色，用户得盯着它才看得出没动，
+    ///    那等于没提示。
+    ///
+    /// 空转验证：把 `if self.pending_bytes > 0` 改成 `false` ⇒ ② 立刻红；把
+    /// `pending_is_stalled()` 那一段去掉 ⇒ ③ 红；让 `poll_pending_bytes` 不读通道
+    /// （恒 0）⇒ ② 红。
+    #[test]
+    fn status_bar_shows_pending_bytes_and_turns_warn_when_stalled() {
+        use crate::communicationtrait::fake::FakeChannel;
+
+        let zh = crate::app::Language::Zh.strings();
+        let (channel, handle) = FakeChannel::new();
+        let mut app = ComTool {
+            channel: Some(Box::new(channel)),
+            channel_kind: Some(ConnectionKind::Serial),
+            connection_kind: ConnectionKind::Serial,
+            selected_port: "COM_TEST".to_string(),
+            ..ComTool::default()
+        };
+        app.open_connection();
+        assert!(app.channel_is_ready(), "前提：替身通道应当已经就绪");
+
+        // ① 队列是空的：那条读数不该出现
+        let (labels, _) = painted_labels_with_warn(&mut app);
+        let zero = crate::strings::fill(zh.pending_bytes_label, &[&0usize]);
+        assert!(
+            !labels.iter().any(|(t, _)| *t == zero),
+            "队列是空的却画出了待发读数（那是常驻噪音）。实际：{labels:?}"
+        );
+
+        // ② 有积压：读数出现，而且用的是本帧真实值
+        handle.set_pending(4096);
+        app.poll_pending_bytes();
+        let want = crate::strings::fill(zh.pending_bytes_label, &[&4096usize]);
+        let (labels, warn) = painted_labels_with_warn(&mut app);
+        let calm_color = labels
+            .iter()
+            .find(|(t, _)| *t == want)
+            .map(|(_, c)| *c)
+            .unwrap_or_else(|| panic!("状态栏没画待发读数 {want:?}。实际：{labels:?}"));
+        assert_ne!(
+            calm_color, warn,
+            "积压刚出现就被画成警示色了 —— 还没到「卡住」就不该报警"
+        );
+
+        // ③ 停滞：同一个读数换成警示色
+        app.note_pending_bytes(
+            4096,
+            std::time::Instant::now() + crate::app::PENDING_STALL_AFTER,
+        );
+        let (labels, warn) = painted_labels_with_warn(&mut app);
+        let stalled_color = labels
+            .iter()
+            .find(|(t, _)| *t == want)
+            .map(|(_, c)| *c)
+            .expect("停滞时读数应当还在，不该消失");
+        assert_ne!(
+            stalled_color, calm_color,
+            "待发读数已停滞，颜色却没变 —— 用户看不出「卡住了」"
+        );
+        assert_eq!(stalled_color, warn, "停滞时应当用主题的警示色");
     }
 }

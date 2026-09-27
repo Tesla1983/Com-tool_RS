@@ -23,10 +23,10 @@ COM3 受「长测门闩」保护，COM4 是 AI 功能测试放行端口（但必
   或 `DtrEnable = true`。**没置 DTR 收不到日志不是程序的问题**，先查这一项。
   一条命令同时点名 COM3 与 COM4 时 COM3 优先。
 - **默认允许**：`cargo fmt` / `cargo check --all-targets` / `cargo test` / `cargo clippy` /
-  `cargo build` 等不启动 GUI、不触碰串口的命令。**370** 条测试全部不需要串口硬件，
+  `cargo build` 等不启动 GUI、不触碰串口的命令。**385** 条测试全部不需要串口硬件，
   所有验收一律以这些命令为准。
 - **门禁口径（四项全绿才算过）**：`cargo fmt --check` 干净 · `cargo check --all-targets`
-  **0 warning** · `cargo test` **370 passed + 1 ignored** · `cargo clippy --all-targets`
+  **0 warning** · `cargo test` **385 passed + 1 ignored** · `cargo clippy --all-targets`
   **0 warning**。最后一项 2026-09-26 起从"0 新增"收紧为 **0 warning**——原先的口径等于
   默许 8 条历史欠账永久存在（逐条见 `HISTORY_2026.md` §3.24）。
 - **确实需要运行时**：停下来说明原因并请求批准，由项目所有者自行运行；不得"先跑再报"。
@@ -931,6 +931,61 @@ impl eframe::App for ComTool {
       `#[serde(skip)]`（"启动后日志看起来是空的"极难自查）；而只要筛选在生效，命中数**一直显示**，
       包括把输入框收起来的时候——否则"日志被筛过"在界面上没有任何解释。
 
+62. **"卡住"必须在界面上有痕迹——把不可见的状态变成可见的**（2026-09-27，P3 三条缺陷，见 §3.33）。
+    三条里两条是同一个病：**行为其实一直存在，只是用户看不见**。"队列没满却写不动"与"记录中
+    改配置不生效"原先都得靠用户自己盯着猜。
+    - **诊断读数只在"有事"时出现**：状态栏的「待发 N 字节」只在 `> 0` 时画——0 的时候显示它只是
+      噪音，而它要回答的问题恰恰是"有东西没出去"。
+    - ⭐ **判据判的是"有没有进展"，不是"有没有变化"**：待发量的**下降**才算进展。写成"变化即进展"
+      的话，用户每多发一次就把停滞计时归零，队列越堆越多反而**永远不报警**——正是要修的场景被修没了。
+      测试里必须有一对断言专门区分这两种写法（把 `<` 改成 `!=` 会红）。
+    - **时间相关的行为要把时刻作为入参**（`note_pending_bytes(now, at)`），否则测试要么真等 3 秒、
+      要么什么都断言不出来。
+    - **"静默"本身就是缺陷**：记录中改配置不切换文件是**正确**的语义（改一次就换文件会留一堆碎片），
+      缺的只是"说一声"。补提示即可，**不要顺手改语义**。提示同样要**只在成立时出现**——常显就成噪音。
+    - **让某个区域让位时，上限要随可用空间回落，而不是把常量调小**：调小常量会让宽窗口一起变矮。
+      `receive_scroll_max_height` 写成 `(available - reserved_below).clamp(下限, 上限)`，而"要预留多少"
+      按**当前字体的真实行高**估（`text_style_height`），不写死像素——写死的话字体档位调到「特大」
+      时同一个缺陷会复发。
+    - ⚠️ **新增 `pub(crate)` 字段会让所有外部模块的 `ComTool { ..Default::default() }` 报 E0451**
+      （结构体字面量的 `..base` 语法要求出现的每个字段对当前作用域可见）。实测 45 条编译错误。
+      这个项目里 `ComTool` 的字段因此基本都是 `pub`。
+
+63. **「发送文件」：分块推进，且"没排进队列的那一块"绝不能丢**（2026-09-27，N7，见 §3.34）。
+    - **在 UI 线程分块推进，不要另起线程**。`ByteChannel::write` 的背压判定**必须在调用线程**做
+      （`PendingLedger` 的额度预约）——把写挪到后台线程等于绕开那条约定；而且 `channel` 是
+      `ComTool` 独占的 `Box<dyn ByteChannel>`、`write` 还要 `&mut self`，要让别的线程拿到它就得
+      引进共享句柄，搅动刚稳定的并发契约。每次 tick 读一块写一块，**一直推到队列排不下为止**
+      ——这样吞吐由**队列的消耗速度**决定，不是帧率。
+    - ⭐ **`write` 拿走 `Vec<u8>` 的所有权，失败时会把它丢掉**，所以"留着这一块下帧再写"只能靠
+      **克隆**（4 KiB，代价可忽略）。不克隆就得丢掉重读——丢了是静默少发一段数据（收方拿到一个
+      中间缺一段的文件，谁也发现不了），重读要 `seek` 而来源不一定可 seek。
+    - **两种"停下来"要分开处理**：**通道不 ok 了 ⇒ 中止任务**（留着的话重连之后它会自己接着灌，
+      收方拿到一个前半段属于旧连接的截断文件，而用户不知道谁在发——与定时发送同一条规矩）；
+      **队列满 ⇒ 只暂停**（那正是背压在起作用，不是故障）。
+    - **取消不撤回已经排进队列的部分**（它在通道自己的队列里，够不着），提示里必须写明。
+    - 进度数字的含义是"**已排进队列**"，**不是"对端已收到"**——文案与注释都不许含糊。
+
+64. ⭐⭐ **任何充当"判据"的辅助函数，都必须先用反向样本证明它不会假阳性**（2026-09-27，
+    `HISTORY_2026.md` §3.35 ②）。本轮最贵的教训，值得单独成条。
+    - **事故**：测试里的 `font_has_glyph` 实现是"在字体字节流里直接搜这个码点的 UTF-16BE
+      两字节"——**根本没查 cmap 表**。实测它对中文字体 `msyh` 报"有"格拉哥里 / 吠陀扩展 /
+      卢恩字形（一个中文字体不可能有这些，纯粹是那两个字节恰好出现在文件别处）。
+    - **两层后果**：① **所有拿它做判据的测试全部空转**——越南语那条"每个字符都有字形"永远成立
+      （注入验证时看得清清楚楚：把检测器改成恒 `true`，那条测试**照样通过**）；
+      ② 它还被**反过来用错**了一次：本轮探针据此得出"天城文 128/128 全覆盖"，而真实实测是
+      **四个候选字体全缺**。若直接把那个结论写进文档，就把一条错的可行性判断钉进了项目。
+    - **规矩**：写出任何 `has_*` / `is_*` / `can_*` / `fits_*` 之类的判据辅助后，**先给它喂几个
+      "答案已知为否"的样本**，确认它真的会说"否"。**能区分**才算能用——最好的证据是**两个样本
+      给出相反答案**（汉字在 msyh 有、在 tahoma 没有；泰文反过来），那才说明它真在读数据，
+      而不是在瞎点头。这条测试要**留下**（`the_glyph_probe_is_not_a_yes_machine`），它是检测器
+      的守门人。
+    - **同族坑**：判据依赖的"输入清单"漏了项也是**假红**——越南语那条测试的字体清单原先漏掉
+      `malgun` / `seguisym`，重写检测器后立刻红在 `☰`（它确实在 `seguisym` 里、界面正常显示）。
+      清单必须与真实来源（`main.rs::setup_fonts`）**逐项一致**。
+    - **口径要对着"用户真会用到的那批输入"**：按整个 Unicode 区块算覆盖率，希伯来文只有
+      87/112（77%）——看着像缺陷，其实那 25 个缺口全是**本就未分配**的码点。换成"字母区"才对。
+
 ---
 
 ## 7. 附录：逐模块约定与 egui 硬事实（英文，2026-09-26 从 `AGENTS.md` 迁来）
@@ -944,9 +999,79 @@ impl eframe::App for ComTool {
 "实测出来的数字"，错一个数字比读着费劲严重得多。**中文口径以 §6 的约定为准；
 两者若冲突，说明其中一份已经过期，请纠正而不是绕过。**
 
-**⚠️ 已知的重复**：本附录与 §6 存在部分重叠（例如 `receive_at_bottom` / `trim_budget`
-在 §6 第 58 条也有）。合并去重尚未做——那需要逐条比对判断"哪份更新"，属于独立的
-一轮工作，不做完就删任何一份都会丢信息。
+**⚠️ 本附录与 §6 重叠，但两份都**不能删**——这里给出**分工**与**对应关系**。**
+
+**分工**（2026-09-27 标定）：
+
+| | 内容性质 | 组织方式 | 语言 |
+|---|---|---|---|
+| **§6** | 规则的**规范表述**（"该怎么做"） | 编号（可直接引用"约定 52"） | 中文 |
+| **§7** | 逐**模块**的实现说明 + **实测数字**（"为什么这么做、量出来是多少"） | 按主题成条 | 英文（原文照搬，未翻译） |
+
+**冲突时以 §6 为准**：§7 是从 `AGENTS.md` 整段迁来的历史快照，§6 是持续维护的那一份。
+遇到两者不一致，说明 §7 那一条已经过期——**请改掉，不要绕过**。
+
+**为什么没有做"逐条删除重复"**：§7 那 68 条里有 **47 条**与 §6 有交集，但交集几乎都是
+"同一条规则的两种写法"，而 §7 那一边**额外带着只有那里才有的实测数字**（例如
+`Plot::height(220)` 实测越界 131 pt、TCP 阻塞写导致同一片重发 126 遍、`TextStyle::Body`
+实测 13.0）。删掉重复句就会连带删掉这些数字，那是**丢信息**。所以这里做的是**标定**：
+下表把每一处重叠指出来，读者不必再猜"该看哪一份、另一份是不是过期了"。
+
+**重叠对应表**（脚本按"共同出现的代码标识符 ≥3 个"扫出来的；§7 条目序号 = 本附录
+里 `- ` 开头条目的顺序号）：
+
+| §7 条目 | 主题（首句摘要） | 对应的 §6 约定 |
+|---|---|---|
+| §7 第 2 条 | Module map: | §6 第 50、55、58 条 |
+| §7 第 4 条 | Writing to the port is deliberately incr | §6 第 9 条 |
+| §7 第 6 条 | Receive output has mirrored state: `rece | §6 第 11、61 条 |
+| §7 第 7 条 | Receive logs are bounded by `max_log_cha | §6 第 11 条 |
+| §7 第 8 条 | The timestamp prefix (`TimestampPrefix`: | §6 第 27 条 |
+| §7 第 9 条 | The three display toggles (`hex_view` /  | §6 第 28、44、57 条 |
+| §7 第 10 条 | Every consumer of the display mode must  | §6 第 11、28、52 条 |
+| §7 第 11 条 | Every append to a receive mirror must al | §6 第 18 条 |
+| §7 第 12 条 | Real-time file logging writes on its own | §6 第 17、20 条 |
+| §7 第 13 条 | Logging state has a single source of tru | §6 第 19 条 |
+| §7 第 18 条 | Chart drawing is capped: `panels/chart.r | §6 第 23 条 |
+| §7 第 19 条 | The chart's plot height is a fixed 220;  | §6 第 23、56、57 条 |
+| §7 第 20 条 | `Plot` and a `ScrollArea` both read `smo | §6 第 57 条 |
+| §7 第 21 条 | Do not split one trait across two `impl` | §6 第 57 条 |
+| §7 第 22 条 | There is exactly one way to establish a  | §6 第 33 条 |
+| §7 第 26 条 | `open_connection()` must not write the s | §6 第 37、40 条 |
+| §7 第 27 条 | The pending-send queue is bounded, and t | §6 第 51 条 |
+| §7 第 28 条 | Reconnect uses exponential backoff: `rec | §6 第 37、40 条 |
+| §7 第 29 条 | `channel` and `channel_kind` live and di | §6 第 34 条 |
+| §7 第 31 条 | The connect button is self-drawn — keep  | §6 第 48、54、55 条 |
+| §7 第 32 条 | The connect button's colour reports what | §6 第 54 条 |
+| §7 第 33 条 | The two hints that used to share a row w | §6 第 54 条 |
+| §7 第 34 条 | Every other button goes through `crate:: | §6 第 54、55 条 |
+| §7 第 35 条 | UDP must never be described as "connecte | §6 第 36 条 |
+| §7 第 37 条 | TCP's write side must stay non-blocking  | §6 第 51 条 |
+| §7 第 39 条 | Every panel paints its own background —  | §6 第 53、54 条 |
+| §7 第 40 条 | Transport-specific ignorable errors stay | §6 第 38 条 |
+| §7 第 41 条 | Control lines (RTS / DTR, F5): opening a | §6 第 39、60 条 |
+| §7 第 42 条 | Control-line failures are not disconnect | §6 第 37、40 条 |
+| §7 第 44 条 | Which baud entry is selected lives in it | §6 第 45 条 |
+| §7 第 45 条 | The settings window's content is taller  | §6 第 46、57 条 |
+| §7 第 46 条 | There is exactly one outbound path: `pay | §6 第 41 条 |
+| §7 第 47 条 | The bottom status bar (convention 48) mu | §6 第 48、54 条 |
+| §7 第 48 条 | The global UI font scale (`UiFontScale`) | §6 第 47 条 |
+| §7 第 49 条 | Presets (`SendPresets`, F5) deliberately | §6 第 42 条 |
+| §7 第 50 条 | New drawing logic should be a `fn xxx(&m | §6 第 43、57、59 条 |
+| §7 第 51 条 | The receive area's default text colour m | §6 第 44 条 |
+| §7 第 52 条 | Panel visibility has an invariant: at le | §6 第 12 条 |
+| §7 第 54 条 | Theme preference is persisted as the cra | §6 第 14 条 |
+| §7 第 55 条 | Adding a language is a data change, not  | §6 第 50 条 |
+| §7 第 56 条 | Multilingual fonts go in both families.  | §6 第 50 条 |
+| §7 第 58 条 | Persistence: `ComTool` derives `Serializ | §6 第 3、50 条 |
+| §7 第 60 条 | Tests are inline: parser/renderer/trimmi | §6 第 48、59、61 条 |
+| §7 第 61 条 | The 2026-09-24 fix for the three long-st | §6 第 51 条 |
+| §7 第 62 条 | Verification commands: `cargo check`, th | §6 第 10、49 条 |
+| §7 第 64 条 | Compile before asking for a visual revie | §6 第 49 条 |
+| §7 第 65 条 | The chart draws with `egui_plot`. Its ve | §6 第 24 条 |
+
+其余 **21 条**（编号 1, 3, 5, 14, 15, 16, 17, 23, 24, 25, 30, 36, 38, 43, 53, 57, 59, 63, 66, 67, 68）在 §6 里**没有对应**——
+它们是 §7 独有的内容（模块地图、图标、`opencode.json`、许可证、验证命令等），**不可删**。
 
 - This is a single Rust 2024 binary crate (`comtool-rs`); the executable entrypoint is `src/main.rs`.
 - Module map:

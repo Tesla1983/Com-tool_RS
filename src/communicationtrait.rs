@@ -84,6 +84,26 @@ pub trait ByteChannel: Send {
         None
     }
 
+    /// 待发队列里**还没写出去**的字节数（诊断读数）。
+    ///
+    /// 回答的是"我点了发送、对端却没收到"这类问题：[`write`](Self::write) 返回
+    /// `Err` 时那是"当场被拒"，用户看得到提示；而**队列没满、只是一直写不动**
+    /// （对端不读、流控拉住）原先完全没有可见痕迹。界面把这个数显示出来，
+    /// "长时间不下降"就成了那个痕迹。
+    ///
+    /// **不参与任何控制流**，只用于显示——它慢一拍、偶尔读到中间值都不影响正确性，
+    /// 所以这里是纯读、不加锁也不做同步。
+    ///
+    /// **默认实现返回 0**：三个真实通道都覆盖它（各自持有
+    /// [`worker::PendingLedger`]）。给默认实现而非强制实现，是因为它对"没有队列的
+    /// 替身/未来通道"是**正确**的值（确实是 0），而强制实现只是让每处多写四行
+    /// 返回同一个 0。防线放在别处：三个真实实现各有一条测试钉住读数会随预约上涨
+    /// （见 `communicationtrait.rs` / `net_impl` 的 `pending_bytes_*` 用例）——
+    /// **忘了覆盖**会被那些用例抓住，而不是靠这里编译器报错。
+    fn pending_bytes(&self) -> usize {
+        0
+    }
+
     /// 把一段字节交给后台线程发出。**不等待写入完成，但当场判定能不能排队**。
     ///
     /// 返回 `Ok` 的含义是"**已经排上队**，后台线程会负责把它写出去"，不是"已经写到
@@ -289,8 +309,14 @@ pub(crate) mod worker {
             self.0.store(0, Ordering::Release);
         }
 
-        /// 当前在队字节数。只给测试与诊断用（界面暂未展示它）。
-        #[cfg(test)]
+        /// 当前在队字节数。
+        ///
+        /// 这是**诊断读数**，经 [`ByteChannel::pending_bytes`] 上报给界面。
+        /// 原先这里写着"界面暂未展示它"、还挂着 `#[cfg(test)]`——那正是
+        /// `HANDOVER.md` §5「写路径瞬态错误静默重试」那条缺陷的另一半：
+        /// **队列已满**有提示，可**队列没满而长期写不动**（设备不读、流控拉住）
+        /// 原先没有任何可见痕迹。2026-09-27 起状态栏显示这个数，
+        /// "数字停住不下降"就是那个痕迹。
         pub(crate) fn bytes(&self) -> usize {
             self.0.load(Ordering::Acquire)
         }
@@ -559,6 +585,10 @@ pub(crate) mod fake {
         reject_line_state: bool,
         /// 每一次 `set_line_state` 的实参，按发生顺序。
         line_state_calls: Vec<(Option<bool>, Option<bool>)>,
+        /// "队列里还压着 N 字节没写出去"的读数，由测试用
+        /// [`FakeHandle::set_pending`] 摆布——真实通道这个数来自 `PendingLedger`，
+        /// 替身没有后台线程、也就没有会自己变化的队列，只能这样表达。
+        pending: usize,
         sink: Option<Sender<ChannelEvent>>,
     }
 
@@ -614,6 +644,11 @@ pub(crate) mod fake {
         /// 之后、收到 `Failed` 之前调用它，才能表达"这次真的开成了"。
         pub(crate) fn signal_ready(&self) {
             self.shared.lock().expect("锁未被毒化").active = true;
+        }
+
+        /// 摆出"队列里还压着 `n` 字节"的状态，用来验证状态栏那条待发读数。
+        pub(crate) fn set_pending(&self, n: usize) {
+            self.shared.lock().expect("锁未被毒化").pending = n;
         }
 
         /// 让后续 `write` 一律失败，用来验证"发送失败"分支。
@@ -680,6 +715,11 @@ pub(crate) mod fake {
             // 替身不区分"活动"与"就绪"：它的 `active` 本来就由测试显式摆布
             // （`defer_ready` / `signal_ready`），这就是它扮串口三态的方式。
             self.shared.lock().expect("锁未被毒化").active
+        }
+
+        /// 替身不排队（`write` 直接落到 `written` 里），所以这个数只能由测试摆布。
+        fn pending_bytes(&self) -> usize {
+            self.shared.lock().expect("锁未被毒化").pending
         }
 
         fn write(&mut self, bytes: Vec<u8>) -> io::Result<()> {
