@@ -1,0 +1,5 @@
+# GPLv3 全文必须**逐字可核对**：禁止 Git 按平台改行尾。
+# 否则 Windows 上（`core.autocrlf=true`）检出会变成 CRLF，`NOTICE.md` 里记的
+# 「LF 行尾、35 148 字节、sha256 8b1ba204…」当场就对不上——而那是我们自证
+# "许可未被改动"的唯一手段。
+LICENSE text eol=lf

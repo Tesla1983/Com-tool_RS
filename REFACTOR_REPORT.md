@@ -14,7 +14,7 @@
 | 任务 | 状态 | 验证方式 |
 |---|---|---|
 | 基线测试 | ✅ 已完成并记录 | `cargo check` / `cargo test` / `cargo fmt` |
-| ① 通信层独立重写（脱离 GPLv3 衍生关系） | ✅ 代码完成，**合规结论待法律确认** | 结构/命名/并发机制全部更换；新增 6 条契约测试 |
+| ① 通信层独立重写（降低 GPLv3 衍生风险） | ✅ 代码完成；**合规已于 2026-09-27 按 GPLv3 收口**（见 `NOTICE.md` 与 `HANDOVER.md` §4①） | 结构/命名/并发机制全部更换；新增 6 条契约测试；重合度实测见 `tools/license_overlap_check.py` |
 | ② `app.rs` 纯移动式拆分 | ✅ 完成 | 归一化逐行比对脚本，29/29 代码单元等价 |
 | ③ serde 状态持久化 | ✅ 完成 | 6 条测试覆盖正常/缺字段/损坏存档/运行时状态排除 |
 
@@ -82,11 +82,12 @@
 
 **未做也无法由我做的**：法律意义上的 clean-room 要求「重写者从未接触过原实现」，由规格出发独立编写。我作为读过原实现的同一方，只能做到**独立结构设计 + 独立命名 + 不使用上游的非平凡代码结构**，这显著降低了衍生风险，但不构成法律上的排除证明。
 
-**建议的收口动作（二选一）**：
-1. 让一位未读过 `SerialGUI-rs` 的作者仅依据 `src/communicationtrait.rs` 的文档注释与需求重新实现一遍 `channel.rs`；
-2. 若决定接受 GPLv3，则补齐 `LICENSE`（GPLv3 全文）+ `NOTICE`，并在 `Cargo.toml` 加 `license = "GPL-3.0-only"`。
+**收口动作（2026-09-27 已选第 2 条并做完）**：
+1. （未做，仍可选）让一位未读过 `SerialGUI-rs` 的作者仅依据 `src/communicationtrait.rs` 的文档注释与需求重新实现一遍 `channel.rs`；
+2. ✅ **已做**：接受 GPLv3 —— 补了 `LICENSE`（GPLv3 全文）+ `NOTICE.md`，并在 `Cargo.toml` 加 `license = "GPL-3.0-only"`。
 
-**当前仓库仍是无许可证状态**：根目录无 `LICENSE`，`Cargo.toml` 无 `license` 字段。
+**当前仓库的许可状态**：`GPL-3.0-only`（三处一致）。派生/修改声明与逐字重合度实测在 `NOTICE.md`；
+⚠️ 按 GPLv3 分发不等于"已 clean-room"——那条路仍未走（且本会话不能充当重写者）。
 
 ---
 
@@ -205,7 +206,7 @@ Windows: %APPDATA%\ComTool-RS\data\app.ron
 | 自动重连指数退避 | 不在范围内 |
 | 3 个未使用依赖 `chrono` / `tokio` / `egui-chinese-font` | `tokio` 启用 `full` 会明显增加编译时间。保留是因为它们对应计划中的「日志文件名时间戳」与「版本检查」，是否移除应由你决定 |
 | 9 条 clippy 警告 | 全部位于**逐字搬动的既有代码**中（`derivable_impls`×2、`manual_range_contains`×3、`collapsible_if`、`redundant_borrow`、`unnecessary_map_or`、`explicit_deref`）。本次新增的 `communicationtrait.rs` / `channel.rs` / `config.rs` / `sidebar.rs` / `receive.rs` **零 clippy 警告**。修它们会破坏「纯移动」的等价性，留待计划 P2 一并处理 |
-| GPLv3 决策 | 见 §2.4，需你拍板 |
+| ~~GPLv3 决策~~ | ✅ 2026-09-27 已拍板并落地（方案①接受 GPLv3），见 §2.4 |
 
 ### 5.2 已知残余风险
 

@@ -163,7 +163,9 @@ machine, or the rules stay on paper while the enforcement silently disappears.
 ## 完整细则去哪查
 
 - **逐模块约定 + egui 硬事实（英文原文，含实测数字与守卫测试名）**：`DEVELOPMENT_GUIDE.md` **§7**
-- **逐条开发约定（中文，58 条）**：`DEVELOPMENT_GUIDE.md` §6
+- **逐条开发约定（中文，见 §6 的编号列表）**：`DEVELOPMENT_GUIDE.md` §6
 - **各轮设计取舍（已迁出）**：`HISTORY_2026.md` §3.1 ~ §3.26（`HANDOVER.md` §3 只留目录表）
 - **未决事项 / 已知缺陷 / 硬性约定 / 快速上手**：`HANDOVER.md` §4 / §5 / §7 / §9
-- **GPLv3**：`SerialGUI-rs/`（GPLv3）仅供参考且已被 gitignore，**不得把它的代码抄回来**
+- **GPLv3**：`SerialGUI-rs/`（GPLv3）仅供参考且已被 gitignore，**不得把它的代码抄回来**。
+  本项目自身以 **GPL-3.0-only** 分发：`LICENSE`（全文）+ `NOTICE.md`（派生/修改声明 + 分发清单）
+  + `Cargo.toml` 的 `license` 字段，三者要一起维护；合规结论与实测重合度见 `NOTICE.md` §3

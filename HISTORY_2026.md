@@ -2042,3 +2042,65 @@ ascii_spans  ─┘
 
 **验证**：`fmt --check` 干净 · `check --all-targets` 0 warning · `clippy --all-targets` 0 warning
 · `test` **370 passed + 1 ignored**。未运行本项目、未触碰串口。
+
+## 3.32 许可收口：LICENSE + NOTICE + Cargo.toml（2026-09-27，用户要求）
+
+用户要求：*"先做 LICENSE，和上游的 SerialGUI-rs 切割开来，我只是参考不代表我不能对外分发。"*
+这句话**前半句可做、后半句只对了一半**，先把事实摆清再动手。
+
+### 事实核对（都取自本机参考副本，不是转述）
+
+| 问题 | 结论 | 依据 |
+|---|---|---|
+| 上游是什么许可 | **GPLv3 单一许可** | 上游 `NOTICE.md` 原话 "licensed under the GNU General Public License v3.0 (GPLv3)"；其 git 历史里 `git ls-files \| grep -i licen` 只返回 `LICENSE-GPLv3` |
+| 上游是不是双许可（曾疑） | **不是**。它的 `Cargo.toml` 里 `include = ["LICENSE-APACHE", "LICENSE-GPLv3", …]` 是**残留** | 目录里没有 `LICENSE-APACHE`，git 历史里也从来没有过 |
+| 能不能对外分发 | **能**，而且现在就能。GPLv3 允许分发、允许收费、允许商用 | 见下 |
+
+所以"切割开来"**不是靠换个 LICENSE 文件能做到的**：衍生作品的许可由原作品的许可决定。
+要么按 GPLv3 分发（允许你要的一切，除了"把衍生作品闭源分发"），要么做**真 clean-room 重写**。
+
+### 做了的四件事
+
+1. **`LICENSE`** —— GPLv3 全文（FSF 官方文本，未改动；LF 行尾 35 148 字节，
+   sha256 `8b1ba204bb69a0ade2bfcf65ef294a920f6bb361b317dba43c7ef29d96332b9b`，可自行核对）。
+2. **`NOTICE.md`** —— 分发时必须随附的那一份：§1 许可与"这意味着什么"、§2 派生与修改声明
+   （GPLv3 §5(a) 要求的"已修改 + 日期"）、**§3 逐字重合度实测**、§4 第三方依赖许可表、
+   §5 分发检查清单、§6 若想换宽松许可的可选路线。
+3. **`Cargo.toml`** —— `license = "GPL-3.0-only"`（**不写 `-or-later`**：上游只声明单一版本，
+   本作品不能替它追加"或更新版本"）+ `description`。用 `cargo metadata` 验过读出来是
+   `GPL-3.0-only`。
+4. **`tools/license_overlap_check.py`** —— 让 §3 的结论**可复现**，而不是一句断言。
+   本次实跑（脚本自带口径：去首尾空白、丢弃 <12 字符与注释行、取集合交集）：
+
+   | 对照 | 逐字相同的实质代码行 |
+   |---|---|
+   | 上游 `src/`（19 个 `.rs`） | 750 条去重后的实质行 |
+   | 当前 `HEAD`（25 个 `.rs`） | **106 条** |
+   | 最初提交 `ecfb6e8` | 11 条 |
+
+   **这 106 条全部是框架与库强制唯一的写法**——全量列举见脚本输出，例如
+   `fn save(&mut self, storage: &mut dyn eframe::Storage) {`（eframe 的签名）、
+   `use eframe::egui;`、`ui.separator();`、`ui.horizontal(|ui| {`、
+   `let (tx, rx) = mpsc::channel();`、`Parity::None`、`pub parity: Parity,`。
+   **没有一条是逻辑、算法或数据结构。** 这与本项目早先的结论一致（`REFACTOR_REPORT.md` §2.4、
+   `HANDOVER.md` §4①），本轮只是把它从"断言"变成"可复现的数字"。
+
+### 明确说明的两条边界（避免把话说满）
+
+- **按 GPLv3 分发 ≠ 已 clean-room**。clean-room 的定义是"重写者从未接触过原实现"，
+  只能靠**过程**证明，行比对证明不了。本项目历史里最初的 `ecfb6e8` 与后续重构都由读过上游的
+  人/会话完成 ⇒ 仍是衍生作品，这才是选 GPLv3 的原因。
+- ⚠️ **本会话不能充当将来那个"隔离重写者"**：核对许可时我已经读过上游的
+  `Cargo.toml` / `NOTICE.md` / `main.rs`，按 clean-room 口径已经被污染。这一点写进了
+  `NOTICE.md` §6，免得下次有人（包括 AI）顺手把这个"重写"领了。
+
+### 文档同步（把"待决 / 无许可证"的表述全部订正）
+
+`AGENTS.md`、`DEVELOPMENT_GUIDE.md`（§7 英文条）、`FEATURE_GAP_AND_PLAN.md`（§6 合规章节 +
+"最该先做的三件事" + 风险矩阵）、`GAP_ANALYSIS_VS_COMTOOL.md`（#18 行 + §2 结论 + 打分表 +
+§4 整节 + mermaid）、`FUTURE_ROADMAP.md`（打包行 + §11④ 收尾表）、`HANDOVER.md`（§4① 整节重写 +
+§6.1 ② + §9 备注 + §7 第 7 条）、`REFACTOR_REPORT.md`（任务表 + §2.4 + §5.1）共 **7 份**。
+顺手把 `AGENTS.md` 与 `HANDOVER.md` 里"约定 58 条"这个会漂的数字去掉了。
+
+**验证**：`cargo metadata` 读出 `license: GPL-3.0-only`；`fmt --check` 干净；
+`check --all-targets` 0 warning。未运行本项目、未触碰串口。

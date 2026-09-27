@@ -2,6 +2,11 @@
 name = "comtool-rs"
 version = "0.1.0"
 edition = "2024"
+description = "串口调试上位机（GUI 串口助手）：串口 / TCP / UDP、HEX 与字节视图、实时图表、文件日志、筛选、15 种语言"
+# GPL-3.0-only（不是 -or-later）：上游 SerialGUI-rs 只声明 GPLv3 单一许可，
+# 本作品是它的修改版 ⇒ 沿用同一档，不能替上游追加"或更新版本"。
+# 合规声明与逐字重合度实测见 `NOTICE.md`；分发检查清单也在那里。
+license = "GPL-3.0-only"
 
 [profile.release]
 # 与上游保持一致：release 使用 opt-level = 2，而不是 Rust 默认的 3。
