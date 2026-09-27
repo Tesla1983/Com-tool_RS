@@ -30,7 +30,7 @@
 | #1 待发队列背压 | ✅ **已做** | `afe4630` + `8330fce`（同日两轮订正） | `MAX_PENDING_BYTES = 1 MiB` + 共享 `PendingLedger` + `worker::submit`（9 条账本单测 + 3 通道各 2 条）；超限在**调用线程当场**返回 `Err`，`app.rs` 一行未改 |
 | #2 `connected` 假阳性（串口侧） | ✅ **已做** | `afe4630` | `worker::OPENING` 第三态 + `ByteChannel::is_ready()` + `opening()` / `settle_connection_state()`（9 条测试）；界面新增「正在打开」档 |
 | #3 自动重连无退避 | ✅ **已做** | `afe4630` | 纯函数 `reconnect_backoff()`（500 ms 倍增封顶 30 s）+ `MAX_RECONNECT_ATTEMPTS = 6` |
-| #4 发送文件 | ✅ **已做** | 本轮 P2（见提交历史） | **已于 2026-09-27 落地**（`HISTORY_2026.md` §3.34）：`SendFileJob` 4 KiB 分块读 + 分块写队列；队列满保留当前块、下帧再试（**不丢块**），通道消失即中止；5 条测试，4 处注入全部确认会红 |
+| #4 发送文件 | ✅ **已做** | `2ac207b` | **已于 2026-09-27 落地**（`HISTORY_2026.md` §3.34）：`SendFileJob` 4 KiB 分块读 + 分块写队列；队列满保留当前块、下帧再试（**不丢块**），通道消失即中止；5 条测试，4 处注入全部确认会红 |
 
 > 三项缺陷合称「既有缺陷三连」，全部实现 + 门禁绿 + 文档同步（`HISTORY_2026.md` §3.15 全记录，
 > `FUTURE_ROADMAP.md` §10 / §13.5 N7 已翻状态）。测试 272 → **291**。
