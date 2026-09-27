@@ -858,4 +858,56 @@ mod tests {
             "特大档下正文字号必须大于标准档的 13，否则这个功能等于没接上"
         );
     }
+    /// 顶部那一行：**筛选在生效就显示命中数**——包括把筛选输入框那一行收起来的时候。
+    ///
+    /// 这条小字是"日志被筛过"唯一的常驻解释。少了它，用户收起筛选行之后看到一屏
+    /// 稀疏的日志，只会以为设备少发了数据。
+    ///
+    /// 三条分开断：没筛时不许出现（否则这个指示器就成了噪音）、有筛时必须出现、
+    /// **接收区隐藏时不出现**（那份数是上一帧记的，此时已无意义）。
+    #[test]
+    fn top_toolbar_reports_the_filter_state() {
+        let s = crate::app::Language::Zh.strings();
+        let count_of = |app: &ComTool| {
+            crate::strings::fill(
+                s.filter_count,
+                &[&app.filter_matched_lines, &app.filter_total_lines],
+            )
+        };
+
+        // ① 没筛：只有开关
+        let mut app = ComTool::default();
+        let texts = top_toolbar_texts(&mut app);
+        assert!(
+            texts.iter().any(|t| t == s.filter_toggle),
+            "顶部少了筛选开关。实际：{texts:?}"
+        );
+        assert!(
+            !texts.contains(&count_of(&app)),
+            "还没筛选就显示了命中数。实际：{texts:?}"
+        );
+
+        // ② 有筛（输入框那行收着，默认就是收着的）：计数照样显示
+        app.filter_text = "345".to_string();
+        app.filter_matched_lines = 2;
+        app.filter_total_lines = 7;
+        let expected = count_of(&app);
+        assert!(
+            expected.contains('2') && expected.contains('7'),
+            "前提：这条文案里应当带上两个数字，实际是 {expected:?}"
+        );
+        let texts = top_toolbar_texts(&mut app);
+        assert!(
+            texts.contains(&expected),
+            "筛选生效却没显示命中数——用户看不出日志被筛过。期待 {expected:?}，实际：{texts:?}"
+        );
+
+        // ③ 接收区隐藏：不显示（没有可筛的内容，那份数是陈的）
+        app.show_receive_panel = false;
+        let texts = top_toolbar_texts(&mut app);
+        assert!(
+            !texts.contains(&expected),
+            "接收区都隐藏了还显示命中数。实际：{texts:?}"
+        );
+    }
 }

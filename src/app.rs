@@ -625,6 +625,32 @@ pub struct ComTool {
     /// 这才让"上次勾选过置顶"能在启动时恢复）。
     #[serde(skip)]
     pub applied_always_on_top: Option<bool>,
+    /// 接收区筛选关键字（空 = 不筛选）。
+    ///
+    /// **不落盘**（与 `theme` / `auto_scroll` 那批用户偏好刻意不同）：筛选是一次排查
+    /// 里的临时动作，而"启动后日志看起来是空的"极难自查——上一个会话留下的关键字会
+    /// 让用户以为设备没发数据。启动一律"没有筛选"。
+    ///
+    /// 生效方式是**显示层过滤**：只改"画哪一份内容"，不改 `receive_text` / 两个镜像、
+    /// 不改导出、不改实时日志文件（见 [`crate::receive::filter_lines`]）。
+    #[serde(skip)]
+    pub filter_text: String,
+    /// 「筛选」那一行输入框是否展开（中央区顶部那个开关）。
+    ///
+    /// **不落盘**，启动一律收起：它是临时工具，不该常占一行高度（短窗口下中央区
+    /// 高度本来就紧张，见 `HANDOVER.md` §5）。
+    #[serde(skip)]
+    pub show_filter_row: bool,
+    /// 上一帧筛选命中的行数；`filter_text` 为空时恒为 0。**不落盘**。
+    ///
+    /// 由接收区那一次绘制写入（那是唯一真正过滤内容的地方），显示在「筛选」开关旁边。
+    /// 顶部那一行**在同帧里先于接收区绘制**，所以这里显示的是上一帧的数——差一帧在
+    /// 观感上没有影响，但不要在别处再算一遍（两份数字迟早不一致）。
+    #[serde(skip)]
+    pub filter_matched_lines: usize,
+    /// 上一帧参与筛选的总行数（口径见 [`crate::receive::filter_lines`]）。**不落盘**。
+    #[serde(skip)]
+    pub filter_total_lines: usize,
     /// 正在运行的实时文件日志。`Some` 即表示「记录中」——不另设 bool 标志位，
     /// 两个字段表达同一件事迟早会不一致。
     #[serde(skip)]
@@ -1543,6 +1569,10 @@ impl Default for ComTool {
             receive_viewport_w: 0.0,
             receive_px_per_char: 0.0,
             applied_always_on_top: None,
+            filter_text: String::new(),
+            show_filter_row: false,
+            filter_matched_lines: 0,
+            filter_total_lines: 0,
             max_log_chars: DEFAULT_MAX_LOG_CHARS,
             timestamp_prefix: TimestampPrefix::default(),
             repaint_interval_ms: DEFAULT_REPAINT_INTERVAL_MS,
@@ -1900,6 +1930,50 @@ impl ComTool {
         let s = self.language.strings();
         ui.horizontal(|ui| {
             ui.toggle_value(&mut self.sidebar_open, s.sidebar_toggle);
+            // 筛选开关：输入框那一行默认收起（短窗口下高度紧张，见 `HANDOVER.md` §5）。
+            ui.toggle_value(&mut self.show_filter_row, s.filter_toggle);
+            // **只要筛选在生效，计数就一直显示**——包括把输入框那一行收起来的时候。
+            // 否则"日志被筛过"这件事在界面上没有任何解释，用户会以为设备少发了数据。
+            if !self.filter_text.is_empty() && self.show_receive_panel {
+                ui.weak(fill(
+                    s.filter_count,
+                    &[&self.filter_matched_lines, &self.filter_total_lines],
+                ));
+            }
+        });
+    }
+
+    /// 「筛选」输入框那一行（在接收区正上方；由顶部那个开关决定是否展开）。
+    ///
+    /// 抽成 `fn(&mut self, &mut Ui)` 是为了**可测**（约定 2）：内联进
+    /// `render_central_column` 的话，判据只能拿整帧输出认，而那一帧里混着接收区自己的
+    /// 文字（同一个关键字在日志里也会出现），断言会被污染。
+    ///
+    /// 行为：关键字**一变就回到最新**（内容整体换了，旧滚动位置可能越过新内容的底部）；
+    /// 「清空筛选」等价于把关键字清空。
+    pub(crate) fn render_filter_row(&mut self, ui: &mut egui::Ui) {
+        let s = self.language.strings();
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.filter_text)
+                    .hint_text(s.filter_hint)
+                    .desired_width(240.0),
+            );
+            // 先把 `changed()` 读出来：`on_hover_text` 会**消费** `Response`（它不是 `Copy`）
+            let changed = response.changed();
+            response.on_hover_text(s.filter_note);
+
+            let has_filter = !self.filter_text.is_empty();
+            ui.add_enabled_ui(has_filter, |ui| {
+                if crate::button::compact(ui, s.filter_clear).clicked() {
+                    self.filter_text.clear();
+                    self.reset_receive_scroll(ui);
+                }
+            });
+
+            if changed {
+                self.reset_receive_scroll(ui);
+            }
         });
     }
 }
@@ -2077,6 +2151,12 @@ impl ComTool {
             });
             self.hex_view = show_hex; // 文本 = !hex_view；两个都取消时退回文本
             self.resolve_display_mode(hex_just_enabled, ascii_just_enabled, color_just_enabled);
+
+            // 筛选输入框那一行：紧贴接收区上方（它管的就是下面这块内容）。
+            // 默认收起 ⇒ 不变布局高度；展开时才多占一行。
+            if self.show_filter_row {
+                self.render_filter_row(ui);
+            }
 
             // 接收区：画哪一份镜像由 [`ComTool::display_mode`] 决定——与上面写镜像的
             // 判定是同一个，所以不存在"写了一份、画另一份"的空视图。分发本身抽在
@@ -3770,6 +3850,86 @@ mod tests {
         assert_ne!(
             light, dark,
             "两套主题的窗口底色完全相同 ⇒ 说明它读到的根本不是主题"
+        );
+    }
+    /// 驱动中央区（与 [`chart_sits_above_the_receive_area`] 同一套驱动方式），
+    /// 返回画出来的 `(文字, y)`。
+    fn central_column_texts(app: &mut ComTool) -> Vec<(String, f32)> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(900.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                app.render_central_column(ui);
+            });
+        });
+
+        let mut texts = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                texts.push((t.galley.text().to_owned(), t.pos.y));
+            }
+        }
+        out.textures_delta.clear();
+        texts
+    }
+
+    /// 「筛选」输入框那一行：**默认不画**、接收区隐藏时也不画；开关打开后画在
+    /// **接收区内容之上**。
+    ///
+    /// 三层判据缺一不可：只测"关着时没有那行字"，把整行删掉照样通过；只测"开着时有
+    /// 那行字"而不比位置，把它挪到接收区**下面**（或发送区旁边）也照样通过。
+    #[test]
+    fn filter_row_is_optional_and_sits_above_the_receive_area() {
+        /// 接收区里独有的标记串，用来定位它落在哪一行。
+        const MARKER: &str = "RX-MARKER-filter-row";
+        let hint = Language::Zh.strings().filter_hint;
+
+        let app_with = |show_filter_row: bool, show_receive_panel: bool| {
+            let mut app = ComTool {
+                show_chart_panel: false,
+                show_receive_panel,
+                show_send_panel: false,
+                show_filter_row,
+                ..ComTool::default()
+            };
+            app.receive_text.push_str(MARKER);
+            app
+        };
+
+        // ① 开关关着：那一行不出现
+        let texts = central_column_texts(&mut app_with(false, true));
+        assert!(
+            !texts.iter().any(|(t, _)| t == hint),
+            "开关关着却画出了筛选输入框：{texts:?}"
+        );
+
+        // ② 接收区被隐藏：也不该出现（没有可筛的内容，那一行没有意义）
+        let texts = central_column_texts(&mut app_with(true, false));
+        assert!(
+            !texts.iter().any(|(t, _)| t == hint),
+            "接收区隐藏了却还画着筛选输入框：{texts:?}"
+        );
+
+        // ③ 开关打开且接收区可见：画出来，而且在接收区**内容之上**
+        let texts = central_column_texts(&mut app_with(true, true));
+        let y_of = |needle: &str| -> f32 {
+            texts
+                .iter()
+                .find(|(t, _)| t == needle)
+                .map(|(_, y)| *y)
+                .unwrap_or_else(|| panic!("这一帧里没画出 {needle:?}——实际画出的有：{texts:?}"))
+        };
+        let hint_y = y_of(hint);
+        let marker_y = y_of(MARKER);
+        assert!(
+            hint_y < marker_y,
+            "筛选输入框没画在接收区上方（筛选行 y={hint_y}，接收区内容 y={marker_y}）"
         );
     }
 }

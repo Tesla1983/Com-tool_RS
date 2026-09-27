@@ -774,6 +774,124 @@ fn trim_spans_front(spans: &mut Vec<ColoredSpan>, max: usize) {
     }
 }
 
+/// 接收区**筛选**：只保留**含 `needle` 的整行**，其余行整行丢弃。
+///
+/// 返回 `(要显示的文本, 命中行数, 总行数)`。三个刻意的选择：
+///
+/// * **`needle` 为空时原样借用**（`Cow::Borrowed`）⇒ 不复制、不扫描，关掉筛选这条
+///   路径的开销是零。调用方**不需要**先判"筛不筛"，直接调它即可。
+/// * **按逻辑行（`\n`）判定，不按折行后的视觉行**：彩色与字节视图会按窗口宽度折行，
+///   若按视觉行筛，同一个关键字在窄窗口里会把半行留下、把另外半行筛掉。
+/// * **整行保留**（而不是只保留命中的那几个字符）：串口日志里一行往往是一个完整
+///   读数，砍掉行内上下文反而没法看；时间戳前缀也一并保住。
+///
+/// 末尾**没有换行的半行**（设备正发到一半）同样参与匹配：含关键字就显示，否则连同
+/// 不算一行。这就是"总行数"的口径——与 [`filter_span_lines`] 完全一致（有测试对拍）。
+///
+/// ⚠️ `needle` 不含换行（界面上的输入框是单行输入，敲不进 `\n`）。
+pub(crate) fn filter_lines<'a>(
+    text: &'a str,
+    needle: &str,
+) -> (std::borrow::Cow<'a, str>, usize, usize) {
+    if needle.is_empty() {
+        return (std::borrow::Cow::Borrowed(text), 0, 0);
+    }
+
+    let mut kept = String::new();
+    let mut matched = 0usize;
+    let mut total = 0usize;
+    for line in text.split_inclusive('\n') {
+        total += 1;
+        if line.contains(needle) {
+            matched += 1;
+            kept.push_str(line);
+        }
+    }
+    (std::borrow::Cow::Owned(kept), matched, total)
+}
+
+/// 同 [`filter_lines`]，但作用在**带样式的片段**上（彩色视图与字节查看视图渲染的是
+/// 片段，不是纯文本）。
+///
+/// 返回 `(保留的片段, 命中行数, 总行数)`；`needle` 为空时返回空 `Vec`——调用方在筛选
+/// 关闭时应当直接走原路径（渲染未筛的镜像），`Vec::new()` 是为了**不静默给出一份空
+/// 视图**：真走到这里又拿到空结果，接收区会明显是空的，比"悄悄换了内容"好排查。
+///
+/// **样式必须保住**：颜色是这两个视图存在的理由，筛完丢了颜色等于换了视图。
+/// 一个片段可以跨多行（一段着色文本里可能有若干 `\n`），所以按 `\n` 把片段切开、
+/// 按逻辑行判定；**只有该行被保留时才把它的各段拼回去**，且相邻同样式的段会合并
+/// （否则输出会被切成一行一小段，`LayoutJob` 的 section 数暴涨）。
+pub(crate) fn filter_span_lines(
+    spans: &[ColoredSpan],
+    needle: &str,
+) -> (Vec<ColoredSpan>, usize, usize) {
+    if needle.is_empty() {
+        return (Vec::new(), 0, 0);
+    }
+
+    /// 往一行里追加一段：样式相同就并进上一段，避免碎片化。
+    fn push_piece(line: &mut Vec<ColoredSpan>, text: &str, style: AnsiStyle) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(last) = line.last_mut()
+            && last.style == style
+        {
+            last.text.push_str(text);
+            return;
+        }
+        line.push(ColoredSpan {
+            text: text.to_string(),
+            style,
+        });
+    }
+
+    let mut out: Vec<ColoredSpan> = Vec::new();
+    let mut line: Vec<ColoredSpan> = Vec::new();
+    let mut line_hit = false;
+    let mut matched = 0usize;
+    let mut total = 0usize;
+
+    for span in spans {
+        for piece in span.text.split_inclusive('\n') {
+            let ends_line = piece.ends_with('\n');
+            let body = if ends_line {
+                &piece[..piece.len() - 1]
+            } else {
+                piece
+            };
+            if body.contains(needle) {
+                line_hit = true;
+            }
+            push_piece(&mut line, body, span.style);
+
+            if ends_line {
+                total += 1;
+                if line_hit {
+                    matched += 1;
+                    out.append(&mut line);
+                    // 换行要补回去，否则所有命中的行会粘成一行。
+                    push_piece(&mut out, "\n", span.style);
+                } else {
+                    line.clear();
+                }
+                line_hit = false;
+            }
+        }
+    }
+
+    // 末尾那半行（没有换行）与 `filter_lines` 的口径一致：算一行、参与匹配。
+    if !line.is_empty() {
+        total += 1;
+        if line_hit {
+            matched += 1;
+            out.append(&mut line);
+        }
+    }
+
+    (out, matched, total)
+}
+
 /// 一次接收区绘制的结果。
 ///
 /// 除了"右键菜单有没有点「复制全部日志」"，还要把**这一帧结束时视口的位置**带出去：
@@ -1376,6 +1494,16 @@ impl ComTool {
         self.receive_px_per_char = out.px_per_char;
     }
 
+    /// 记下这一帧的筛选计数，供「筛选」开关旁边的指示器显示。
+    ///
+    /// 三条渲染路径（文本/HEX、彩色、字节）各算自己的那一份，但**行口径完全一致**
+    /// ——三份镜像的文本内容逐字相同（见 `receive_data` 的落点），而筛选按逻辑行判定。
+    /// 关掉筛选时传 `(0, 0)`：界面只在 `filter_text` 非空时才显示这个数。
+    fn note_filter_counts(&mut self, matched: usize, total: usize) {
+        self.filter_matched_lines = matched;
+        self.filter_total_lines = total;
+    }
+
     /// 把四份接收镜像各自裁剪到 [`crate::app::ComTool::max_log_chars`] 以内（0 = 不限）。
     ///
     /// 为什么是"各自裁剪"而不是"按 `receive_text` 裁好再同步"：三种模式写入的镜像
@@ -1573,10 +1701,21 @@ impl ComTool {
         self.ascii_text.clear();
         self.ascii_spans.clear();
         self.decoder.reset();
+        self.reset_receive_scroll(ui);
+    }
+
+    /// 把接收区的滚动状态复位到"最新"。
+    ///
+    /// **两处共用**：「清空日志」与「筛选关键字变了」。共同点是**显示的内容被整体换掉
+    /// 了**——保持旧的滚动位置没有意义，而且筛选后内容变短，旧 `offset` 可能越过新内容
+    /// 的底部，视口会落在空白处（看着像"筛选把日志筛没了"）。
+    ///
+    /// 顺带把 `receive_at_bottom` 置回 `true`：内容换了 ⇒ 必然贴底。不清这一位的话，
+    /// 用户"停在历史里 → 清空日志 / 改筛选"之后仍处于放宽状态，淘汰上限要等到下一次
+    /// 绘制才恢复。
+    pub(crate) fn reset_receive_scroll(&mut self, ui: &egui::Ui) {
         let id = ui.make_persistent_id(SCROLL_AREA_ID);
         egui::scroll_area::State::default().store(ui.ctx(), id);
-        // 内容清了 ⇒ 没有可翻的历史，必然贴底。不清这一位的话，用户"停在历史里 →
-        // 清空日志"之后仍处于放宽状态，上限要等到下一次绘制才恢复。
         self.receive_at_bottom = true;
     }
 
@@ -1625,14 +1764,13 @@ impl ComTool {
                 // `receive_data()` 已经在本帧更早处跑过（`ComTool::ui` 开头），裁剪
                 // 发生在这里之前，所以补偿取到的是完整的一段。
                 let offset_y = self.take_front_trim_compensation(ui, f32::INFINITY);
-                let out = show_plain_receive(
-                    ui,
-                    &self.receive_text,
-                    self.auto_scroll,
-                    copy_all_log,
-                    offset_y,
-                );
+                // 筛选是**显示层**的：被筛掉的行仍然留在 `receive_text` 里，导出、
+                // 实时日志文件、图表解析都不受影响。关掉筛选时这里是 `Cow::Borrowed`
+                // ⇒ 不复制、不扫描。
+                let (shown, matched, total) = filter_lines(&self.receive_text, &self.filter_text);
+                let out = show_plain_receive(ui, &shown, self.auto_scroll, copy_all_log, offset_y);
                 self.note_receive_scroll(&out);
+                self.note_filter_counts(matched, total);
             }
         }
     }
@@ -1646,10 +1784,19 @@ impl ComTool {
         // 默认色取主题的正文色：深色主题下是浅色，浅色主题下是深色。写死黑色的话
         // 深色主题里接收区就是"黑底黑字"。只有**设备真的发了 ANSI 颜色**时才会
         // 用 `spans` 里的自定义色覆盖它——那是有意为之的显式着色，不该被主题改写。
-        let job = self.build_layout(
-            ui.visuals().text_color(),
-            monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE),
-        );
+        let default_color = ui.visuals().text_color();
+        let font_id = monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE);
+        let (job, matched, total) = if self.filter_text.is_empty() {
+            // 关掉筛选：走原路径，不复制整份片段表
+            (self.build_layout(default_color, font_id), 0, 0)
+        } else {
+            let (kept, matched, total) = filter_span_lines(&self.display_spans, &self.filter_text);
+            (
+                layout_job_from(&kept, default_color, font_id),
+                matched,
+                total,
+            )
+        };
 
         // ③ 在函数内部绘制滚动区，替换掉主界面里默认的滚动区
         //
@@ -1664,8 +1811,12 @@ impl ComTool {
             offset_y,
         );
         self.note_receive_scroll(&out);
+        self.note_filter_counts(matched, total);
         if out.copy_all {
-            ui.ctx().copy_text(self.receive_text.clone());
+            // 复制的是**屏幕上那一份**（筛选后）——与文本/HEX 模式一致（那里 `show_plain_receive`
+            // 复制的就是它渲染的那份文本）。导出与实时日志文件仍是不筛选的完整原文。
+            let (shown, _, _) = filter_lines(&self.receive_text, &self.filter_text);
+            ui.ctx().copy_text(shown.into_owned());
         }
     }
 
@@ -1679,10 +1830,18 @@ impl ComTool {
         // 同 `render_color_receive`：默认色随主题。字节视图自己给控制字符/高位
         // 字节上了显式颜色（`ASCII_CTRL_COLOR` / `ASCII_NONPRINT_COLOR`），
         // 剩下的可打印字节走这个默认色，因此它必须在深色主题下也看得清。
-        let job = self.build_ascii_layout(
-            ui.visuals().text_color(),
-            monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE),
-        );
+        let default_color = ui.visuals().text_color();
+        let font_id = monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE);
+        let (job, matched, total) = if self.filter_text.is_empty() {
+            (self.build_ascii_layout(default_color, font_id), 0, 0)
+        } else {
+            let (kept, matched, total) = filter_span_lines(&self.ascii_spans, &self.filter_text);
+            (
+                layout_job_from(&kept, default_color, font_id),
+                matched,
+                total,
+            )
+        };
 
         // ③ 绘制滚动区（样式与彩色模式一致）。补偿同上：在 `receive_data` 之后、
         //    绘制之前，按折行宽度换算。
@@ -1695,8 +1854,10 @@ impl ComTool {
             offset_y,
         );
         self.note_receive_scroll(&out);
+        self.note_filter_counts(matched, total);
         if out.copy_all {
-            ui.ctx().copy_text(self.receive_text.clone());
+            let (shown, _, _) = filter_lines(&self.receive_text, &self.filter_text);
+            ui.ctx().copy_text(shown.into_owned());
         }
     }
 }
@@ -3307,5 +3468,320 @@ mod tests {
             Some(FALLBACK),
             "样式表缺 Monospace 项时应当退到 fallback_size({FALLBACK})"
         );
+    }
+    // ——— 接收区筛选（2026-09-27）———
+
+    /// 整行保留：命中行连同它的换行一起留下，未命中行整行丢弃。
+    #[test]
+    fn filter_keeps_whole_lines_that_contain_the_needle() {
+        let (kept, matched, total) = filter_lines(
+            "12345
+abc
+x345y
+",
+            "345",
+        );
+        assert_eq!(
+            kept.as_ref(),
+            "12345
+x345y
+"
+        );
+        assert_eq!((matched, total), (2, 3), "命中 2 行 / 共 3 行");
+    }
+
+    /// 关掉筛选：**原样借用**、不复制整份日志，计数为 0。
+    #[test]
+    fn filter_borrows_the_text_untouched_when_the_needle_is_empty() {
+        let text = String::from(
+            "12345
+abc
+",
+        );
+        let (kept, matched, total) = filter_lines(&text, "");
+        assert!(
+            matches!(kept, std::borrow::Cow::Borrowed(_)),
+            "筛关闭时不该复制整份日志（这条路径每帧都会走）"
+        );
+        assert_eq!(kept.as_ref(), text.as_str());
+        assert_eq!((matched, total), (0, 0));
+    }
+
+    /// 末尾没有换行的半行同样参与匹配（设备正发到一半时不能当它不存在）。
+    #[test]
+    fn filter_keeps_a_trailing_partial_line() {
+        let (kept, matched, total) = filter_lines(
+            "abc
+xy1", "1",
+        );
+        assert_eq!(kept.as_ref(), "xy1");
+        assert_eq!((matched, total), (1, 2));
+    }
+
+    /// 区分大小写——界面上的说明就是这么写的，实现不能自己折叠。
+    #[test]
+    fn filter_is_case_sensitive() {
+        let (kept, matched, total) = filter_lines(
+            "ABC
+abc
+", "abc",
+        );
+        assert_eq!(
+            kept.as_ref(),
+            "abc
+"
+        );
+        assert_eq!((matched, total), (1, 2));
+    }
+
+    /// 片段版本：颜色必须保住，且**保留的文本与行计数要和文本版本逐字一致**。
+    ///
+    /// 对拍是关键：文本/HEX 两个视图走 [`filter_lines`]，彩色/字节两个视图走
+    /// [`filter_span_lines`]，两份实现口径一旦分叉，就会出现"同一个筛选在两个视图里
+    /// 筛出不同的行"。
+    #[test]
+    fn span_filter_keeps_colours_and_agrees_with_the_text_filter() {
+        let red = AnsiStyle {
+            fg: Some(egui::Color32::RED),
+            bold: false,
+        };
+        let spans = vec![
+            ColoredSpan {
+                text: "12345
+"
+                .to_string(),
+                style: red,
+            },
+            ColoredSpan {
+                text: "abc
+"
+                .to_string(),
+                style: AnsiStyle::default(),
+            },
+            ColoredSpan {
+                text: "x345y
+"
+                .to_string(),
+                style: red,
+            },
+        ];
+        let (kept, matched, total) = filter_span_lines(&spans, "345");
+
+        assert_eq!(
+            span_text(&kept),
+            "12345
+x345y
+"
+        );
+        assert_eq!((matched, total), (2, 3));
+        assert!(
+            kept.iter().all(|s| s.style == red),
+            "筛选把样式弄丢了：{:?}",
+            kept.iter().map(|s| s.style).collect::<Vec<_>>()
+        );
+
+        let (text_kept, text_matched, text_total) = filter_lines(
+            "12345
+abc
+x345y
+",
+            "345",
+        );
+        assert_eq!(span_text(&kept), text_kept.as_ref());
+        assert_eq!((matched, total), (text_matched, text_total));
+    }
+
+    /// 一个片段跨多行时按**逻辑行**判定，不是把整段当成一行。
+    #[test]
+    fn span_filter_splits_a_multi_line_span_into_logical_lines() {
+        let spans = vec![span(
+            "aa
+bb 7
+cc
+",
+        )];
+        let (kept, matched, total) = filter_span_lines(&spans, "7");
+        assert_eq!(
+            span_text(&kept),
+            "bb 7
+"
+        );
+        assert_eq!((matched, total), (1, 3));
+    }
+
+    /// 一行都没命中 ⇒ 结果为空，但**总行数照实报**（界面据此显示"命中 0 / N 行"，
+    /// 用户才知道是筛没了、不是没收到数据）。两份实现都要守这一条。
+    #[test]
+    fn filter_reports_zero_matches_without_hiding_the_total() {
+        let (kept, matched, total) = filter_lines(
+            "aa
+bb
+", "zzz",
+        );
+        assert!(kept.is_empty());
+        assert_eq!((matched, total), (0, 2));
+
+        let spans = vec![span(
+            "aa
+bb
+",
+        )];
+        let (kept, matched, total) = filter_span_lines(&spans, "zzz");
+        assert!(kept.is_empty());
+        assert_eq!((matched, total), (0, 2));
+    }
+    /// 驱动接收区一次，返回**画出来的全部文字**（拼接后）。
+    ///
+    /// 判据必须是"画出来的东西"：筛选是显示层行为，读 `receive_text` 只证明"内部状态
+    /// 改了"，证明不了屏幕上真的少了那几行。
+    fn painted_receive(app: &mut ComTool) -> String {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(700.0, 500.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.render_receive_area(ui));
+        let mut painted = String::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                painted.push_str(t.galley.text());
+            }
+        }
+        out.textures_delta.clear();
+        painted
+    }
+
+    /// 把三份镜像摆成同一份内容——真实运行时它们逐字相同（见 `receive_data` 的落点），
+    /// 这里手工摆好，才能在一个测试里覆盖"文本镜像"与"片段镜像"两条渲染路径。
+    fn set_all_mirrors(app: &mut ComTool, text: &str) {
+        app.receive_text = text.to_string();
+        app.display_spans = vec![span(text)];
+        app.ascii_spans = vec![span(text)];
+    }
+
+    /// **筛选真的作用在画出来的内容上**（走 `render_receive_area` 的真实分发）。
+    ///
+    /// 空转验证：把渲染路径里的 `filter_lines(..)` 换回直接传 `&self.receive_text`
+    /// （或让 `filter_lines` 恒返回原文）⇒ 第一条断言立刻变红。
+    #[test]
+    fn filtering_hides_the_lines_that_do_not_match() {
+        let mut app = ComTool::default();
+        set_all_mirrors(
+            &mut app,
+            "aaa 111
+bbb 222
+ccc 333
+",
+        );
+        app.filter_text = "222".to_string();
+
+        assert_eq!(
+            painted_receive(&mut app),
+            "bbb 222
+",
+            "筛选后接收区应只剩命中那一行"
+        );
+        assert_eq!(
+            (app.filter_matched_lines, app.filter_total_lines),
+            (1, 3),
+            "命中数 / 总行数没如实记下——顶部那个指示器靠它"
+        );
+    }
+
+    /// **彩色**与**字节查看**两个视图同样要筛（它们渲染的是片段，走的是另一份实现）。
+    #[test]
+    fn filtering_applies_to_the_colour_and_byte_views_too() {
+        let text = "aaa 111
+bbb 222
+ccc 333
+";
+        for (label, mut app) in [
+            (
+                "彩色视图",
+                ComTool {
+                    color_view: true,
+                    ..ComTool::default()
+                },
+            ),
+            (
+                "字节查看视图",
+                ComTool {
+                    ascii_view: true,
+                    ..ComTool::default()
+                },
+            ),
+        ] {
+            set_all_mirrors(&mut app, text);
+            app.filter_text = "222".to_string();
+            // 前提：这一轮确实走的是片段那条路（否则测的还是文本路径）
+            assert_ne!(
+                app.display_mode(),
+                DisplayMode::Text,
+                "前提：{label}不该是文本模式"
+            );
+
+            assert_eq!(
+                painted_receive(&mut app),
+                "bbb 222
+",
+                "{label}没有筛掉不该显示的行"
+            );
+            assert_eq!(
+                (app.filter_matched_lines, app.filter_total_lines),
+                (1, 3),
+                "{label}的行计数不对"
+            );
+        }
+    }
+
+    /// 关掉筛选（关键字为空）⇒ **原样显示**，且计数归零。
+    #[test]
+    fn clearing_the_filter_shows_every_line_again() {
+        let mut app = ComTool::default();
+        set_all_mirrors(
+            &mut app,
+            "aaa 111
+bbb 222
+",
+        );
+        app.filter_text = "222".to_string();
+        assert_eq!(
+            painted_receive(&mut app),
+            "bbb 222
+"
+        );
+
+        app.filter_text.clear();
+        assert_eq!(
+            painted_receive(&mut app),
+            "aaa 111
+bbb 222
+",
+            "清空关键字后应当恢复显示全部行"
+        );
+        assert_eq!((app.filter_matched_lines, app.filter_total_lines), (0, 0));
+    }
+
+    /// 被筛掉的行**仍然留在镜像里**——筛选只改显示，不改数据。
+    ///
+    /// 这条挡的是"为了筛得干净顺手把源数据也删了"：导出、实时日志文件、图表解析都读
+    /// 原镜像，删了就是静默丢数据。
+    #[test]
+    fn filtering_never_touches_the_stored_log() {
+        let text = "aaa 111
+bbb 222
+ccc 333
+";
+        let mut app = ComTool::default();
+        set_all_mirrors(&mut app, text);
+        app.filter_text = "222".to_string();
+        let _ = painted_receive(&mut app);
+
+        assert_eq!(app.receive_text, text, "筛选动了源文本");
+        assert_eq!(span_text(&app.display_spans), text, "筛选动了显示镜像");
+        assert_eq!(span_text(&app.ascii_spans), text, "筛选动了字节镜像");
     }
 }
