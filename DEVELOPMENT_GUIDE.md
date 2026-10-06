@@ -415,6 +415,11 @@ impl eframe::App for ComTool {
     `cargo fmt && cargo check --all-targets && cargo test`，绝不用 `cargo run` 启动 GUI
     来"看一眼效果"——那会占用串口并可能打断门闩期间 COM3 上正在运行的其他程序。
     真要实机看效果，等用户批准运行，并在 COM4 上**先勾 DTR** 再判断收发是否正常。
+    ⭐ **能用脚本验的就别等放行**：COM4 上自带一个持续数据源，用临时 `#[test]` 驱动
+    `SerialChannel` 就能验到真实链路（**跑完删探针**并用 `git diff --stat src/` 确认零残留）——
+    2026-10-07 这样把 `HANDOVER.md` 第 44 / 45 项从"待人工"变成了"已实证"。
+    实测数据、步骤与陷阱见 **`TEST_PORT_COM4.md`**（⚠️ 它是 CDC ACM 类，**任何波特率都返回
+    OK**，用它在 N5 非标波特率上得出的结论是假的）。
 
 11. **日志长度上限只有一处实现**：`ComTool::trim_receive_logs()`，在 `receive_data()` 末尾无条件调用。四份镜像**各自**按同一字符预算裁剪——三种模式写入的镜像并不相同（HEX/文本模式写 `display_spans`，字节查看模式写 `ascii_spans`，`receive_text` 三种都写），它们之间没有下标对应关系，不要试图"按 `receive_text` 裁好再同步"。裁剪必须按**字符**边界（不是字节下标），并且要能把边界上的 `ColoredSpan` **从中间切开**且保留其 `AnsiStyle`。
 
