@@ -207,6 +207,10 @@ mod tests {
             // 会被默认值掩盖成"往返成功"。
             ui_font_scale: UiFontScale::ExtraLarge,
             auto_scroll: false,
+            // 「强制换行」默认是 `true`，样本里必须取**非默认**值 `false`，否则
+            // "这个字段压根没写进存档"会被默认值掩盖成"往返成功"（与 `always_on_top`
+            // 同一条理由）。
+            force_wrap_long_lines: false,
             // 置顶也是用户偏好，且默认就是 `false`——样本里必须取 `true`（非默认），
             // 否则"字段根本没写进存档"会被默认值掩盖成"往返成功"。
             always_on_top: true,
@@ -289,6 +293,10 @@ mod tests {
         );
         assert_eq!(restored.auto_scroll, original.auto_scroll);
         assert_eq!(
+            restored.force_wrap_long_lines, original.force_wrap_long_lines,
+            "「强制换行」是用户偏好，必须跟着存档走——否则取消勾选后重启又折上了"
+        );
+        assert_eq!(
             restored.always_on_top, original.always_on_top,
             "「总在最前端」是用户偏好，必须跟着存档走——否则勾了置顶、重启就没了"
         );
@@ -324,6 +332,47 @@ mod tests {
         assert_eq!(restored.show_chart_panel, original.show_chart_panel);
         assert_eq!(restored.chart_max_samples, original.chart_max_samples);
         assert_eq!(restored.chart_auto_bounds, original.chart_auto_bounds);
+    }
+
+    /// **旧存档**（还不知道「强制换行」这个字段的版本）必须照常加载。
+    ///
+    /// 这条保护的是一次真实的升级事故：存档是 **RON**，而 RON 反序列化遇到缺字段会
+    /// **整份失败**，`eframe::get_value` 于是返回 `None`，`load` 退回 `Default`——
+    /// 用户升级后语言、波特率、主题、输出目录会一次性全部回到出厂值，而界面上
+    /// 看不出为什么（日志里只有一行 debug）。字段上的 `#[serde(default = …)]` 就是
+    /// 为此存在的，这条测试是它唯一的守卫。
+    ///
+    /// 两个断言分工明确：
+    /// - `language` 保住了 ⇒ 整份存档没有降级为默认值（缺字段没有拖垮解析）；
+    /// - `force_wrap_long_lines` 为 `true` ⇒ 缺字段时落成**勾选**（用户要的默认），
+    ///   而不是 `bool::default()` 的 `false`。后者正是"升级后突然不折行了"。
+    #[test]
+    fn archive_without_the_force_wrap_field_still_loads() {
+        let mut storage = MemoryStorage::default();
+        save(&mut storage, &customized());
+        let raw = storage
+            .get_string(STORAGE_KEY)
+            .expect("前置条件：存档已写入");
+
+        // 模拟"上一个版本写下的存档"：把这一行删掉。
+        const FIELD_LINE: &str = "force_wrap_long_lines:false,";
+        let stripped = raw.replace(FIELD_LINE, "");
+        assert_ne!(
+            stripped, raw,
+            "前置条件没成立：存档里找不到 {FIELD_LINE:?}，这条测试会空转"
+        );
+        storage.set_string(STORAGE_KEY, stripped);
+
+        let restored = load(Some(&storage));
+        assert_eq!(
+            restored.language,
+            Language::En,
+            "旧存档被整个丢掉了——缺字段让 RON 反序列化失败了，用户的全部偏好随之失效"
+        );
+        assert!(
+            restored.force_wrap_long_lines,
+            "旧存档缺这个字段时应当落成**勾选**（用户要的默认值），而不是 false"
+        );
     }
 
     /// 运行时状态必须被丢弃，而不是从存档里带回来。

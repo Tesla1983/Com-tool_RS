@@ -526,6 +526,26 @@ pub struct ComTool {
     pub ui_font_scale: UiFontScale,
     /// 接收区是否自动滚动到最新
     pub auto_scroll: bool,
+    /// 接收区是否给**超长的行**强制换行（超过 [`crate::receive::FORCE_WRAP_COLUMN`]
+    /// 个字符的行被断开；更短的行完全不动）。只作用于文本 / HEX 视图——另外两个视图
+    /// 本来就是按宽度折行的，关掉它没有意义（也无法再承诺"更短的行不动"）。
+    ///
+    /// ⚠️ `serde(default = …)` 是**刻意的冗余**，不要删。
+    ///
+    /// 实测（2026-10-06）：RON 遇到缺字段**并不报错**，而是把该字段落成
+    /// `Default::default()`——老存档因此照常加载，这一点早有
+    /// `config::tests::archive_missing_new_fields_still_loads` 钉着。
+    /// 既然如此还要写这一行，是因为**两者回答的不是同一个问题**：
+    /// `Default::default()` 回答"新会话的出厂值是什么"，这一行回答"存档里没有这个
+    /// 字段时应该是什么"。把后者挂在前者身上，等于允许有人为了别的原因改掉
+    /// `ComTool::default()` 里的这一条，顺手改掉了老用户的升级结果。
+    /// 二者的独立性由 `config::tests::archive_without_the_force_wrap_field_still_loads`
+    /// 守住（把 `Default` 里的默认值改成 `false`，那条测试依然通过）。
+    ///
+    /// 默认为 `true`（勾选）：单条串口日志超过 200 字符很常见（AT 响应、JSON、
+    /// 十六进制转储），原先它们排成一行、要用横向滚动条一路拖过去才能看全。
+    #[serde(default = "default_force_wrap_long_lines")]
+    pub force_wrap_long_lines: bool,
     /// 窗口是否总在最前端（「视图」菜单里的开关，落盘）
     ///
     /// **真正的生效在 [`ComTool::apply_always_on_top`]**：这一项只是偏好值，改它不会
@@ -729,6 +749,15 @@ pub(crate) const PENDING_STALL_AFTER: Duration = Duration::from_secs(3);
 /// ⚠️ 这个常量**不是**"读多大块"的自由选择，它是"背压能不能起作用"的前提：
 /// 曾经设想过的"整个文件一次塞进队列"正是被 1 MiB 上限当场拒掉的做法。
 pub(crate) const SEND_FILE_CHUNK: usize = 4096;
+
+/// 「强制换行」的默认值：**勾选**。
+///
+/// 单独抽成函数是为了给 `#[serde(default = …)]` 用——存档里缺这个字段（老版本的存档
+/// 必然缺）时也要落成"勾选"，而不是 `bool` 的默认值 `false`。写
+/// `#[serde(default)]` 取不到这个语义（那是 `bool::default()`）。
+pub(crate) const fn default_force_wrap_long_lines() -> bool {
+    true
+}
 
 /// 「发送文件」的一次推进结果。
 ///
@@ -1898,6 +1927,11 @@ impl Default for ComTool {
             theme: ThemeChoice::default(),
             ui_font_scale: UiFontScale::default(),
             auto_scroll: true,
+            // 「强制换行」默认**勾选**（用户要求）：默认不折行时，一条 200+ 字符的日志
+            // 要靠横向滚动条一路拖过去。它与 `serde` 的默认值保持一致（见
+            // [`default_force_wrap_long_lines`]），否则"手改存档删掉这一行"和"新用户第一
+            // 次启动"会给出不同的结果。
+            force_wrap_long_lines: default_force_wrap_long_lines(),
             // 默认**不置顶**：置顶会盖住别的窗口，是用户主动要才该有的行为，
             // 不能默认替所有人决定。
             always_on_top: false,

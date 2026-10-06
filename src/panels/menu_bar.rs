@@ -148,6 +148,17 @@ impl ComTool {
         self.hex_view = hex_view;
         self.ascii_view = ascii_view;
         self.resolve_display_mode(hex_just_enabled, ascii_just_enabled, color_just_enabled);
+        // 「强制换行」排在这一组的最后一行：它改的是**长行怎么显示**，属于显示模式，
+        // 但与上面三项不互斥（那是"用哪种视图解释收到的字节"）。放这里而不是挪到
+        // 「自动滚动」那一组，是因为用户是按"看什么、怎么排"来找它的。
+        //
+        // 直接绑字段（`&mut self.force_wrap_long_lines`）：它不与任何开关冲突，没有需要
+        // 裁决的东西——像上面那样先收局部变量再写回，只会多一层没有必要的样板。
+        ui.checkbox(&mut self.force_wrap_long_lines, s.force_wrap)
+            .on_hover_text(fill(
+                s.force_wrap_hover,
+                &[&crate::receive::FORCE_WRAP_COLUMN],
+            ));
     }
 
     /// 面板显隐勾选，并保证**至少保留一个可见面板**。

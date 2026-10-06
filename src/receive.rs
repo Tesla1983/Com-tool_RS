@@ -850,6 +850,69 @@ pub(crate) fn filter_lines<'a>(
     (std::borrow::Cow::Owned(kept), matched, total)
 }
 
+/// 长行**强制换行**的列宽（字符数）。超过它的行在每满 `FORCE_WRAP_COLUMN`
+/// 个字符处断开，不到它的行一个字都不动。
+///
+/// 为什么是字符而不是字节：断开点要落在**可见字符之间**，按字节切会把多字节序列劈开
+/// ——那种输入在 Rust 里根本到不了这里（`String` 保证有效 UTF-8），但"在 UTF-8 边界上
+/// 断"依赖编码，而"在第 N 个字符后面断"与编码无关。同理用 `char` 而不是
+/// `char_indices()` 的字节位：CJK 与 emoji 各算一个字，屏幕上也大致各占一列。
+///
+/// 为什么是**硬折**（断点是固定的第 N 个字符，与窗口多宽无关）而不是交给 egui 按宽度
+/// 折行：接收日志里常见表格与 ASCII 图案，它们的对齐是按**字符数**排的，按宽度流动会
+/// 让同一份内容在拖动窗口宽度时不断改变换行位置——同一份日志两次看不一样，比"右边要
+/// 横向拖一下"更难用。硬折之后**短于 200 字符的行行为与关闭时逐字节相同**（见
+/// [`wrap_long_lines`]）。
+pub(crate) const FORCE_WRAP_COLUMN: usize = 200;
+
+/// 把超过 [`FORCE_WRAP_COLUMN`] 的行按固定列宽断开，其余行原样保留。
+///
+/// 返回值刻意做成 `Cow`：没有任何一行超宽时返回 `Cow::Borrowed`——**不复制、不重建**。
+/// 这个函数每帧都要在整份接收日志上跑一遍，默认的那条路径必须是零分配的。
+///
+/// 刻意的实现选择：
+///
+/// * **先扫一遍再决定要不要复制**。直接无脑 `String::with_capacity` 再逐字符推会让
+///   每条都 own 一份；`receive_text` 的上限是几十万字符，每帧多复制一份白白多跑一次
+///   排版之外的内存搬运。
+/// * **按 `\n` 分行后逐行判断**：只有超宽的行才可能被改写，短行直接 `push_str`。
+/// * **行尾的 `\r` 属于该行内容**（`\r\n` 的输入不会在这里被打散），是否超宽也把它
+///   算进去——它占一个字符的位置，算进去了才与屏幕上看到的一致。
+/// * **`column == 0` 视为"不折"**：把这一档留给"只要原样"的调用方，而不是让它
+///   `panic` 或者把文本切成一字符一行。
+///
+/// ⚠️ 它是**纯显示层**的变换，与 [`filter_lines`] 同一层：改的只是"交给排版的那一份
+/// 文本"，`receive_text` / 导出 / 实时文件日志都不受影响——也就是说「复制全部日志」
+/// 给出去的仍然是**未折行的原文**（见 [`show_plain_receive`]）。人为插入的 `\n` 一旦
+/// 混进剪贴板，用户贴到表格里就会变成几百行伪数据。
+pub(crate) fn wrap_long_lines(text: &str, column: usize) -> std::borrow::Cow<'_, str> {
+    if column == 0 {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    // 没有任何一行超宽 ⇒ 什么都不用改。这条分支是常态，所以它只做一次计数扫描。
+    if !text.split('\n').any(|line| line.chars().count() > column) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len() + text.len() / column + 1);
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            // `split` 丢掉的那些 `\n` 要补回来：它们是原始的行边界。
+            out.push('\n');
+        }
+        let mut written = 0usize;
+        for ch in line.chars() {
+            if written == column {
+                out.push('\n');
+                written = 0;
+            }
+            out.push(ch);
+            written += 1;
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// 同 [`filter_lines`]，但作用在**带样式的片段**上（彩色视图与字节查看视图渲染的是
 /// 片段，不是纯文本）。
 ///
@@ -1064,7 +1127,7 @@ fn px_per_char(content_h: f32, chars: usize) -> f32 {
     content_h / chars as f32
 }
 
-/// 普通文本模式接收区：不折行（Extend）+ 纵/横双向滚动，
+/// 普通文本模式接收区：**默认不折行**（Extend）+ 纵/横双向滚动，
 /// 等宽 galley 绘制保证盲文 ASCII 图案整行对齐；可选中、右键复制全部日志。
 ///
 /// 返回值见 [`ReceiveScrollOutcome`]：调用方拿它更新
@@ -1074,6 +1137,17 @@ fn px_per_char(content_h: f32, chars: usize) -> f32 {
 /// 深色主题下接收区背景也是深的，黑字会直接看不见。
 ///
 /// `offset_y` 见 [`show_receive_scroll`]：本帧裁掉旧内容后补偿过的滚动位置。
+///
+/// `force_wrap` = 用户勾了「强制换行」（[`crate::app::ComTool::force_wrap_long_lines`]）：
+/// 打开时超过 [`FORCE_WRAP_COLUMN`] 个字符的行被断开（见 [`wrap_long_lines`]），关闭时
+/// 整个视图的行为与加入这个开关之前**逐像素相同**。
+///
+/// ⚠️ **显示用它、复制不用它**：「复制全部日志」给的是参数 `text` 本身（未折行的原文），
+/// 人为插入的 `\n` 不进剪贴板。收到手的该和设备发的一致。
+///
+/// ⚠️ 开关前后两个分支都保持 `TextWrapMode::Extend` —— 硬折**已经**把长行切成了多段
+/// 逻辑行，此处若再让 egui 按窗口宽度折一次，同一个系统会给出两套换行位置，而这套显示
+/// 刻意要与窗口宽度无关。补偿仍用 `INFINITY` 排版（见调用方注释），理由同上。
 pub(crate) fn show_plain_receive(
     ui: &mut Ui,
     text: &str,
@@ -1081,10 +1155,18 @@ pub(crate) fn show_plain_receive(
     copy_all_label: &str,
     offset_y: Option<f32>,
     max_height: f32,
+    force_wrap: bool,
 ) -> ReceiveScrollOutcome {
-    let text_chars = text.chars().count();
+    let shown = if force_wrap {
+        wrap_long_lines(text, FORCE_WRAP_COLUMN)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
+    // 参与换算的必须是**真正被排版的那一份**：`px_per_char` 的分母（字符数）与
+    // `content_size`（高度）来自同一个对象，混着取会让"还能安全裁多少字符"算歪。
+    let text_chars = shown.chars().count();
     let job = egui::text::LayoutJob::simple(
-        text.to_owned(),
+        shown.into_owned(),
         monospace_font_id(ui, RECEIVE_MONOSPACE_BASE_SIZE),
         ui.visuals().text_color(),
         f32::INFINITY,
@@ -1798,7 +1880,9 @@ impl ComTool {
             // HEX 与普通文本共用同一个渲染：差别只在片段本身（HEX 模式下片段已是
             // 十六进制文本），不需要两套绘制。
             DisplayMode::Hex | DisplayMode::Text => {
-                // 这个视图**不折行** ⇒ 排版被裁文本时用 `INFINITY`。
+                // 这个视图不折行 ⇒ 排版被裁文本时用 `INFINITY`。勾了「强制换行」也
+                // 一样：`wrap_long_lines` 是按**字符数**硬折的，折出来的仍是若干整行，
+                // 与窗口宽度无关，所以无需改走 `viewport_w` 那条折行补偿路径。
                 // `receive_data()` 已经在本帧更早处跑过（`ComTool::ui` 开头），裁剪
                 // 发生在这里之前，所以补偿取到的是完整的一段。
                 let offset_y = self.take_front_trim_compensation(ui, f32::INFINITY);
@@ -1814,6 +1898,7 @@ impl ComTool {
                     copy_all_log,
                     offset_y,
                     max_height,
+                    self.force_wrap_long_lines,
                 );
                 self.note_receive_scroll(&out);
                 self.note_filter_counts(matched, total);
@@ -2038,6 +2123,261 @@ mod tests {
             }
         }
         panic!("这一帧没有画出接收区日志文本；实际画出的文字 shape 有 {drawn:?}");
+    }
+
+    // —— 长行强制换行（2026-10-06 用户要求：「显示模式」下加勾选框，默认勾上）———
+
+    /// 一段测试文本里的**标记**，用来在无头绘制结果里认出"日志那一份 galley"。
+    const WRAP_MARK: &str = "wrapmark";
+
+    /// 把一段文本交给文本视图画一帧，读出真正排版出来的东西。
+    ///
+    /// 返回的三个值都是**从 `Shape::Text` 的 galley 上读出来的**，不是从输入字符串算的：
+    /// - `galley.text()`：egui 实际拿去排版的那份文本。插入了软换行的话它就与原稿不同，
+    ///   这正是"显示层折了还是没折"的答案。
+    /// - `galley.rows.len()`：视觉行数。不折行时恒为 1（Extend 模式不存在折出多行的可能）。
+    /// - `galley.size().y`：排版出来的总高。行数变多必然变高。
+    ///
+    /// ⚠️ `screen_rect` 必须给：`ScrollArea` 在没有它时会把可用尺寸算成 0，内容画不出来，
+    /// 于是"画没画出来"变成假红。
+    fn painted_text_view(text: &str, force_wrap: bool) -> (String, usize, f32) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            show_plain_receive(
+                ui,
+                text,
+                true,
+                "copy all",
+                None,
+                RECEIVE_SCROLL_MAX_HEIGHT,
+                force_wrap,
+            );
+        });
+
+        let mut drawn: Vec<String> = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(t) = &clipped.shape {
+                let glyphs = t.galley.text();
+                drawn.push(glyphs.chars().take(16).collect());
+                if glyphs.contains(WRAP_MARK) {
+                    let answer = (glyphs.to_owned(), t.galley.rows.len(), t.galley.size().y);
+                    out.textures_delta.clear();
+                    return answer;
+                }
+            }
+        }
+        out.textures_delta.clear();
+        panic!("这一帧没有画出带标记的日志文本；实际画出：{drawn:?}");
+    }
+
+    /// [`wrap_long_lines`]：不到列宽的行**一个字都不动**，包括原封不动地借用。
+    ///
+    /// `Cow::Borrowed` 不是顺带一提：这个函数每帧都在整份日志上跑，常态必须零分配。
+    #[test]
+    fn wrap_long_lines_leaves_short_lines_untouched() {
+        let short = format!("{WRAP_MARK}\nsecond line\n");
+        assert!(
+            matches!(wrap_long_lines(&short, 200), std::borrow::Cow::Borrowed(_)),
+            "没有一行超宽时不该重新分配一份——这函数每帧都跑"
+        );
+
+        // 恰好 200 个字符也不折：阈值指的是"超过"。
+        let exact = "x".repeat(200);
+        let wrapped = wrap_long_lines(&exact, 200);
+        assert_eq!(wrapped, exact, "正好等于列宽的行不该被折");
+        assert!(
+            matches!(wrapped, std::borrow::Cow::Borrowed(_)),
+            "正好等于列宽时同样不必复制"
+        );
+    }
+
+    /// [`wrap_long_lines`]：超过列宽的行在**第 200 个字符之后**断开，且断点是"满 200
+    /// 就断"重复下去——不是只在行尾折一次。
+    ///
+    /// `column + 1` 这一档专门钉住"等于阈值不算超"（判据写成 `>=` 时它会红）。
+    #[test]
+    fn wrap_long_lines_breaks_every_column_characters() {
+        // 阈值一律写字面量：引用 `FORCE_WRAP_COLUMN` 等于让实现给自己的判据定标准——
+        // 把常量改成 10 也不会有人发现界面已经不是"超过 200 换行"了。
+        const COLUMN: usize = 200;
+
+        let line = "x".repeat(COLUMN + 1);
+        let wrapped = wrap_long_lines(&line, COLUMN);
+        assert_eq!(
+            wrapped,
+            format!("{}\nx", "x".repeat(COLUMN)),
+            "超宽一行时应当在第 200 个字符之后断开"
+        );
+
+        // 500 个字符 ⇒ 200 + 200 + 100：不是"折一次就完事"。
+        let long = "y".repeat(COLUMN * 2 + 100);
+        let folded = wrap_long_lines(&long, COLUMN);
+        let rows: Vec<&str> = folded.split('\n').collect();
+        assert_eq!(
+            rows.len(),
+            3,
+            "500 个字符应当折成三行（200/200/100），实际 {rows:?} 行？行数={}",
+            rows.len()
+        );
+        assert_eq!(rows[0].chars().count(), COLUMN);
+        assert_eq!(rows[1].chars().count(), COLUMN);
+        assert_eq!(rows[2].chars().count(), 100);
+    }
+
+    /// [`wrap_long_lines`]：**逐行独立判断**，长行折、短行留。
+    ///
+    /// 这条挡的是"拿整份文本的总长度当判据"——那样一份含三个短行的日志（合计超过 200）
+    /// 会把每个短行都切开，而用户的诉求恰恰是"短行不要动"。
+    #[test]
+    fn wrap_long_lines_measures_each_line_on_its_own() {
+        const COLUMN: usize = 200;
+        let short_line = "k".repeat(30);
+        let long_line = "z".repeat(COLUMN * 2);
+        let input = format!("{short_line}\n{long_line}\n{short_line}");
+
+        let wrapped = wrap_long_lines(&input, COLUMN);
+        let rows: Vec<&str> = wrapped.split('\n').collect();
+
+        assert_eq!(rows.len(), 4, "应当是 短/长前段/长后段/短 四行：{rows:?}");
+        assert_eq!(rows[0].chars().count(), 30, "短行被改动了");
+        assert_eq!(rows[1].chars().count(), COLUMN);
+        assert_eq!(rows[2].chars().count(), COLUMN);
+        assert_eq!(rows[3].chars().count(), 30, "最后那个短行被改动了");
+    }
+
+    /// [`wrap_long_lines`]：按**字符**计数，一个汉字 / 一个 emoji 各占一列。
+    ///
+    /// 按字节断的实现会把多字节字符切开——在 Rust 里那种切片根本编译不过（String 不是非法
+    /// UTF-8），真正的风险退化为"按字节数断":一个汉字 3 字节，第 200 字节落在第 67 个字上。
+    #[test]
+    fn wrap_long_lines_counts_characters_not_bytes() {
+        const COLUMN: usize = 200;
+        let wide = "汉".repeat(COLUMN + 10);
+        let wrapped = wrap_long_lines(&wide, COLUMN);
+        let rows: Vec<&str> = wrapped.split('\n').collect();
+
+        assert_eq!(rows.len(), 2, "按字符数应当在 200 字之后断一次：{rows:?}");
+        assert_eq!(rows[0].chars().count(), COLUMN);
+        assert_eq!(
+            // （200 个汉字的字节数是它的三倍，下面那条字节断言就是"按字节断"会红的地方）
+            rows[0].len(),
+            COLUMN * 3,
+            "第一段必须是 200 个汉字"
+        );
+    }
+
+    /// [`wrap_long_lines`] 的几个边界：空文本、纯换行、末尾换行、以及 `column == 0`
+    /// 表示"不折"而不是 panic。
+    #[test]
+    fn wrap_long_lines_handles_the_edges() {
+        assert!(wrap_long_lines("", 200).is_empty());
+        assert_eq!(wrap_long_lines("\n", 200), "\n", "单个换行不该被吃掉");
+
+        let trailing = format!("{WRAP_MARK}\n");
+        assert_eq!(
+            wrap_long_lines(&trailing, 200),
+            trailing,
+            "末尾的换行要保留：它决定下一批数据从新的一行开始"
+        );
+
+        // `\r\n` 的行尾：'\r' 属于行内容，换行位置仍然按字符数算。
+        let crlf = format!("{}\r\n{}", "c".repeat(199), "tail");
+        let wrapped = wrap_long_lines(&crlf, 200);
+        assert!(
+            wrapped.starts_with("c".repeat(199).as_str()),
+            "199 个字符 + CR 没到 200，不该在这折：{wrapped:?}"
+        );
+
+        assert_eq!(
+            wrap_long_lines("x".repeat(500).as_str(), 0),
+            "x".repeat(500),
+            "`column == 0` 是「不折」，不是「一字符一行」"
+        );
+    }
+
+    /// **出厂那个阈值必须是 200**（写到只测算法是不够的）。
+    ///
+    /// 上面几条为了测算法都自带 `column` 参数，改实现里的常量它们一条都不会红——把
+    /// 阈值换成 100 是会全绿的。这条把**实际发出去的那个常量**接到"用户被告知的数字"
+    /// 上：201 个字符的行应当恰好多出一个换行符（共 202 字符）。阈值变成 100 时这里
+    /// 会插入两个换行符（203 字符）⇒ 会红。
+    ///
+    /// 之所以用"多长 / 加了几行"这种关系而不是 `assert_eq!(FORCE_WRAP_COLUMN, 200)`：
+    /// 后者是在给实现做公证——任何人都可以在改常量的同时改这条断言，而用户看到的换行
+    /// 位置已经不是他说要的那个了。
+    #[test]
+    fn the_shipped_column_is_two_hundred() {
+        let line = "x".repeat(201);
+        let wrapped = wrap_long_lines(&line, FORCE_WRAP_COLUMN);
+        assert_eq!(
+            wrapped.chars().count(),
+            202,
+            "201 个字符的行应当只多出一个换行符；界面承诺的是「超过 200 才换行」。\
+             实际折成了 {wrapped:?}"
+        );
+    }
+
+    /// 开关**真的接到了绘制上**：勾上时 galley 里多了换行、视觉行数变多行、总高变高。
+    ///
+    /// 三条判据缺一不可，各自挡一种空转：
+    /// - 只看"文本变了"，就可能被"同样内容换个对象"糊过去；
+    /// - 只看行数不够：`Extend` 模式下行数唯一来源是文本里的 '\n'，配上"文本变了"才
+    ///   能证明那些 '\n' 是折出来的、不是原文自带的；
+    /// - 高度是行数变多的必然结果，顺带证明"用户看到的是占了几行的高度"而不是隐藏了。
+    #[test]
+    fn text_view_honors_the_force_wrap_switch() {
+        // 301 个字符 + 标记 ⇒ 不折时 1 行，折完 2 行。
+        let text = format!("{WRAP_MARK}{}", "a".repeat(301 - WRAP_MARK.len()));
+        assert_eq!(text.chars().count(), 301, "前置条件：这一段确实超过 200");
+
+        let (plain_glyphs, plain_rows, plain_h) = painted_text_view(&text, false);
+        let (wrapped_glyphs, wrapped_rows, wrapped_h) = painted_text_view(&text, true);
+
+        assert_eq!(
+            plain_glyphs, text,
+            "关掉开关时应当逐字节等于原文——加入这个选项不该改变旧行为"
+        );
+        assert_eq!(plain_rows, 1, "不折行视图里 301 个字符排成一行");
+
+        assert_eq!(
+            wrapped_rows, 2,
+            "勾上之后 301 个字符应当排成两行（200 + 101），实际画出了 {wrapped_rows} 行"
+        );
+        assert_ne!(
+            wrapped_glyphs, plain_glyphs,
+            "勾上之后排版用的文本却没变——开关没接到绘制上"
+        );
+        assert!(
+            wrapped_h > plain_h * 1.5,
+            "两行应当比一行高得多（{plain_h:.1} → {wrapped_h:.1}），否则用户看不出区别"
+        );
+    }
+
+    /// **出厂默认就是勾选的**：一个全新的 `ComTool` 在文本视图里应当看得见折行。
+    ///
+    /// 判据走"真实画出来几行"而不是读字段：字段为 true 而界面没读它，用户看到的仍然
+    /// 是不折的日志——那才是"默认勾选"这句话要表达的东西。
+    #[test]
+    fn a_fresh_app_wraps_long_lines_in_the_text_view() {
+        let app = ComTool::default();
+        assert!(
+            app.force_wrap_long_lines,
+            "新用户的界面必须是勾上的（用户明确要求默认勾选）"
+        );
+
+        let text = format!("{WRAP_MARK}{}", "b".repeat(400));
+        let (glyphs, rows, _) = painted_text_view(&text, app.force_wrap_long_lines);
+        assert_eq!(
+            rows, 3,
+            "400+ 个字符在新用户的界面里应当折成 3 行；实际 {rows} 行：{glyphs:?}"
+        );
     }
 
     /// [`is_at_bottom`] 的三态：内容装得下 / 贴在底部 / 翻到了历史里。

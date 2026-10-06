@@ -2166,6 +2166,36 @@ strings! {
         "Her zaman üstte",
         "Всегда поверх остальных",
         "Zawsze na wierzchu";
+    force_wrap: "强制换行", "Force wrap",
+        "強制換行",
+        "強制折り返し",
+        "Ajuste de línea forzado",
+        "A capo forzato",
+        "Quebra de linha forçada",
+        "Ganti baris paksa",
+        "Retour à la ligne forcé",
+        "Zeilenumbruch erzwingen",
+        "강제 줄바꿈",
+        "Xuống dòng cưỡng bức",
+        "Zorunlu satır sarma",
+        "Принудительный перенос",
+        "Wymuś zawijanie";
+    force_wrap_hover:
+        "长度超过 {} 个字符的行会被断开换行，更短的行保持原样；只作用于文本 / HEX 视图",
+        "Lines longer than {} characters are broken onto several rows; shorter lines stay as they are. Text and HEX views only",
+        "長度超過 {} 個字元的行會被斷開換行，更短的行保持原樣；只作用於文字 / HEX 檢視",
+        "{} 文字を超える行は途中で折り返され、それより短い行はそのままです。対象はテキスト表示と HEX 表示のみ",
+        "Las líneas de más de {} caracteres se parten en varias; las más cortas se quedan igual. Solo en las vistas de texto y HEX",
+        "Le righe più lunghe di {} caratteri vengono spezzate su più righe; quelle più corte restano invariate. Solo per le viste testo e HEX",
+        "Linhas com mais de {} caracteres são quebradas em várias; as mais curtas ficam iguais. Somente nas exibições de texto e HEX",
+        "Baris lebih dari {} karakter dipotong menjadi beberapa baris; baris yang lebih pendek tetap apa adanya. Hanya untuk tampilan teks dan HEX",
+        "Les lignes de plus de {} caractères sont coupées sur plusieurs lignes ; les plus courtes restent inchangées. Uniquement pour les vues texte et HEX",
+        "Zeilen mit mehr als {} Zeichen werden umbrochen; kürzere bleiben unverändert. Nur für die Text- und HEX-Ansicht",
+        "{} 자를 넘는 줄은 여러 줄로 나뉘고, 더 짧은 줄은 그대로 둡니다. 텍스트 / HEX 보기에만 적용됩니다",
+        "Dòng dài hơn {} ký tự được ngắt xuống nhiều dòng; dòng ngắn hơn giữ nguyên. Chỉ áp dụng cho chế độ xem Văn bản / HEX",
+        "{} karakterden uzun satırlar birden çok satıra bölünür; daha kısa satırlar olduğu gibi kalır. Yalnızca metin / HEX görünümünde geçerlidir",
+        "Строки длиннее {} символов разбиваются на несколько строк, более короткие остаются как есть. Только для текстового и HEX-режима",
+        "Wiersze dłuższe niż {} znaków są łamane na kilka wierszy; krótsze pozostają bez zmian. Dotyczy tylko widoku tekstowego i HEX";
     text: "文本", "Text",
         "文字",
         "テキスト",
@@ -4012,6 +4042,7 @@ mod tests {
             ("rx_bytes_label", 1),
             ("tx_bytes_label", 1),
             ("pending_bytes_label", 1),
+            ("force_wrap_hover", 1),
             ("send_file_progress", 2),
             ("preset_full", 1),
             ("preset_count_text", 2),
@@ -4088,6 +4119,7 @@ mod tests {
             "log_config_locked_hint",
             "send_file",
             "send_file_cancel",
+            "force_wrap",
         ];
         for field in plain {
             let (_, columns) = ALL

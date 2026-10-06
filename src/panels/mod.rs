@@ -65,6 +65,7 @@ mod tests {
                 None,
                 // 高度上限：这条不验布局，给默认上限即可（让位逻辑另有一条测试）。
                 crate::receive::RECEIVE_SCROLL_MAX_HEIGHT,
+                app.force_wrap_long_lines,
             );
         });
         egui::__run_test_ui(|ui| {
@@ -84,6 +85,7 @@ mod tests {
                 app.language.strings().copy_all_log,
                 None,
                 crate::receive::RECEIVE_SCROLL_MAX_HEIGHT,
+                app.force_wrap_long_lines,
             );
         });
     }
@@ -710,6 +712,150 @@ mod tests {
 
         out.textures_delta.clear();
         texts
+    }
+
+    /// 「视图」菜单主体里画出来的每一行文字，**带纵坐标**。
+    ///
+    /// 多代的 y 是为了判定**位置**：用户要求「强制换行」摆在"显示模式"下面，"画出来了"
+    /// 满足不了这一点——摆到菜单最后也一样绿。y 取自落笔位置 `Shape::Text::pos`。
+    fn view_menu_lines(app: &mut ComTool) -> Vec<(String, f32)> {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            app.view_menu_body(ui);
+        });
+
+        let mut lines = Vec::new();
+        for clipped in &out.shapes {
+            if let egui::epaint::Shape::Text(text_shape) = &clipped.shape {
+                lines.push((text_shape.galley.text().to_owned(), text_shape.pos.y));
+            }
+        }
+
+        out.textures_delta.clear();
+        lines
+    }
+
+    /// 某一行 menu 文案的纵坐标。找不到时 panic —— 这是判据的前置条件，不该静默通过。
+    fn menu_line_y(lines: &[(String, f32)], wanted: &str) -> f32 {
+        lines
+            .iter()
+            .find(|(text, _)| text == wanted)
+            .map(|(_, y)| *y)
+            .unwrap_or_else(|| panic!("菜单里没有 {wanted:?}；实际：{lines:?}"))
+    }
+
+    /// 「视图」菜单里新增的「强制换行」：**画得出来**，而且**摆在「显示模式」一组里**。
+    ///
+    /// 位置判据：它的 y 必须落在「字节查看」（显示模式三项的最后一项）与「自动滚动」
+    /// （下一组的第一项）之间。这样"加在菜单末尾"与"丢进显示模式组"不会都算通过。
+    ///
+    /// 不完整那半（"勾了以后接收区真的折行"）在 `receive::tests` 里，那条才是对用户
+    /// 负责的判据；这条只负责"菜单上确实有这个入口，且位置是用户指定的"。
+    #[test]
+    fn view_menu_puts_force_wrap_in_the_display_mode_group() {
+        for language in [Language::Zh, Language::En] {
+            let mut app = ComTool {
+                language,
+                ..ComTool::default()
+            };
+            let s = app.language.strings();
+            let lines = view_menu_lines(&mut app);
+
+            assert!(
+                lines.iter().any(|(text, _)| text == s.force_wrap),
+                "「视图」菜单里没有「强制换行」 {:?}——用户没有地方开关它。实际：{lines:?}",
+                s.force_wrap
+            );
+            // 参照物必须在场，否则"位置夹在两者之间"会被缺项掩盖成通过。
+            let byte_view_y = menu_line_y(&lines, s.byte_view);
+            let auto_scroll_y = menu_line_y(&lines, s.auto_scroll);
+            assert!(
+                byte_view_y < auto_scroll_y,
+                "前置条件不成立：显示模式组已经不在自动滚动之上了（{byte_view_y} vs {auto_scroll_y}）"
+            );
+
+            let force_wrap_y = menu_line_y(&lines, s.force_wrap);
+            assert!(
+                force_wrap_y > byte_view_y && force_wrap_y < auto_scroll_y,
+                "「强制换行」要摆在「显示模式」下面，实际落点在 byte_view({byte_view_y:.1}) 与 \
+                 auto_scroll({auto_scroll_y:.1}) 之外的 {force_wrap_y:.1}"
+            );
+        }
+    }
+
+    /// 菜单里的勾选框**真的绑在这个字段上**：勾与不勾画出来的不是同一帧画面。
+    ///
+    /// 这条挡的是"加了文案没接字段"——那种实现下改 `force_wrap_long_lines` 对菜单毫无影响，
+    /// 用户在菜单上点半天，界面纹丝不动。判据用整帧画面的可视签名（文字 + 矩形位置 +
+    /// paint 信息），因此无论勾选框的外观落在哪个属性上都会被看到。
+    ///
+    /// ⚠️ 必须两个方向都断言：只有"两者不同"这条的话，把菜单画成随机theme也会通过。
+    #[test]
+    fn view_menu_checkbox_follows_the_switch() {
+        /// 一帧菜单里每个 shape 的落笔位置 + 内容签名。两者都留着是为了定位差异。
+        struct Marked {
+            y: f32,
+            paint: String,
+        }
+
+        fn paint_signature(app: &mut ComTool) -> Vec<Marked> {
+            let ctx = egui::Context::default();
+            let mut out = ctx.run_ui(Default::default(), |ui| {
+                app.view_menu_body(ui);
+            });
+            let sig: Vec<Marked> = out
+                .shapes
+                .iter()
+                .map(|clipped| Marked {
+                    y: match &clipped.shape {
+                        egui::epaint::Shape::Text(t) => t.pos.y,
+                        egui::epaint::Shape::Rect(r) => r.rect.min.y,
+                        other => other.visual_bounding_rect().min.y,
+                    },
+                    paint: format!("{:?}", clipped.shape),
+                })
+                .collect();
+            out.textures_delta.clear();
+            sig
+        }
+
+        let mut app = ComTool::default();
+        let s = app.language.strings();
+        app.force_wrap_long_lines = true;
+        let checked = paint_signature(&mut app);
+        app.force_wrap_long_lines = false;
+        let unchecked = paint_signature(&mut app);
+
+        let checked_paint: Vec<&str> = checked.iter().map(|m| m.paint.as_str()).collect();
+        let unchecked_paint: Vec<&str> = unchecked.iter().map(|m| m.paint.as_str()).collect();
+        assert_ne!(
+            checked_paint, unchecked_paint,
+            "勾选与不勾选画出的是同一帧——菜单里的控件没有接到 `force_wrap_long_lines` 上"
+        );
+
+        // 差异必须**只出现在「强制换行」那一行**：否则"两帧不同"也可能只是别的地方在
+        // 抖（例如某个与时间相关的绘制），"菜单接了线"这个结论就站不住。
+        let row_y = menu_line_y(&view_menu_lines(&mut app), s.force_wrap);
+        let diff_rows: Vec<f32> = checked
+            .iter()
+            .chain(unchecked.iter())
+            .filter(|m| {
+                !checked.iter().any(|c| c.paint == m.paint)
+                    || !unchecked.iter().any(|u| u.paint == m.paint)
+            })
+            .map(|m| m.y)
+            .collect();
+        assert!(
+            !diff_rows.is_empty(),
+            "两帧画的不一样，却找不到任何差别的 shape——签名比对本身出了问题"
+        );
+        for y in diff_rows {
+            assert!(
+                (row_y - 4.0) <= y && y <= (row_y + 24.0),
+                "勾选状态不同导致的差异落在 y={y:.1}，而「强制换行」那一行在 y={row_y:.1}——\
+                 菜单里是别的东西在变，不是这个勾选框"
+            );
+        }
     }
 
     /// 驱动**菜单栏**并取出本帧下发给窗口的视口命令。
