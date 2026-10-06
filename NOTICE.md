@@ -122,3 +122,51 @@ pub parity: Parity,   pub stop_bits: StopBits,             // 与 serialport 参
   `Cargo.toml` / `NOTICE.md` / `main.rs`，按 clean-room 的口径已经被污染。
 
 在走上这条路之前，**GPLv3 已经允许你对外分发**（含收费与商用），并不构成阻碍。
+
+## 7. 能不能加一条「禁止商用」？——不能，三条依据
+
+2026-10-07 有人提出"希望可复制、可修改、必须开源，但**禁止商用**"。查证后的结论是
+**做不到**，且这个结论值得钉住，免得以后反复提。
+
+### 依据一：「禁止商用」的许可证按定义就不是开源许可证
+
+开源定义（OSI Open Source Definition，<https://opensource.org/osd>）**第 6 条
+No Discrimination Against Fields of Endeavor** 原文：
+
+> The license must not restrict anyone from making use of the program in a specific
+> field of endeavor. For example, it may not restrict the program from being used
+> in a business…
+
+即"开源"这个词本身就排除了用途歧视。想要禁商用，就得放弃"开源"这个标签，
+改用 source-available 类许可（BUSL、Elastic License、CC BY-NC 等）。
+
+### 依据二：GPLv3 允许下游**删除**这类附加条款
+
+GPLv3 **第 7 条**末尾：
+
+> All other non-permissive additional terms are considered "further restrictions"
+> within the meaning of section 10. If the Program as you received it, or any part
+> of it, contains a notice stating that it is governed by this License along with a
+> term that is a further restriction, **you may remove that term**.
+
+"禁止商用"不在第 7 条列举的六种可添加条款之内（a~f：免责、署名、禁止冒称来源、
+限制署名宣传、商标、补偿），因此属于"further restriction"——**下游可以合法地把它删掉，
+剩下的仍是完整 GPLv3**。也就是说：写了也没用，反而让许可自相矛盾。
+
+### 依据三：中国法院对这同一个问题已有判决
+
+**罗盒网络 vs 玩友网络**（广州知识产权法院，2021 年中国法院 10 大知识产权案件）。
+作者在 GPLv3 项目中声明"商业用途需购买商业授权"，法院认定其**无权添加**该条款，
+理由正是上述第 7 条；并认定被诉方收取会员费**不违反** GPLv3。
+
+判决同时指出一个常见误区：*"使用开源代码开发的软件，不可以商用、不可以收费"*
+是错的——GPL 约束的是**闭源**，不是收费。（该案为一审，双方均未上诉。）
+
+### 那"防止别人拿去赚钱"怎么办
+
+GPLv3 已经挡住了最实质的那一半：**别人可以卖，但必须把改过的源码一并公开**，
+不能做成独占的闭源产品。想连"卖"也禁掉，只有第 6 节的 clean-room 重写一条路，
+且代价与限制同第 6 节。
+
+**因此本项目的许可维持 GPL-3.0-only，不添加任何用途限制条款。** 这是刻意的、有依据的
+决定，不是遗漏——若将来有人再提"加个禁止商用"，请先读本节。
