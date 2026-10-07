@@ -23,23 +23,35 @@
 //!    错误会让用户第一次往没监听的端口发数据就把通道关掉。所以这里把它归入
 //!    **可忽略**，见 [`is_ignorable`]。
 //!
-//! # 为什么 UDP 不需要非阻塞写（与 TCP 的又一处差别）
+//! # 为什么 UDP 也改成了非阻塞（与 TCP 的又一处差别）
 //!
 //! TCP 侧在 2026-09-24 从阻塞写改成了非阻塞写，理由是**对端不读会把本地发送缓冲
 //! 灌满**（TCP 的发送缓冲受对端接收窗口节制），`write` 于是永不返回、worker 卡死、
 //! 待发上限失效、`close()` 也回不来。详见 `net_impl::tcp` 的模块文档。
 //!
-//! **UDP 没有这个机制**：它没有流控，对端读不读**不参与**本地发送缓冲的判定——
-//! 收不下就是丢掉，发送端照样返回成功。所以"对端不读 ⇒ worker 卡死"这条路径在
-//! UDP 上不存在，也就没有理由付非阻塞的代价（读侧要自己睡、空闲时多一次显式让出）。
+//! **UDP 曾经刻意保持阻塞**，理由当时是充分的：它没有流控，对端读不读**不参与**
+//! 本地发送缓冲的判定——收不下就是丢掉，发送端照样返回成功。实测（对端 socket
+//! 绑好端口后一个字节都不收，发送端 SO_SNDBUF 压到 4096）：连发 4000 个 60 KB
+//! 报文，**0 次失败、单次最长 0.1 ms**；同一台机器上换成 TCP 做同样的事，
+//! 2 分 05 秒毫无进展。也就是说"对端不读 ⇒ worker 卡死"这条路径在 UDP 上不存在。
 //!
-//! 实测（对端 socket 绑好端口后一个字节都不收，发送端 SO_SNDBUF 压到 4096）：
-//! 连发 4000 个 60 KB 报文，**0 次失败、单次最长 0.1 ms**；同一台机器上换成 TCP
-//! 做同样的事，2 分 05 秒毫无进展。
+//! 2026-10-07 改成非阻塞，收的是**另一条**残余风险：**本机网卡出口饱和**（不是
+//! "对端不读"）。出口发不出去时阻塞的 `send` 同样会把 worker 停在原地——`Halt`
+//! 看不见、`close()` 回不来、待发上限形同虚设，表现与 TCP 那次一模一样。它罕见，
+//! 但 `HANDOVER.md` §5 记的处置办法本来就是"按 TCP 同样的方式改非阻塞"，而代价
+//! 只是"空闲时自己睡"这一项，于是做掉。
 //!
-//! 仍然成立的一条：UDP 的 `send` **在本机出口饱和**时是可能阻塞的。那是另一个
-//! 触发条件（不是"对端不读"），且属"网卡发不出去"的真实反压，不是本文件要解的
-//! 问题；已记在 `HANDOVER.md` §5 里，未修。
+//! 为什么不用 `SO_SNDTIMEO` 补一个写超时（TCP 那边已实测排除过同一条路）：超时的
+//! `send` **拿不到已写字节数**，worker 无从判断这个数据报到底出没出去，重试就会
+//! 重复发出去。非阻塞的 `WouldBlock` 没有这个歧义——一个字节都没排队，下一轮再来。
+//!
+//! 代价与 TCP 相同：非阻塞 fd 上 `set_read_timeout` 失效（阻塞属性是**每个 fd**
+//! 整体的），空闲等待改为 worker 自己睡 [`IDLE_SLEEP`]。
+//!
+//! ⚠️ **这条改动没有、也无法被单元测试证明**：要触发它得先把真实网卡的出口打满，
+//! 而门禁里连一个能堵住的回环都造不出来（`cargo test` 里 UDP 发 4000 × 60 KB
+//! 给不读的对端是 0 次失败）。下面的测试只覆盖"改完之后收发与 `close()` 仍然正常"
+//! ——它们是**防回归**，不是这条改动生效的证据。
 //!
 //! # 为什么要 `connect` 一个无连接的 socket
 //!
@@ -67,9 +79,16 @@ use crate::communicationtrait::worker::{
 use crate::communicationtrait::{ByteChannel, ChannelEvent};
 use crate::net_impl::config::NetConfig;
 
-/// 单次 `recv` 的最长等待。与其它两个通道同值，理由相同（空闲唤醒频率 +
-/// 停机响应延迟）。
-const READ_TIMEOUT: Duration = Duration::from_millis(10);
+/// 两个方向都无事可做时，一轮循环让出的时间片。
+///
+/// 本通道的 socket 是**非阻塞**的（见 [`UdpChannel::open`]），所以 `recv` / `send`
+/// 都会立刻返回 `WouldBlock`——没有这一句就是 100% CPU 空转烧满一个核。串口那边靠
+/// `.timeout(10 ms)` 让内核帮着等，非阻塞 socket 没有那层保护，只能自己睡。
+///
+/// 取 1 ms（与 TCP 同值、同理）：它同时决定"待发数据的响应延迟"与"`close()` 投出
+/// 停机指令后线程的最长响应延迟"，而每秒一千次唤醒对 CPU 基本无感。注意只有在
+/// **读写都没做成**、且**没有新指令**时才睡——有数据要发时循环不睡，吞吐不受它限制。
+const IDLE_SLEEP: Duration = Duration::from_millis(1);
 
 /// 单个数据报的接收缓冲上限。
 ///
@@ -107,12 +126,22 @@ fn worker_main(
     // UDP 的 `send` 基本不会部分写，但保留同一个结构让三个实现可以逐段对照。
     let mut outgoing: VecDeque<(Vec<u8>, usize)> = VecDeque::new();
 
+    // 上一轮是否什么都没做成（读、写、指令三处都没进展）。非阻塞 socket 下"什么都
+    // 没有"是常态，不据此睡觉就是空转；有进展时一刻也不睡，吞吐不受影响。
+    let mut idle = false;
+
     loop {
+        if idle {
+            thread::sleep(IDLE_SLEEP);
+        }
+        idle = true;
+
         // ———— 方向一：对端 → UI ————
         match socket.recv(&mut buf) {
             // **不是 EOF**：收到一个零长度数据报。忽略即可，绝不能当成关闭。
             Ok(0) => {}
             Ok(n) => {
+                idle = false;
                 if events.send(ChannelEvent::Bytes(buf[..n].to_vec())).is_err() {
                     return;
                 }
@@ -125,11 +154,17 @@ fn worker_main(
         }
 
         // ———— 方向二：UI → 对端 ————
+        // 每轮最多推进一次写：长报文不该占满循环、拖慢停机响应。
         let mut chunk_done = false;
         if let Some((bytes, sent)) = outgoing.front_mut() {
+            // 非阻塞下的三种结果都**立即**返回，没有一种是"等网卡腾地方"：
+            // `Ok(n)` 是排队了 n 个字节，`WouldBlock` 是这次一个都没排进去（出口
+            // 饱和），下一轮再来。所以出口堵住**不会**把这一轮拖住，`Halt` 也就能
+            // 按时被看到——这正是本次从阻塞改过来的全部理由。
             match socket.send(&bytes[*sent..]) {
                 Ok(0) => {}
                 Ok(n) => {
+                    idle = false;
                     *sent += n;
                     chunk_done = *sent == bytes.len();
                 }
@@ -148,7 +183,10 @@ fn worker_main(
             match commands.try_recv() {
                 // 队列**直接 push**：容量已经在调用线程里由 `worker::submit` 预约过了，
                 // 这里不再判一遍（上限只有一处实现）。
-                Ok(WorkerCommand::Transmit(bytes)) => outgoing.push_back((bytes, 0)),
+                Ok(WorkerCommand::Transmit(bytes)) => {
+                    idle = false;
+                    outgoing.push_back((bytes, 0));
+                }
                 // 网络通道没有 RTS / DTR：`ByteChannel::set_line_state` 的默认实现
                 // 直接报 `Unsupported`，所以这条指令到不了这里。写出来只是让 match
                 // 穷尽——顺带说明"三个实现共用同一个指令枚举"是编译期强制同步的。
@@ -220,7 +258,15 @@ impl ByteChannel for UdpChannel {
 
         // 见模块文档：UDP 的 `connect` 不发包、不握手，只固化对端并过滤来源。
         socket.connect(remote)?;
-        socket.set_read_timeout(Some(READ_TIMEOUT))?;
+
+        // **两个方向都设为非阻塞**，与 `net_impl::tcp` 同一条理由（见模块文档
+        // 「为什么 UDP 也改成了非阻塞」）：出口饱和时阻塞的 `send` 会让 worker 停在
+        // 原地，`Halt` 看不见、`close()` 回不来。而"补一个写超时"那条路走不通——
+        // 超时的 `send` 拿不到已写字节数，worker 无法判断这个数据报出没出去。
+        //
+        // 代价是读侧也不能再靠 `set_read_timeout` 让内核帮着等（同一个 fd 的阻塞
+        // 属性是整体的），改为在 [`worker_main`] 里空闲时自己睡 [`IDLE_SLEEP`]。
+        socket.set_nonblocking(true)?;
 
         self.bound = socket.local_addr().ok();
 
@@ -271,8 +317,9 @@ impl ByteChannel for UdpChannel {
     /// 交一段字节出去。**队列满会当场返回 `Err`**（判定在调用线程里做，
     /// 靠 [`PendingLedger`] 的额度预约，见 `worker::submit` 的文档）。
     ///
-    /// 与 TCP 的差别只在下游：UDP 写侧仍是**阻塞** socket。这是刻意的，理由见本文件
-    /// 顶部「为什么 UDP 不需要非阻塞写」。
+    /// 三个通道的写侧现在一致：判定都发生在**调用线程**上（`worker::submit`），
+    /// 后台线程那一侧永远不会因为"写不动"而停住——UDP 这边的 socket 自 2026-10-07
+    /// 起也是非阻塞的，理由见本文件顶部「为什么 UDP 也改成了非阻塞」。
     fn write(&mut self, bytes: Vec<u8>) -> io::Result<()> {
         let Some(commands) = self.commands.as_ref() else {
             return Err(io::Error::new(io::ErrorKind::NotConnected, "UDP 尚未绑定"));
@@ -531,6 +578,99 @@ mod tests {
     /// 账本本身早就有别的用例覆盖，界面拿到的那个数走的是
     /// `Box<dyn ByteChannel>` 上的 `pending_bytes()`。忘了覆盖它时 trait 的默认
     /// 实现会**一直返回 0**——只写 `ledger.bytes()` 的断言照样全绿，那正是空转。
+    /// ⭐⭐ **空闲时的发送吞吐不该被 `recv` 的等待时间卡住**（2026-10-07 改非阻塞的
+    /// 判据，也是这条改动**唯一能被自动验证**的一面）。
+    ///
+    /// 判据为什么挑在这里：改之前 socket 是阻塞的、读侧靠 `set_read_timeout(10 ms)`
+    /// 让内核帮着等，而 worker 一轮循环里 `recv` **排在 `send` 前面**——对端什么都不
+    /// 发时，每一轮都要在 `recv` 里白白待满 10 ms 才轮到发一个数据报，于是发送吞吐
+    /// 被钉死在约 **100 个/秒**。改成非阻塞后 `recv` 立刻返回 `WouldBlock`，同样的
+    /// 场景下一轮能走完整个循环，吞吐只受 syscall 速度限制。
+    ///
+    /// 所以这条测的是**能区分两版实现的量**：2000 个数据报在旧实现下要 20 秒，
+    /// 新实现下应当远快于 3 秒。它证明不了"出口饱和时不阻塞"（那需要先把真实网卡
+    /// 打满，门禁里造不出来），但它能证明"非阻塞确实生效了、且空闲时没有退化成
+    /// 每轮等 10 ms"。
+    ///
+    /// 判据用"对端收到全部 2000 个"而不是"我们写了多少"：`write()` 只是把数据排进
+    /// 队列（`submit` 当场返回），真正发出去没有只有对端能作证。
+    #[test]
+    fn idle_socket_does_not_throttle_send_throughput() {
+        const DATAGRAMS: usize = 2_000;
+        const DEADLINE: Duration = Duration::from_secs(3);
+
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("回环上应能绑定");
+        peer.set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("设置超时应成功");
+        let peer_port = peer.local_addr().expect("应能取到地址").port();
+
+        let mut ch = UdpChannel::new();
+        ch.configure(&config_to(peer_port, 0))
+            .expect("配置应被接受");
+        let (tx, _rx) = mpsc::channel();
+        ch.open(tx).expect("UDP 绑定应立即成功");
+
+        // 对端**只读不写**：这正是"worker 的 recv 每轮都要空等"的那个场景。
+        let counter = thread::spawn(move || {
+            let mut buf = [0u8; 16];
+            let mut seen = 0usize;
+            let deadline = Instant::now() + DEADLINE;
+            while seen < DATAGRAMS && Instant::now() < deadline {
+                // 超时（对端还没发完）与 WouldBlock 都不算失败，继续等。
+                if peer.recv(&mut buf).is_ok() {
+                    seen += 1;
+                }
+            }
+            seen
+        });
+
+        for i in 0..DATAGRAMS {
+            ch.write(format!("{i:08}").into_bytes())
+                .expect("16 KB 的负载远在待发上限之下，不该被拒绝");
+        }
+
+        let seen = counter.join().expect("对端线程不应 panic");
+        ch.close().expect("关闭应成功");
+        assert_eq!(
+            seen, DATAGRAMS,
+            "{DEADLINE:?} 内对端只收到 {seen}/{DATAGRAMS} 个数据报——发送吞吐被每轮的\
+             读等待卡住了（阻塞读 10 ms 时这里只有约 100 个/秒）"
+        );
+    }
+
+    /// **队列压满时 `close()` 必须立刻返回**（与 TCP 那份同一条判据）。
+    ///
+    /// ⚠️ 诚实边界：这条是**防回归**，不是"出口饱和时不阻塞"的证据——门禁里造不出
+    /// 会堵住的 UDP 出口。它保证的是无论写侧怎么实现，点「断开」都不会把 UI 卡住。
+    #[test]
+    fn close_returns_promptly_with_a_backlog_queued() {
+        let (_peer, peer_port) = peer_socket();
+
+        let mut ch = UdpChannel::new();
+        ch.configure(&config_to(peer_port, 0))
+            .expect("配置应被接受");
+        let (tx, _rx) = mpsc::channel();
+        ch.open(tx).expect("UDP 绑定应立即成功");
+
+        // 排 512 个 1 KiB 数据报（合计 512 KiB，在 1 MiB 待发上限之内，因此不会被拒）。
+        // 单个数据报刻意不超过 65507 字节——那是 UDP 的报文上限，超了会得到
+        // `MessageTooLong`，worker 会当真故障上报并退出，测的就不是积压场景了。
+        for i in 0..512 {
+            ch.write(vec![i as u8; 1024])
+                .expect("512 KiB 远在上限之下，写入不该被拒绝");
+        }
+
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = ch.close();
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+            "手里压着待发数据时 close() 也必须立刻返回——卡住就等于点「断开」没反应"
+        );
+    }
+
     #[test]
     fn pending_bytes_reports_what_the_ledger_holds() {
         let ch = UdpChannel::new();

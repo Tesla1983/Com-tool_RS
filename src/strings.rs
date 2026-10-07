@@ -1980,6 +1980,22 @@ strings! {
         "{} aşırı uzun bölüm atıldı",
         "отброшено {} слишком длинных сегментов",
         "odrzucono {} zbyt długich segmentów";
+    chart_sampling_hint:
+        "绘制抽样：每 {} 点取 1（每通道最多画 {} 点）",
+        "Downsampled for drawing: 1 of every {} points ({} at most per channel)",
+        "繪製抽樣：每 {} 點取 1（每通道最多畫 {} 點）",
+        "描画時に間引き: {} 点ごとに 1 点（1 チャネル最大 {} 点）",
+        "Muestreado al dibujar: 1 de cada {} puntos (máx. {} por canal)",
+        "Campionato nel disegno: 1 punto ogni {} (massimo {} per canale)",
+        "Amostrado ao desenhar: 1 a cada {} pontos (máx. {} por canal)",
+        "Disampling saat menggambar: 1 dari setiap {} titik (maks. {} per kanal)",
+        "Sous-échantillonné au tracé : 1 point sur {} ({} au maximum par canal)",
+        "Beim Zeichnen ausgedünnt: 1 von {} Punkten (max. {} je Kanal)",
+        "그리기 시 축소: {}점마다 1점(채널당 최대 {}점)",
+        "Rút gọn khi vẽ: 1 trong mỗi {} điểm (tối đa {} điểm mỗi kênh)",
+        "Çizimde seyreltildi: her {} noktadan 1'i (kanal başına en fazla {})",
+        "При отрисовке прорежено: 1 из каждых {} точек (не более {} на канал)",
+        "Rzadziej przy rysowaniu: 1 na każde {} punktów (maks. {} na kanał)";
     chart_format_hint:
         "{}（格式：一行一组样本，字段用逗号分隔，例如 1.0,2.0,3.0）",
         "{} (format: one sample group per line, comma-separated fields, e.g. 1.0,2.0,3.0)",
@@ -4053,6 +4069,7 @@ mod tests {
             ("chart_summary", 3),
             ("ignored_fields", 1),
             ("discarded_segments", 1),
+            ("chart_sampling_hint", 2),
             ("chart_format_hint", 1),
             ("send_history_count", 2),
             ("send_history_count_text", 2),

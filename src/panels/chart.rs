@@ -70,17 +70,25 @@ fn channel_color(index: usize) -> egui::Color32 {
     CHANNEL_COLORS[index % CHANNEL_COLORS.len()]
 }
 
+/// 抽样步长：一条曲线的点数超过 [`MAX_DRAWN_POINTS`] 时，每隔 `step` 个点取一个；
+/// 没超限时返回 `None`（一个点都不丢，也就没什么要向用户说明的）。
+///
+/// 单独抽成函数、并且让 [`points_for_drawing`] 与界面提示**共用**它：界面上写的是
+/// "每 N 点取 1"，而 N 必须与真正画出来的那条曲线用的是同一个数——两处各算一遍的话，
+/// 迟早出现"写着每 2 点取 1、实际每 3 点取 1"这种对不上。
+fn drawing_step(series_len: usize) -> Option<usize> {
+    (series_len > MAX_DRAWN_POINTS).then(|| series_len.div_ceil(MAX_DRAWN_POINTS))
+}
+
 /// 把一条曲线的样本整理成待绘制的点序列（必要时等间隔抽样）。
 ///
 /// 抽样时**必须保留最后一个点**：那是刚收到的数据，也正是用户盯着图表要看的东西；
 /// 只按步长取点会把曲线末端切掉，看起来像"数据停了"。
 fn points_for_drawing(points: &VecDeque<[f64; 2]>) -> Vec<[f64; 2]> {
     let len = points.len();
-    if len <= MAX_DRAWN_POINTS {
+    let Some(step) = drawing_step(len) else {
         return points.iter().copied().collect();
-    }
-
-    let step = len.div_ceil(MAX_DRAWN_POINTS);
+    };
     let mut drawn: Vec<[f64; 2]> = points.iter().step_by(step).copied().collect();
     if let (Some(&tail), Some(&last_drawn)) = (points.back(), drawn.last())
         && tail != last_drawn
@@ -139,6 +147,22 @@ impl ComTool {
                 detail.push(fill(s.discarded_segments, &[&discarded]));
             }
             ui.weak(fill(s.chart_format_hint, &[&detail.join(" · ")]));
+        }
+
+        // 抽样提示（`HANDOVER.md` §5「绘制抽样未在界面暴露」）。
+        //
+        // 样本上限是用户可以调到 10 万的设置项，而每帧最多画 [`MAX_DRAWN_POINTS`] 个
+        // 点——不说出来的话，用户会以为"我设了 10 万，曲线怎么看着少一截"，甚至以为
+        // 数据没收到。这一行只在这**确实发生了**时才出现：短曲线加一行常显文字是噪音。
+        let longest_series = self
+            .chart
+            .channels()
+            .iter()
+            .map(VecDeque::len)
+            .max()
+            .unwrap_or(0);
+        if let Some(step) = drawing_step(longest_series) {
+            ui.weak(fill(s.chart_sampling_hint, &[&step, &MAX_DRAWN_POINTS]));
         }
 
         // 闭包要用的东西先全部取出来（数据、开关、高度），闭包便只捕获这些值，
@@ -267,6 +291,8 @@ mod tests {
         data_area: egui::Rect,
         /// 每条曲线的顶点。
         curves: Vec<Vec<egui::Pos2>>,
+        /// 画出来的全部文字（页眉、摘要、提示行都在里面）。
+        texts: Vec<String>,
     }
 
     impl Painted {
@@ -296,9 +322,15 @@ mod tests {
     ///
     /// 第三列在矮画布下**不再跟着变小**——这正是"复用日志滚动区"要的效果：被夹住的
     /// 是容器，不是内容。
-    fn paint(available_height: f32, channels: usize, samples: usize) -> Painted {
+    fn paint(
+        available_height: f32,
+        channels: usize,
+        samples: usize,
+        max_samples: usize,
+    ) -> Painted {
         let mut app = ComTool {
             show_chart_panel: true,
+            chart_max_samples: max_samples,
             ..ComTool::default()
         };
         for i in 0..samples {
@@ -330,7 +362,13 @@ mod tests {
 
         let mut data_area = None;
         let mut curves = Vec::new();
+        let mut texts = Vec::new();
         for clipped in &out.shapes {
+            // 文字：页眉、摘要、各种提示行都在这一支里，抽样提示有没有画出来只能
+            // 从这里看（它是 `ui.weak` 画的一行小字，形状与坐标都不足以区分）。
+            if let egui::epaint::Shape::Text(text) = &clipped.shape {
+                texts.push(text.galley.text().to_string());
+            }
             match &clipped.shape {
                 // 绘图区：`paint_background` 用 `extreme_bg_color` 填充并带一圈描边。
                 // 图例的背景框同色，但它被 `background_alpha` 乘过透明度，所以"填充色
@@ -356,8 +394,15 @@ mod tests {
             data_area: data_area
                 .unwrap_or_else(|| panic!("没找到绘图区矩形——图表没画出来，或底色/描边改了")),
             curves,
+            texts,
         }
     }
+
+    /// 测试里常用的样本上限：默认档（2000）小于绘制上限（4000），抽样永远不触发。
+    const ROOMY_MAX_SAMPLES: usize = crate::app::DEFAULT_CHART_MAX_SAMPLES;
+
+    /// 要让抽样**真的发生**，样本上限必须大于 [`MAX_DRAWN_POINTS`]。
+    const SAMPLING_MAX_SAMPLES: usize = MAX_DRAWN_POINTS * 2;
 
     /// 矮画布下：图表块被**夹住**（不越界），但绘图区**保持完整**——超出部分交给滚动块。
     ///
@@ -371,7 +416,7 @@ mod tests {
     fn squeezed_chart_clips_its_block_but_keeps_the_plot_area_whole() {
         const ROOM: f32 = 150.0;
 
-        let painted = paint(ROOM, 4, 60);
+        let painted = paint(ROOM, 4, 60, ROOMY_MAX_SAMPLES);
 
         assert!(
             painted.consumed.max.y <= ROOM + 0.5,
@@ -398,7 +443,7 @@ mod tests {
     fn chart_never_claims_more_than_the_room_it_has() {
         const ROOM: f32 = 180.0;
 
-        let painted = paint(ROOM, 4, 60);
+        let painted = paint(ROOM, 4, 60, ROOMY_MAX_SAMPLES);
 
         assert!(
             painted.consumed.max.y <= ROOM + 0.5,
@@ -418,7 +463,7 @@ mod tests {
     /// 画布矮到需要滚动时，**曲线照样完整落在绘图区里**：夹高度不能变成"画一片空白"。
     #[test]
     fn squeezed_chart_still_draws_the_curves_inside_the_plot_area() {
-        let painted = paint(180.0, 4, 60);
+        let painted = paint(180.0, 4, 60, ROOMY_MAX_SAMPLES);
 
         assert_eq!(painted.curves.len(), 4, "四条通道应各有一条曲线");
         for curve in &painted.curves {
@@ -445,7 +490,7 @@ mod tests {
     /// 容器够高时，留给数据的面积与修改前一模一样（绘图区 886 × 206）。
     #[test]
     fn roomy_container_gets_the_same_plot_area_as_before() {
-        let painted = paint(480.0, 4, 60);
+        let painted = paint(480.0, 4, 60, ROOMY_MAX_SAMPLES);
 
         assert!(
             painted.data_area.height() >= 200.0,
@@ -456,6 +501,50 @@ mod tests {
             painted.data_area.width() >= 800.0,
             "绘图区宽度只剩 {:.1} 点",
             painted.data_area.width()
+        );
+    }
+
+    /// 抽样步长：刚好等于绘制上限时不抽，超过才抽，步长随长度增长。
+    #[test]
+    fn sampling_step_stays_none_up_to_the_draw_cap() {
+        assert_eq!(drawing_step(0), None, "没有点谈不上抽样");
+        assert_eq!(
+            drawing_step(MAX_DRAWN_POINTS),
+            None,
+            "刚好等于上限时一个点都不丢，不该报「抽样」"
+        );
+        assert_eq!(drawing_step(MAX_DRAWN_POINTS + 1), Some(2));
+        assert_eq!(drawing_step(MAX_DRAWN_POINTS * 3), Some(3));
+    }
+
+    /// ⭐ **抽样提示只在真的抽样时出现**（`HANDOVER.md` §5「绘制抽样未在界面暴露」
+    /// 的判据）。
+    ///
+    /// 两个方向缺一不可：
+    ///
+    /// - 只断"长序列下有提示"，会放走"不管多长都常显一行"——那样短曲线上也挂着一句
+    ///   用户用不上的说明，是噪音；
+    /// - 只断"短序列下没有"，会放走"提示根本没接上"——那正是这一项原本的缺陷。
+    ///
+    /// 断言写的是**字面文案**（"每 2 点取 1"）而不是 `MAX_DRAWN_POINTS`：阈值引用
+    /// 实现常量等于自证，改小常量会照样绿。
+    #[test]
+    fn sampling_hint_is_shown_only_when_points_are_actually_dropped() {
+        let short = paint(480.0, 2, 60, ROOMY_MAX_SAMPLES);
+        assert!(
+            !short.texts.iter().any(|text| text.contains("抽样")),
+            "60 点远在绘制上限之内、一个点都没丢，不该出现抽样提示；\
+             实际画出的文字: {:?}",
+            short.texts
+        );
+
+        // 8000 点 / 上限 8000：drawing_step = 8000.div_ceil(4000) = 2
+        let long = paint(480.0, 2, SAMPLING_MAX_SAMPLES, SAMPLING_MAX_SAMPLES);
+        assert!(
+            long.texts.iter().any(|text| text.contains("每 2 点取 1")),
+            "样本数超过每帧绘制上限时，必须告诉用户曲线是抽稀后画的；\
+             实际画出的文字: {:?}",
+            long.texts
         );
     }
 

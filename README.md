@@ -52,29 +52,14 @@ Release 档刻意使用 `opt-level = 2`（见 `Cargo.toml` 注释）：这是每
 跑测试与静态检查：
 
 ```bash
-cargo test                      # 396 passed + 1 ignored
+cargo test                      # 400 passed + 1 ignored
 cargo clippy --all-targets
 cargo fmt --check
 ```
 
-## 许可
-
-**GPL-3.0-only**（不是 `-or-later`）——上游 `SerialGUI-rs` 只声明 GPLv3 单一版本，本作品作为其修改版沿用同一档，
-无权替上游追加"或更新版本"。
-
-你可以自由使用、修改、分发（**包括商用**），但衍生作品必须同样以 GPLv3 开源，并保留 `LICENSE` 与 `NOTICE.md`。
-
-> ⚠️ 本项目是 GPL 作品，**无法单纯通过替换许可证变成 MIT/Apache**。若要改用宽松许可，
-> 只能由未接触过上游源码的团队做 clean-room 重写。
-
-**关于"商用"**：GPLv3 **允许**商用与收费，它约束的是**闭源**——别人拿去卖可以，但必须
-把改过的源码一并公开，不能做成独占的闭源产品。本项目**没有、也不会添加"禁止商用"条款**：
-按 GPLv3 第 7 条这类附加限制可被下游合法删除，中国法院亦已有判决认定无权添加
-（依据与出处见 [`NOTICE.md`](NOTICE.md) §7）。
-
 ## 项目状态
 
-自动化测试覆盖较完整（**396 条测试**，全部无需真实串口硬件，替身 + 无头渲染驱动 UI），
+自动化测试覆盖较完整（**400 条测试**，全部无需真实串口硬件，替身 + 无头渲染驱动 UI），
 但**实机交互尚待人工验证**——待验项集中在 [`HANDOVER.md`](HANDOVER.md) §4② 的目视清单里，
 绝大多数条目仍未在真实设备上跑过。坦白标注在此，请以实际使用结果为准。
 
@@ -85,7 +70,7 @@ cargo fmt --check
 | [`NOTICE.md`](NOTICE.md) | 派生声明、重合度实测、第三方依赖许可、分发检查清单 |
 | [`AGENTS.md`](AGENTS.md) | 面向 AI 协作的项目红线与模块地图（含运行约束、串口端口约束） |
 | [`HANDOVER.md`](HANDOVER.md) | 交接总纲：待人工验证清单、已知缺陷、仓库状态 |
-| [`DEVELOPMENT_GUIDE.md`](DEVELOPMENT_GUIDE.md) | 逐条开发约定（65 条）+ egui 绘制硬事实附录 |
+| [`DEVELOPMENT_GUIDE.md`](DEVELOPMENT_GUIDE.md) | 逐条开发约定（66 条）+ egui 绘制硬事实附录 |
 | [`HISTORY_2026.md`](HISTORY_2026.md) | 各阶段设计取舍与偏离记录 |
 | [`FEATURE_GAP_AND_PLAN.md`](FEATURE_GAP_AND_PLAN.md) | 与上位的逐项差距 |
 | [`GAP_ANALYSIS_VS_COMTOOL.md`](GAP_ANALYSIS_VS_COMTOOL.md) | 与 `Neutree/COMTool`（Python 版）的对照 |
