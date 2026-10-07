@@ -173,45 +173,38 @@ const ASCII_NONPRINT_COLOR: egui::Color32 = egui::Color32::from_rgb(128, 128, 12
 /// 解码，尾部半截序列会变成乱码或非法字节标记。这里从尾部回溯连续的
 /// continuation 字节（`0b10xxxxxx`）找到 lead 字节，按其声明的宽度判断该序列
 /// 是否完整；不完整就把从 lead 起的部分整体留给下一个数据块。
+///
+/// ⭐ **判定交给 `std::str::from_utf8`，不再手写 lead 宽度表**（2026-10-07 修复，
+/// 缺陷由真实 ESP32 的中文 WiFi 日志暴露：`I (589) wifi_sta:  芯片` 在逐字节喂入时
+/// 显示成 `[E8][8A][AF][E7][89][87]`）。
+///
+/// 旧实现回溯尾部 continuation 字节，然后把"截断点落在 lead 字节**之后一个都没到**"
+/// 的情形（`[0xE8]`）当成"没有未完成序列"，于是 lead 字节当场被判为非法字节打码。
+/// 也就是说：数据块恰好在 lead 字节处断开时，整个汉字就没了。用手写宽度表去补这个
+/// 分支等于把 UTF-8 的规则再实现一遍（还要处理 E0/ED 的代理区间、F4 的上界等），
+/// 而标准库的 `Utf8Error` 已经把"非法"（`error_len() == Some`）与"不完整"
+/// （`error_len() == None`）区分开了——直接问它。
 fn utf8_complete_prefix_len(bytes: &[u8]) -> usize {
-    let len = bytes.len();
-    if len == 0 {
-        return 0;
-    }
-
-    // 找到尾部连续 continuation 字节（0b10xxxxxx）的起点 start：
-    // 循环退出时 bytes[start-1] 是 lead 字节（若 start > 0）
-    let mut start = len;
-    while start > 0 && (bytes[start - 1] & 0xC0) == 0x80 {
-        start -= 1;
-    }
-    if start == len {
-        // 尾部不是未完成的序列
-        return len;
-    }
-    if start == 0 {
-        // 整段都是 continuation 字节（异常流）：无法回溯 lead，交给上层按非法字节标记
-        return len;
-    }
-    let lead = bytes[start - 1];
-    // 四档是 UTF-8 lead 字节的取值范围，写成区间才看得出"它们是连续的四段"；
-    // 手写的 `>= && <=` 会被 clippy 判成 manual RangeInclusive::contains。
-    let width = if lead < 0x80 {
-        1
-    } else if (0xC0..=0xDF).contains(&lead) {
-        2
-    } else if (0xE0..=0xEF).contains(&lead) {
-        3
-    } else if (0xF0..=0xF7).contains(&lead) {
-        4
-    } else {
-        1 // 非法起始字节，当作单字节处理（会被标记为 [XX]）
-    };
-    let seq_start = start - 1; // 未完成序列的 lead 字节位置
-    if seq_start + width <= len {
-        len
-    } else {
-        seq_start // 从 lead 字节起整个保留，等下一个数据块补齐
+    let mut rest = bytes;
+    let mut consumed = 0usize;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(_) => return consumed + rest.len(),
+            Err(e) => {
+                // `Utf8Error` 报的是**第一个**错误。返回值要从 starting point 累加。
+                let valid = e.valid_up_to();
+                match e.error_len() {
+                    // None = 末尾是被截断的序列：整段留下，等下一批补齐。
+                    None => return consumed + valid,
+                    // Some(n) = 确定非法的 n 个字节：这次就打码（`consume` 过去），
+                    // 继续往后看后面还有没有被截断的尾巴。
+                    Some(bad) => {
+                        consumed += valid + bad;
+                        rest = &rest[valid + bad..];
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2902,6 +2895,45 @@ mod tests {
                 .collect::<String>(),
             "中!"
         );
+    }
+
+    /// ⭐ **截断点落在 lead 字节正后方**（2026-10-07 由真实 ESP32 暴露）。
+    ///
+    /// 缺陷现场：真实 ESP32 的 `wifi_sta:  芯片` 在逐字节喂入时显示成
+    /// `[E8][8A][AF][E7][89][87]`。根因是 `utf8_complete_prefix_len` 回溯尾部
+    /// continuation 字节，遇到"一个 continuation 都还没到"的情形（`[0xE8]`）就判
+    /// "没有未完成序列"，于是 lead 字节当场被打成非法字节。
+    ///
+    /// 判据必须**逐字符等于整段喂入的结果**，不能只断言"不 panic"——旧实现在这个
+    /// 用例上也是"正常通过"，因为它产出的是合法的打码文本。
+    #[test]
+    fn decoder_keeps_incomplete_lead_byte_across_feeds() {
+        let text = "芯片 WiFi";
+        let bytes = text.as_bytes();
+        let mut d = AnsiDecoder::default();
+        let mut per_byte = String::new();
+        // 一个字节一次 feed：块截断可能落在序列内的**任何**位置
+        for b in bytes {
+            for span in d.feed(&[*b], TextEncoding::Utf8) {
+                per_byte.push_str(&span.text);
+            }
+        }
+        assert_eq!(
+            per_byte, text,
+            "逐字节喂入的中文必须完整; 实际得到 {per_byte:?}"
+        );
+
+        // 另外几种错位截断点也必须守住：lead+1 / lead+2 处断开
+        for split in [1usize, 2, 4] {
+            let mut d = AnsiDecoder::default();
+            let mut out = String::new();
+            for chunk in [&bytes[..split], &bytes[split..]] {
+                for span in d.feed(chunk, TextEncoding::Utf8) {
+                    out.push_str(&span.text);
+                }
+            }
+            assert_eq!(out, text, "在 {split} 字节处断开时得到 {out:?}");
+        }
     }
 
     #[test]

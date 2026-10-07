@@ -53,7 +53,7 @@ Release 档刻意使用 `opt-level = 2`（见 `Cargo.toml` 注释）：这是每
 跑测试与静态检查：
 
 ```bash
-cargo test                      # 400 passed + 1 ignored
+cargo test                      # 401 passed + 1 ignored
 cargo clippy --all-targets      # 0 warning
 cargo fmt --check
 ```
@@ -63,7 +63,7 @@ cargo fmt --check
 
 ## 项目状态
 
-自动化测试覆盖较完整（**400 条测试**，全部无需真实串口硬件，替身 + 无头渲染驱动 UI），
+自动化测试覆盖较完整（**401 条测试**，全部无需真实串口硬件，替身 + 无头渲染驱动 UI），
 但**实机交互尚待人工验证**——待验项集中在 [`HANDOVER.md`](HANDOVER.md) §4② 的目视清单里，
 绝大多数条目仍未在真实设备上跑过。坦白标注在此，请以实际使用结果为准。
 
