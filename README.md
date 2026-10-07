@@ -38,7 +38,8 @@
 
 ## 构建
 
-需要 Rust **2024 edition** 工具链（建议 1.85 或更高）。
+需要 Rust **1.95 或更高**（`Cargo.toml` 的 `rust-version`；下限由 `egui` / `eframe` / `egui_plot`
+自己声明的 1.95 决定，不是本项目的代码需要）与 **2024 edition**。
 
 ```bash
 cargo build --release
@@ -53,9 +54,12 @@ Release 档刻意使用 `opt-level = 2`（见 `Cargo.toml` 注释）：这是每
 
 ```bash
 cargo test                      # 400 passed + 1 ignored
-cargo clippy --all-targets
+cargo clippy --all-targets      # 0 warning
 cargo fmt --check
 ```
+
+这四项在 GitHub Actions 上自动跑（`.github/workflows/ci.yml`，`windows-latest`；另有
+一个钉在 1.95 的 MSRV job）。401 条测试全部不需要真实串口硬件。
 
 ## 项目状态
 

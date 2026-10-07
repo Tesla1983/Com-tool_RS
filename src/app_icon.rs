@@ -342,7 +342,9 @@ mod tests {
         let icon = generate();
         let partial = icon
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[3] > 0 && px[3] < 255)
             .count();
         assert!(
@@ -361,7 +363,9 @@ mod tests {
         let icon = generate();
         let bright = icon
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[0] > 200 && px[1] > 200 && px[2] > 200)
             .count();
         // 笔画中心线总长约 530 px、全宽约 26.6 px，覆盖率粗算在两成上下；
@@ -454,7 +458,7 @@ mod tests {
     #[test]
     fn transparent_pixels_have_zero_rgb() {
         let icon = generate();
-        for (index, px) in icon.rgba.chunks_exact(4).enumerate() {
+        for (index, px) in icon.rgba.as_chunks::<4>().0.iter().enumerate() {
             if px[3] == 0 {
                 assert_eq!(
                     &px[..3],

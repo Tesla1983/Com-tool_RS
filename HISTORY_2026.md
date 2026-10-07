@@ -2443,3 +2443,75 @@ font_bytes.windows(2).any(|w| w == be)
 **验证**：`fmt --check` 干净 · `check --all-targets` 0 warning · `clippy --all-targets`
 **仍剩那 3 条既有的 `chunks_exact_to_as_chunks`**（`src/app_icon.rs`，本轮未改动该文件）·
 `test` **400 passed + 1 ignored**。未运行本项目、未触碰串口。
+
+---
+
+## 3.38 MSRV 落地 + GitHub Actions CI + COM4 第二轮实跑（2026-10-07，用户要求三件事）
+
+用户原话：*"MSRV 声明写成大于1.88+可行吗？可行的话就改，实机验证我已经让AI可以用com4端口了，
+能做的都走一遍，CI放GitHub工作流上"*。
+
+### ① MSRV：想写 1.88，实测发现真正的下限是 **1.95**
+
+⭐ **差点写成一句假话**。我本来准备直接写 `rust-version = "1.88"`（理由：`slice::as_chunks`
+是 1.88 稳定的，而它是本项目用到的最新标准库 API）。**装了 1.88.0 实跑才发现问题不在我们这边**：
+
+```
+error: rustc 1.88.0 is not supported by the following packages:
+  ecolor@0.36.2 requires rustc 1.95
+  eframe@0.36.2 requires rustc 1.95
+  egui@0.36.2   requires rustc 1.95
+  egui_plot@0.37.0 requires rustc 1.95
+  ...
+```
+
+核对两份 manifest 原文，`rust-version = "1.95"` 确实写在里面。**所以 1.95 是依赖给的，
+不是我们的代码给的**——源码只用到 edition 2024（1.85）与 `as_chunks`（1.88）。
+
+- 声明值：**`rust-version = "1.95"`**，注释里写清"下限来自 UI 依赖、不在我们手上"。
+- **实测证据**：`rustup toolchain install 1.95.0` → `cargo +1.95.0 check --all-targets`
+  **0 error / 0 warning** → `cargo +1.95.0 test` **400 passed + 1 ignored**。
+- ⚠️ 声明 MSRV 有副作用（edition 2024 ⇒ resolver 3 ⇒ **MSRV 感知解析**）：加了
+  `rust-version` 之后 `Cargo.lock` 可能被重解。本次实测 **lock 一行未变**（`git diff --stat
+  Cargo.lock` 为空），因为现有依赖版本都兼容。将来升级依赖时这里要再看一眼。
+
+顺带把那 3 条 clippy 噪声做掉了：`src/app_icon.rs` 三处 `chunks_exact(4)` →
+`as_chunks::<4>().0.iter()`（语义等价：`.0` 丢余数与 `chunks_exact` 一致，而 `rgba` 长度恒为
+`256×256×4`、本来就没有余数）。**至此 `clippy --all-targets` 第一次真正归零**，四项门禁无例外。
+
+### ② CI：`.github/workflows/ci.yml`
+
+- **只跑 `windows-latest`**，不是偷懒：eframe 开着 `wayland` / `glow`，Linux runner 要装
+  libxkbcommon / libwayland / X11 开发库才能编过，而那与"串口能不能通"无关；本项目是
+  Windows 串口工具。**401 条测试全部不需要硬件**，所以在 runner 上能全跑。
+- 四个步骤对应四项门禁：`fmt --check` → `check --all-targets --locked` →
+  `clippy --all-targets --locked -- -D warnings` → `test --locked`。
+  ⭐ clippy 是 rustc lint 的**超集**，所以第三步同时守住了"check 0 warning"；`--` 之后的
+  标志 cargo 只传给本仓库的 crate，不会把依赖的警告也算进来。
+- 单独的 **`msrv` job** 钉在 1.95，只跑 `check`：老工具链上跑全套测试意义不大，
+  要守住的是"更老的工具链根本编不过"这个契约。
+- 本地按同样参数复跑过一遍，`--locked` 全部通过（lock 是最新的）。
+
+### ③ COM4 第二轮：9 条临时探针，跑完已删
+
+探针**不绕过产品代码**——全部走 `SerialChannel` / `ComTool::receive_data()` /
+`render_receive_area()` 真实入口。结果表见 `TEST_PORT_COM4.md` §5.1，这里只记两条教训：
+
+- ⭐ **"上一个用例没把设备放干净"看起来像"下一个用例失败了"**。第一版在"拉低 DTR"之后
+  **立刻** `close()`，设备还在吐的那一段漏进下一个用例，把 `p44`（打开不拉线）判成红。
+  单独跑 p44 是 0 字节、与 p45 连跑也是 0 字节 ⇒ 定位为探针自己的收尾竞态。
+  **修法：拉低后先睡 150 ms 再关。** 差点把它记成"打开端口会唤醒设备"这种假结论。
+- ⭐ **`receive_data()` 读的是 `ComTool::event_rx`，不是通道自己**。探针一开始只设了
+  `app.channel`，收到 0 字符——差点又写成"接收链路不通"。补上 `app.event_rx = Some(rx)` 即可。
+
+**新增证据**：真实数据进镜像（23 669 字符 / 最长行 6579）、强制换行（7→45 行 / ≤200）、
+四视图在真实乱码下都画得出来且零 panic、逐字节增量解码与一次性解码**逐字符一致**、
+FIFO 裁剪在真实流量下守住 2000 预算、图表解析器安静丢弃垃圾数据、数据流中 `close()` 及时返回。
+
+⚠️ **薄弱处如实记**：`p_display` 只断"有文本被画出来"，按约定 65 的三层判据只覆盖了"存在"层，
+**没验排版观感**；第 45 项的 **RTS 那一半仍然零证据**（CDC 设备上改 RTS 没有可观测表现）。
+
+**验证**：`fmt --check` 干净 · `check --all-targets` 0 warning ·
+`clippy --all-targets -- -D warnings` **0 warning（首次全清）** · `test` **400 passed + 1 ignored** ·
+`cargo +1.95.0 check/test` 同样全绿 · `build --release` 成功且时间戳晚于 src。
+探针已删，`git diff --stat src/` 只剩 `app_icon.rs`。未运行本项目，只用了放行的 COM4。

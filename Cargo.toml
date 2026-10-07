@@ -2,6 +2,18 @@
 name = "comtool-rs"
 version = "0.1.0"
 edition = "2024"
+# 最低支持的 Rust 版本（MSRV）= **1.95**，下限是**依赖给的，不是我们的代码给的**：
+# `egui` / `eframe` / `ecolor` / `epaint` 0.36.2 与 `egui_plot` 0.37.0 四份 manifest
+# 里都写着 `rust-version = "1.95"`，cargo 在 1.88 上会直接拒绝解析（实测报错原文见
+# `HISTORY_2026.md` §3.38 ①）。
+#
+# ⚠️ 别把它当成"我们自己需要多新的编译器"：本仓库源码只用到了 edition 2024（1.85）
+# 和 `slice::as_chunks`（1.88），**1.95 是被 UI 依赖抬上去的**。所以往下降这条路
+# 不在我们手上——降 egui 大版本会改一堆 API；而往上升只要依赖升了就同步改这一行。
+#
+# 声明它的收益：MSRV 变成**编译期可查的契约**——更老的工具链会被 cargo 当场拒绝并
+# 报出是哪个包在要求，clippy 的 `incompatible_msrv` 也会据此判断某个 API 能不能用。
+rust-version = "1.95"
 description = "串口调试上位机（GUI 串口助手）：串口 / TCP / UDP、HEX 与字节视图、实时图表、文件日志、筛选、15 种语言"
 # GPL-3.0-only（不是 -or-later）：上游 SerialGUI-rs 只声明 GPLv3 单一许可，
 # 本作品是它的修改版 ⇒ 沿用同一档，不能替上游追加"或更新版本"。
