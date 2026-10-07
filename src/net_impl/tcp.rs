@@ -594,8 +594,14 @@ mod tests {
         let (accepted_tx, accepted_rx) = mpsc::channel();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         thread::spawn(move || {
-            let _accepted = listener.accept();
+            let _accepted = listener.accept().expect("应能接受连接");
             let _ = accepted_tx.send(());
+            // 关键：accept 之后**一个字节都不读**，直到测试结束（连接随之关闭）。
+            //
+            // ⚠️ 这里**没有**去压对端的接收窗口：`std::net::TcpStream` 不提供
+            // `SO_RCVBUF` 的 setter（那是 `socket2` 才有的），为它引入一个依赖不值得。
+            // 代价是"多少字节才灌得满"仍然由机器决定——**正因为如此，下面才必须用
+            // 「停滞」当判据，而不能用任何绝对字节数**（详见那里）。
             let _ = stop_rx.recv_timeout(Duration::from_secs(30));
         });
 
@@ -614,14 +620,27 @@ mod tests {
         // 收手的话，内核可能还有空间把积压全吃掉，worker 于是根本没被卡住，
         // 这条测试就成了空转（第一版就是这么假绿的）。
         //
-        // 判据用"持续投两秒 + 至少投出去 2 MiB"，而不是"某一瞬间排不排得上队"。
+        // ⭐ 判据是"**写不动了**"，**不是**"投出去多少字节"。内核缓冲有多大随系统而
+        // 异，拿一个绝对字节数当门槛，换台机器就会红——远程 CI 正是红在这里
+        // （原来要求 2 MiB，而 windows-latest 的 runner 两秒只投出 1 507 328 字节）。
+        // 这条测试要守的东西（`close()` 不被写卡住）与缓冲多大没有关系，判据就该盯
+        // 前者而不是后者。
+        //
+        // "写不动"的可观测证据是**停滞**：连续一段时间里一次都没能成功入队，说明
+        // worker 一个字节都挤不出去了。它在任何机器上都是同一个现象。
+        const STALL: Duration = Duration::from_millis(500);
+        const GIVE_UP: Duration = Duration::from_secs(12);
         let chunk = vec![0u8; 64 * 1024];
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + GIVE_UP;
         let mut pushed = 0usize;
         let mut refusals = 0usize;
+        let mut last_progress = Instant::now();
         while Instant::now() < deadline {
             match ch.write(chunk.clone()) {
-                Ok(()) => pushed += chunk.len(),
+                Ok(()) => {
+                    pushed += chunk.len();
+                    last_progress = Instant::now();
+                }
                 Err(e) if e.to_string().contains("待发队列已满") => {
                     refusals += 1;
                     // 让 worker 有机会把缓冲里的数据挤出去，再把额度填回来。
@@ -629,15 +648,24 @@ mod tests {
                 }
                 Err(e) => panic!("不该出现其它写错误: {e}"),
             }
+            // 已经停滞就收手，不必耗满 12 秒；`refusals > 0` 保证不是"一次都没投成"。
+            if refusals > 0 && last_progress.elapsed() >= STALL {
+                break;
+            }
         }
-        assert!(
-            pushed >= 2 * MAX_PENDING_BYTES,
-            "至少要投出去 2 MiB，内核缓冲才会真的被灌满；只投了 {pushed} 字节 ⇒ 这条\
-             测试没测到要测的东西"
-        );
         assert!(
             refusals > 0,
             "对端一个字节都不读，投到这个量必然排不上队；一次没轮到说明上限根本没生效"
+        );
+        assert!(
+            last_progress.elapsed() >= STALL,
+            "收手时仍在成功入队（共 {pushed} 字节）⇒ 内核缓冲还没满，这条测试没测到\
+             要测的东西"
+        );
+        assert!(
+            ch.pending_bytes() >= MAX_PENDING_BYTES / 2,
+            "停滞时应有大半额度压在队列里，实际只有 {} 字节",
+            ch.pending_bytes()
         );
 
         let (done_tx, done_rx) = mpsc::channel();
