@@ -1580,6 +1580,9 @@ impl ComTool {
     /// 两条失败路径都不会把界面判成掉线：这里投递失败只写一条提示；通道侧执行失败
     /// 则回一条 [`ChannelEvent::Notice`]。
     pub fn apply_line_state(&mut self, rts: Option<bool>, dtr: Option<bool>) {
+        // 先记下改动前的请求态：投递失败要能原样退回去（见下面的失败分支）。
+        let previous_rts = self.rts;
+        let previous_dtr = self.dtr;
         if let Some(level) = rts {
             self.rts = level;
         }
@@ -1597,6 +1600,12 @@ impl ComTool {
             None => failure = Some("设置 RTS/DTR 失败: 通道未打开\n".to_string()),
         }
         if let Some(msg) = failure {
+            // **请求没送出去，勾选态就必须退回去。** 勾选框表达的是"我们请求了什么"，
+            // 不是"点过什么"；投递失败还留着勾选，等于界面在说一个并未发生的动作，
+            // 而且会让用户以为"线还拉着"（2026-10-18 实测：后台线程因设备掉线退出后，
+            // 后续每一次 `set_line_state` 都返回 `串口后台线程已退出`）。
+            self.rts = previous_rts;
+            self.dtr = previous_dtr;
             self.push_receive_note(msg);
         }
     }
@@ -3903,6 +3912,10 @@ mod tests {
     ///
     /// 判成掉线的后果是"拉不动一根控制线 → 界面跳到未连接 → 用户去重连"，而通道
     /// 其实一直是好的。所以这条路径走 `Notice` 而不是 `Failed`。
+    ///
+    /// 但**勾选态要退回去**：勾选框表达的是"我们请求成功了的电平"，投递失败还留着勾，
+    /// 界面就在说一个没发生的动作。真机上这一步的典型失败是通道已掉线、后台线程退出，
+    /// 此后每次投递都返回"串口后台线程已退出"（2026-10-18 实测）。
     #[test]
     fn failing_to_set_line_state_is_a_notice_not_a_disconnect() {
         let (mut app, handle) = connected_app();
@@ -3917,8 +3930,8 @@ mod tests {
             app.receive_text
         );
         assert!(
-            app.rts,
-            "勾选态表达的是「我们请求的电平」，投递失败也照样记下来"
+            !app.rts,
+            "请求没送出去，勾选态必须回滚——留着勾等于界面对用户说了一个没发生的动作"
         );
     }
 

@@ -2709,6 +2709,15 @@ CTS"，要动 15 种语言文案，故留给所有者定，记在 `TEST_PORT_COM
 * **硬件层**（不是缺陷）：这类 ESP32 板的 DTR / RTS 经三极管驱动 EN 与 IO0，
   不是流控线。esptool 时序里 `DTR=False, RTS=True ⇒ EN=低=复位保持`；界面「勾 RTS」
   正是 assert，于是芯片被一直按在复位里。
+* **实测（2026-10-18 16:07，COM10 = CH340，用户批准，探针跑完即删）**：RTS 语义确认——
+  `RTS=true` 保持 3 s 期间 **0 字节**；`RTS=false` 之后 4 s 收到 **3043 字节** ROM 启动
+  日志；重新 open 再来一轮又是 3043 字节。**同时发现掉线与 RTS 无关**：raw 驱动（不经
+  产品代码）在收到 **1658 字节 / 421 ms** 时报 `PermissionDenied (os error 5)`，紧接着
+  COM10 从系统里消失（重新 open 报"找不到指定的文件"）；产品路径在**不碰任何线的基线
+  阶段**就报同样的错，此后每次 `set_line_state` 都返回 `串口后台线程已退出`。
+  ⇒ 这块板是**在芯片启动、开始输出数据的那一刻掉 USB**，指向供电 / 线缆 / 接触，
+  **不是软件缺陷**。⚠️ 上一轮"原生 USB 口随复位消失"的推断对这块 CH340 板**不成立**，
+  此处订正；数据与排查顺序见 `TEST_PORT_COM4.md` §7.5。
 * **代码层**（真缺陷，两处）：
   1. `receive.rs` 原来「收到**任意**字节就把 `reconnect_failures` 清零」。设备被按在
      复位里时，每次重连都先吐一小段 ROM 启动日志再掉线 ⇒ 退避永远停在 500 ms、
@@ -2726,6 +2735,9 @@ CTS"，要动 15 种语言文案，故留给所有者定，记在 `TEST_PORT_COM
   抖动场景因此最多重试 6 次（0.5+1+2+4+8+16 ≈ 31.5 s）就停手。
 * `sidebar.rs` 抽出纯函数 `line_togglable(channel_ready, requested) -> bool`
   = `channel_ready || requested`：**撤销永远可点**，只有"勾上"要求就绪。
+* `app.rs::apply_line_state`：投递失败时把 `rts` / `dtr` **回滚**到改动前。原先"先改
+  勾选态、再投递、失败只写一条提示"，界面会留下一个并未生效的勾选——真机上通道掉线后
+  每次投递都返回"串口后台线程已退出"，勾选框却仍亮着，等于界面在说一个没发生的动作。
 
 **测试**：新增 `bytes_right_after_reconnect_do_not_reset_the_backoff`（刚连上就收到字节
 不得清零）、`line_checkbox_can_always_be_unchecked`（掉线时仍能取消）；改写
