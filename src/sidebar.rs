@@ -394,6 +394,20 @@ pub(crate) struct SidebarAction {
     pub pick_log_dir_requested: bool,
 }
 
+/// 控制线的某一根，勾选框能不能操作。
+///
+/// **撤销永远可点，勾上才要求通道就绪。** 这不是宽容，而是安全出口：
+/// ESP32 一类的板上 RTS / DTR 直接经三极管驱动 EN 与 BOOT，勾错一根就能把芯片
+/// 按在复位里；芯片复位会让 USB 设备从系统里消失、通道随之掉线，而掉线正好让
+/// `channel_is_ready()` 变假。若两件事共用同一条判据，用户会被锁死在
+/// "线还拉着、两个勾选框全灰"的状态——2026-10-18 报的"改不了"就是这么来的。
+///
+/// 反方向仍要拦：通道没就绪时**不能**新勾上一根，否则界面会显示一个并未生效的
+/// 勾选（那是"界面在说谎"，见 `ComTool::rts` 的注释）。
+fn line_togglable(channel_ready: bool, requested: bool) -> bool {
+    channel_ready || requested
+}
+
 impl ComTool {
     /// 绘制右侧边栏。
     ///
@@ -419,6 +433,14 @@ impl ComTool {
         // （见 [`crate::app::ComTool::apply_line_state`] 的投递语义），
         // 而勾选框会先显示成已勾选 ⇒ 界面在说谎。
         let lines_controllable = self.channel_is_ready();
+        // 两根线**各自**能不能操作。规则不是同一条：
+        // * **勾上**（把线拉到 active）要求通道就绪——否则界面会显示一个没生效的勾选；
+        // * **取消**（撤回请求）**永远可点**，哪怕通道此刻没就绪。已经勾上的那一根
+        //   必须能撤回：ESP32 这类板子上 RTS/DTR 直接驱动 EN/BOOT，勾错一根就会把
+        //   芯片按在复位里、端口随之掉线；而"掉线"恰好让 `channel_is_ready()` 变假，
+        //   若沿用同一条判据，用户就会被锁在"线还拉着、按钮全灰"的状态里出不来。
+        let rts_togglable = line_togglable(lines_controllable, self.rts);
+        let dtr_togglable = line_togglable(lines_controllable, self.dtr);
         let current_baud = self.baud_rate;
         let hex_mode = self.hex_view;
         let color_mode = self.color_view;
@@ -793,14 +815,10 @@ impl ComTool {
                             ui.add_sized([70.0, 20.0], egui::Label::new(s.line_state_header));
                             let mut rts = self.rts;
                             let mut dtr = self.dtr;
-                            let rts_response = ui.add_enabled(
-                                lines_controllable,
-                                egui::Checkbox::new(&mut rts, "RTS"),
-                            );
-                            let dtr_response = ui.add_enabled(
-                                lines_controllable,
-                                egui::Checkbox::new(&mut dtr, "DTR"),
-                            );
+                            let rts_response =
+                                ui.add_enabled(rts_togglable, egui::Checkbox::new(&mut rts, "RTS"));
+                            let dtr_response =
+                                ui.add_enabled(dtr_togglable, egui::Checkbox::new(&mut dtr, "DTR"));
 
                             // 先把 `changed()` 取出来：`on_hover_text` 会**消费**
                             // `Response`（它不是 `Copy`），链式调用之后再问就晚了。
@@ -828,7 +846,7 @@ impl ComTool {
                         // `add_enabled(lines_controllable, …)` 读的是**同一个变量**，
                         // 两处不可能说两套话；判据一旦退化（例如有人改回
                         // `is_connected`），这一行会同进同出，测试据此就能抓到。
-                        if !lines_controllable {
+                        if !(rts_togglable && dtr_togglable) {
                             ui.weak(s.line_state_hint);
                         }
                     } else {
@@ -935,6 +953,23 @@ impl ComTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 控制线：**撤销永远可点**，勾上才要求通道就绪。
+    ///
+    /// 三条一起断言，缺一条就漏一种死法：只测"就绪时能勾"会放过"掉线后撤不回来"，
+    /// 那正是用户被锁死的那一档（线还拉着、两个勾选框全灰）。
+    #[test]
+    fn line_checkbox_can_always_be_unchecked() {
+        assert!(
+            !line_togglable(false, false),
+            "通道没就绪、也没勾过：不能新勾上一根"
+        );
+        assert!(line_togglable(true, false), "通道就绪时应该能勾");
+        assert!(
+            line_togglable(false, true),
+            "已经勾上了但通道掉线：必须**还能取消**，否则这根线撤不回来"
+        );
+    }
 
     /// 按钮宽度的判据**区间**——用来从形状列表里认出"那个矩形是连接按钮"的尺寸
     /// 指纹，不是实现里的限制（实现见 `CONNECT_BUTTON_MIN_WIDTH` 与

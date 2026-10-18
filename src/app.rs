@@ -444,6 +444,14 @@ pub struct ComTool {
     #[serde(skip)]
     pub dtr: bool,
 
+    /// 本轮连接**确实已经打开**的时刻。
+    ///
+    /// 用途只有一个：判断"这一轮连接是否已经稳定存活"（见 [`STABLE_CONNECTION`]），
+    /// 从而决定收到字节时该不该把自动重连的连续失败计数清零。不落盘——它是
+    /// 本次运行的时间事实，存档里没有意义。
+    #[serde(skip)]
+    pub connected_since: Option<Instant>,
+
     /// 窗口上一帧是否处于聚焦状态（N6 用来识别"重新获得焦点"这一瞬间）。
     ///
     /// 初值 `true`：[`ComTool::default`] 已经扫过一次端口列表，置 `true` 可以省掉
@@ -730,6 +738,19 @@ const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 /// `pub(crate)`：`receive.rs` 在收到 `Failed` 时要判断"是不是刚好撞到上限"，
 /// 以便只提示一次"自动重连已停止"。
 pub(crate) const MAX_RECONNECT_ATTEMPTS: u32 = 6;
+
+/// 「这一轮连接已经稳定」的判定门槛。
+///
+/// **收到字节不等于连上了**。设备被控制线按在复位里时，每次重连都会先收到
+/// 一小段 ROM 启动日志、随后立刻掉线；如果一收到字节就把连续失败计数清零，
+/// 退避会永远停在首轮 500 ms、次数永远够不到 [`MAX_RECONNECT_ATTEMPTS`]，
+/// 于是"有上限的自动重连"退化成**无限重连**，端口在循环里被反复打开，
+/// 别的工具一个也抢不到（ESP32 的 USB-Serial-JTAG 就是典型：芯片一复位，
+/// USB 设备直接从系统里消失）。
+///
+/// 取 3 秒：短于这个时长的"连上"在现实中基本都是抖动或设备启动过程；
+/// 而正常使用中真正通了的连接会一直收数据，跨过门槛后才清零，退避依然有效。
+pub(crate) const STABLE_CONNECTION: Duration = Duration::from_secs(3);
 
 /// 待发字节数「多久没有下降」就算写不动了（状态栏据此把它标成警示色）。
 ///
@@ -1126,6 +1147,9 @@ impl ComTool {
         // `connected` 在这里的含义是"**已经发起过一次打开**"（记账位）。
         // 真正的"通没通"由 `channel_is_ready()` 回答，界面据此显示"正在打开"。
         self.connected = true;
+        // 计时起点。**每次发起打开都重来一遍**：判"稳定"要按这一轮的存活时长算，
+        // 沿用上一轮的时刻会让"刚重连就收到字节"被误判成已经稳定。
+        self.connected_since = Some(Instant::now());
         // 新的连接发起 ⇒ 成功提示要重新补一次（见 `settle_connection_state`）。
         self.announced_open = false;
 
@@ -1350,6 +1374,8 @@ impl ComTool {
         self.channel_kind = None;
         self.event_rx = None;
         self.connected = false;
+        // 通道没了，"这一轮从什么时候开始"就无从谈起（见 `connected_since`）。
+        self.connected_since = None;
         // 提示记账位与"是否连上"同生共死：通道没了，下一次打开要重新说一遍
         // "已打开"。不清它的话，掉线重连之后那句成功提示永远不会再出现。
         self.announced_open = false;
@@ -1906,6 +1932,7 @@ impl Default for ComTool {
             reconnect_failures: 0,
             rts: false,
             dtr: false,
+            connected_since: None,
             was_focused: true,
             tx_bytes: 0,
             repeat_send: false,
@@ -3749,9 +3776,13 @@ mod tests {
     ///
     /// 这是"串口乐观置位"下唯一可靠的**成功**证据：`connected` 在串口侧是
     /// 提前置 true 的，光看它无法区分"打开了"与"待会儿才失败"。
+    ///
+    /// ⚠️ 门槛是**稳定存活过** [`STABLE_CONNECTION`]，不是"收到过字节"——
+    /// 后者会让抖动场景无限重连（见下一条测试）。所以这里先把计时起点推到门槛之前。
     #[test]
     fn receiving_bytes_resets_reconnect_failures() {
         let (mut app, handle) = connected_app();
+        app.connected_since = Some(Instant::now() - STABLE_CONNECTION - Duration::from_secs(1));
 
         handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
         app.receive_data();
@@ -3761,7 +3792,30 @@ mod tests {
         app.receive_data();
         assert_eq!(
             app.reconnect_failures, 0,
-            "收到数据即证明连接可用，计数应清零"
+            "稳定连过之后收到数据即证明这一轮已经好了，计数应清零"
+        );
+    }
+
+    /// **刚连上就收到字节不能清零**——否则"连上—立刻掉"的抖动会无限重连。
+    ///
+    /// 这是 2026-10-18 那回的根因：设备被 RTS 按在复位里时，每次重连都先吐一小段
+    /// ROM 启动日志再掉线。旧实现一收到字节就清零，退避永远停在 500 ms、次数永远
+    /// 够不到 6 次上限，端口于是被无限反复打开（别的工具一个也抢不到）。
+    #[test]
+    fn bytes_right_after_reconnect_do_not_reset_the_backoff() {
+        let (mut app, handle) = connected_app();
+
+        handle.emit(ChannelEvent::Failed("设备已拔出".to_string()));
+        app.receive_data();
+        assert_eq!(app.reconnect_failures, 1);
+
+        // 刚连上（计时起点就是刚才）就收到几个启动字节。
+        handle.emit(ChannelEvent::Bytes(vec![0x72, 0x73, 0x74]));
+        app.receive_data();
+
+        assert_eq!(
+            app.reconnect_failures, 1,
+            "连接还没稳定存活过，这几个字节不足以证明这一轮已经好了"
         );
     }
 

@@ -2699,3 +2699,40 @@ CTS"，要动 15 种语言文案，故留给所有者定，记在 `TEST_PORT_COM
 `build --release` 成功。**本轮 `src/` 零改动**（探针已删，`git diff --stat src/` 为空），
 改动只在 `TEST_PORT_COM4.md` / `HANDOVER.md` / `HISTORY_2026.md`。未运行本项目；
 未触碰受门闩保护的 COM3。
+
+## 3.42 「勾了 RTS 就无限重启、改不掉、端口还被占着」（2026-10-18 用户报告）
+
+**报告原文**：点 RTS 后 ESP32 无限重启；即使插上就重启，改不了也关不掉；串口不能解除占用。
+
+**根因分两层，缺一层都解释不全**：
+
+* **硬件层**（不是缺陷）：这类 ESP32 板的 DTR / RTS 经三极管驱动 EN 与 IO0，
+  不是流控线。esptool 时序里 `DTR=False, RTS=True ⇒ EN=低=复位保持`；界面「勾 RTS」
+  正是 assert，于是芯片被一直按在复位里。
+* **代码层**（真缺陷，两处）：
+  1. `receive.rs` 原来「收到**任意**字节就把 `reconnect_failures` 清零」。设备被按在
+     复位里时，每次重连都先吐一小段 ROM 启动日志再掉线 ⇒ 退避永远停在 500 ms、
+     `MAX_RECONNECT_ATTEMPTS = 6` 永远够不到 ⇒ **无限重连**，端口被反复打开，
+     别的工具一个也抢不到。**"无限"这个词的根在这里**，不在硬件。
+  2. `sidebar.rs` 的 RTS/DTR 勾选框与"发送闸门"共用 `channel_is_ready()` 一条判据。
+     循环里它时真时假，落到不就绪时 `add_enabled(false)` 把两个勾选框一起禁用 ⇒
+     「线还拉着、按钮全灰」，用户撤不回来。**"改不掉"的根在这里。**
+
+**修法**（均为最小改动，不改公开接口）：
+
+* `app.rs` 新增 `pub(crate) const STABLE_CONNECTION: Duration = 3 s` 与字段
+  `connected_since: Option<Instant>`（`#[serde(skip)]`，`open_connection` 置位、
+  `teardown_channel` 清空）；`receive.rs` 只在**连接稳定存活过 3 秒**后收到字节才清零。
+  抖动场景因此最多重试 6 次（0.5+1+2+4+8+16 ≈ 31.5 s）就停手。
+* `sidebar.rs` 抽出纯函数 `line_togglable(channel_ready, requested) -> bool`
+  = `channel_ready || requested`：**撤销永远可点**，只有"勾上"要求就绪。
+
+**测试**：新增 `bytes_right_after_reconnect_do_not_reset_the_backoff`（刚连上就收到字节
+不得清零）、`line_checkbox_can_always_be_unchecked`（掉线时仍能取消）；改写
+`receiving_bytes_resets_reconnect_failures`（先把 `connected_since` 推到门槛之前，
+否则它固化的正是被修掉的那条错误语义）。
+
+**验证**：`fmt --check` 干净 · `check --all-targets` 0 warning · `clippy --all-targets
+-- -D warnings` 0 warning · `test` **403 passed + 1 ignored**（+2，正是上面两条）·
+`build --release` 成功。**未做真机复验**：复现需要运行本程序，本轮未获批准；也未触碰
+受门闩保护的 COM3。硬件机理与代码路径写在 `TEST_PORT_COM4.md` §7.5。

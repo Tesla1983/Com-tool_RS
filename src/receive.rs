@@ -1465,11 +1465,20 @@ impl ComTool {
                 match event {
                     ChannelEvent::Bytes(data) => {
                         received.extend_from_slice(&data);
-                        // 真正收到数据 = 连接确实是通的：把自动重连的"连续失败次数"
-                        // 清零。串口的 `open()` 是乐观置位（`connected = true` 先于
-                        // 真实打开结果），只看 `connected` 无法区分"打开了"与"待会儿
-                        // 才失败"，而收到字节是**不可伪造**的成功证据。
-                        self.reconnect_failures = 0;
+                        // 收到字节是"确实通了"的**不可伪造**证据：串口的 `open()`
+                        // 是乐观置位（`connected = true` 先于真实打开结果），只看
+                        // `connected` 分不出"打开了"与"待会儿才失败"。
+                        //
+                        // 但**只有连接已经稳定存活过** [`crate::app::STABLE_CONNECTION`]
+                        // 才算数：设备被控制线按在复位里时，每次重连都会先吐一小段
+                        // ROM 启动日志、随即掉线；无条件清零会让退避永远停在 500 ms、
+                        // 次数永远够不到上限 ⇒ 退化成无限重连，端口在循环里被反复占住。
+                        if self
+                            .connected_since
+                            .is_some_and(|t| t.elapsed() >= crate::app::STABLE_CONNECTION)
+                        {
+                            self.reconnect_failures = 0;
+                        }
                     }
                     ChannelEvent::Failed(msg) => {
                         notes.push(format!("{noun}错误: {msg}\n"));
