@@ -1,4 +1,4 @@
-# com-tool_RS
+# Com-tool_RS
 
 一个用 Rust 重写的串口 / 网络调试上位机（GUI 助手），基于 `egui` / `eframe`。
 
